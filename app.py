@@ -238,6 +238,79 @@ LEAGUES: dict[str, list[str]] = {
         "Saint-Étienne",
         "Troyes",
     ],
+    "Paesi Bassi · Eredivisie": [
+        "ADO Den Haag",
+        "Ajax",
+        "AZ Alkmaar",
+        "Excelsior",
+        "Feyenoord",
+        "Fortuna Sittard",
+        "Go Ahead Eagles",
+        "Groningen",
+        "Heerenveen",
+        "NEC Nijmegen",
+        "PEC Zwolle",
+        "PSV Eindhoven",
+        "SC Cambuur",
+        "Sparta Rotterdam",
+        "Telstar",
+        "Twente",
+        "Utrecht",
+        "Willem II",
+    ],
+    "Portogallo · Primeira Liga": [
+        "Académico de Viseu",
+        "Alverca",
+        "Arouca",
+        "Benfica",
+        "Braga",
+        "Casa Pia",
+        "Estoril",
+        "Estrela da Amadora",
+        "Famalicão",
+        "Gil Vicente",
+        "Marítimo",
+        "Moreirense",
+        "Nacional",
+        "Porto",
+        "Rio Ave",
+        "Santa Clara",
+        "Sporting CP",
+        "Vitória de Guimarães",
+    ],
+    "Europa · UEFA Champions League": [
+        "Arsenal",
+        "Aston Villa",
+        "Atlético Madrid",
+        "Barcelona",
+        "Bayern Monaco",
+        "Borussia Dortmund",
+        "Chelsea",
+        "Club Brugge",
+        "Como",
+        "Feyenoord",
+        "Galatasaray",
+        "Inter",
+        "Juventus",
+        "Lens",
+        "Lille",
+        "Liverpool",
+        "Manchester City",
+        "Manchester United",
+        "Napoli",
+        "Porto",
+        "PSG",
+        "PSV Eindhoven",
+        "RB Lipsia",
+        "Real Betis",
+        "Real Madrid",
+        "Roma",
+        "Shakhtar Donetsk",
+        "Slavia Praga",
+        "Sporting CP",
+        "Stoccarda",
+        "Villarreal",
+    ],
 }
 
 
@@ -247,6 +320,12 @@ TOP_DIVISIONS = {
     "Spagna · La Liga",
     "Germania · Bundesliga",
     "Francia · Ligue 1",
+    "Paesi Bassi · Eredivisie",
+    "Portogallo · Primeira Liga",
+    # La Champions League riunisce club di nazioni diverse: va trattata come
+    # massima serie a tutti gli effetti, senza applicare il gap di rating
+    # riservato ai campionati di seconda fascia (vedi base_power_rating).
+    "Europa · UEFA Champions League",
 }
 
 FOOTBALL_DATA_COMPETITIONS: dict[str, str] = {
@@ -256,6 +335,9 @@ FOOTBALL_DATA_COMPETITIONS: dict[str, str] = {
     "Spagna · La Liga": "PD",
     "Germania · Bundesliga": "BL1",
     "Francia · Ligue 1": "FL1",
+    "Paesi Bassi · Eredivisie": "DED",
+    "Portogallo · Primeira Liga": "PPL",
+    "Europa · UEFA Champions League": "CL",
 }
 
 # Football-Data.org uses the current season when no season filter is sent.
@@ -270,6 +352,9 @@ MICRO_EVENT_BASELINES: dict[str, dict[str, float]] = {
     "PD": {"shots": 12.0, "shots_on_target": 4.0, "corners": 4.9, "cards": 2.4, "fouls": 13.0},
     "BL1": {"shots": 13.0, "shots_on_target": 4.5, "corners": 4.8, "cards": 2.0, "fouls": 11.5},
     "FL1": {"shots": 11.7, "shots_on_target": 3.9, "corners": 4.7, "cards": 2.2, "fouls": 12.4},
+    "DED": {"shots": 13.2, "shots_on_target": 4.6, "corners": 5.2, "cards": 1.9, "fouls": 11.0},
+    "PPL": {"shots": 11.5, "shots_on_target": 3.8, "corners": 4.5, "cards": 2.6, "fouls": 13.5},
+    "CL": {"shots": 12.6, "shots_on_target": 4.4, "corners": 4.9, "cards": 1.7, "fouls": 10.5},
 }
 
 PROMOTED_TEAMS = {
@@ -292,6 +377,12 @@ PROMOTED_TEAMS = {
     # Francia · Ligue 1
     "Troyes",
     "Le Mans",
+    # Paesi Bassi · Eredivisie
+    "ADO Den Haag",
+    "SC Cambuur",
+    # Portogallo · Primeira Liga
+    "Académico de Viseu",
+    "Marítimo",
 }
 
 
@@ -309,19 +400,37 @@ TEAM_STRENGTHS: dict[str, float] = {
     "Chelsea": 1.04,
     "Manchester United": 1.03,
     "Newcastle": 1.04,
+    "Aston Villa": 1.06,
     "Real Madrid": 1.18,
     "Barcelona": 1.15,
     "Atlético Madrid": 1.08,
     "Villarreal": 1.03,
     "Athletic Bilbao": 1.02,
+    "Real Betis": 1.00,
     "Bayern Monaco": 1.18,
     "Bayer Leverkusen": 1.13,
     "Borussia Dortmund": 1.08,
     "RB Lipsia": 1.06,
+    "Stoccarda": 1.03,
     "PSG": 1.18,
     "Monaco": 1.08,
     "Marsiglia": 1.04,
     "Lione": 1.03,
+    "Lens": 1.00,
+    "Lille": 1.02,
+    # --- Club di Champions League fuori dalle 5 leghe principali -------------
+    # Lo stesso rating vale sia in campionato sia in Champions League, così il
+    # Global Power Rating resta coerente indipendentemente dalla nazione delle
+    # due squadre in campo (vedi base_power_rating).
+    "PSV Eindhoven": 1.05,
+    "Feyenoord": 1.02,
+    "Sporting CP": 1.06,
+    "Porto": 1.05,
+    "Club Brugge": 1.00,
+    "Galatasaray": 1.02,
+    "Shakhtar Donetsk": 0.98,
+    "Slavia Praga": 0.97,
+    "Como": 0.95,
 }
 
 
