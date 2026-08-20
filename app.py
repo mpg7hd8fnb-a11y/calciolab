@@ -1389,6 +1389,68 @@ def micro_event_rows(model: MatchModel) -> list[dict[str, object]]:
     return rows
 
 
+def goal_market_probabilities(model: MatchModel, max_goals: int = 12) -> dict[str, object]:
+    """Probabilità Under/Over gol (totali di partita e per singola squadra) e
+    Goal/No Goal, calcolate dalla stessa matrice di Poisson bivariata con
+    correzione Dixon-Coles già usata per il pronostico 1X2 e i risultati
+    esatti (match_outcome_probabilities / exact_score_probabilities), per
+    piena coerenza con il resto del motore di simulazione."""
+    home_lambda = model.home_lambda
+    away_lambda = model.away_lambda
+    home_pmf = [poisson.pmf(i, home_lambda) for i in range(max_goals + 1)]
+    away_pmf = [poisson.pmf(j, away_lambda) for j in range(max_goals + 1)]
+
+    joint = [[0.0] * (max_goals + 1) for _ in range(max_goals + 1)]
+    total = 0.0
+    for i in range(max_goals + 1):
+        for j in range(max_goals + 1):
+            probability = home_pmf[i] * away_pmf[j] * dixon_coles_tau(i, j, home_lambda, away_lambda)
+            joint[i][j] = probability
+            total += probability
+    if total <= 0:
+        total = 1.0
+
+    # --- 1. Under/Over gol totali di partita (Casa + Trasferta) ----------------
+    total_over: dict[float, float] = {}
+    for line in (1.5, 2.5, 3.5, 4.5):
+        threshold = math.floor(line)
+        over_p = sum(
+            joint[i][j]
+            for i in range(max_goals + 1)
+            for j in range(max_goals + 1)
+            if i + j > threshold
+        )
+        total_over[line] = clamp(over_p / total, 0.0, 1.0)
+
+    # --- 2. Under/Over gol individuali (marginali della matrice congiunta) -----
+    home_marginal = [sum(row) / total for row in joint]
+    away_marginal = [
+        sum(joint[i][j] for i in range(max_goals + 1)) / total for j in range(max_goals + 1)
+    ]
+    home_over: dict[float, float] = {}
+    away_over: dict[float, float] = {}
+    for line in (0.5, 1.5, 2.5):
+        threshold = math.floor(line)
+        home_over[line] = clamp(sum(p for i, p in enumerate(home_marginal) if i > threshold), 0.0, 1.0)
+        away_over[line] = clamp(sum(p for j, p in enumerate(away_marginal) if j > threshold), 0.0, 1.0)
+
+    # --- 3. Goal (entrambe segnano) / No Goal -----------------------------------
+    goal_goal = clamp(
+        sum(joint[i][j] for i in range(1, max_goals + 1) for j in range(1, max_goals + 1)) / total,
+        0.0,
+        1.0,
+    )
+    no_goal = clamp(1.0 - goal_goal, 0.0, 1.0)
+
+    return {
+        "total_over": total_over,
+        "home_over": home_over,
+        "away_over": away_over,
+        "goal_goal": goal_goal,
+        "no_goal": no_goal,
+    }
+
+
 def run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, object]:
     rng = np.random.default_rng()
     home_goals = rng.poisson(model.home_lambda, n_simulations)
@@ -1772,9 +1834,10 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
     note = escape(model.engine_note) if model.engine_note else "Global Power Rating calcolato."
     st.caption(note)
 
-    tab_poisson, tab_montecarlo = st.tabs(
+    tab_poisson, tab_goal_markets, tab_montecarlo = st.tabs(
         [
             "Analisi Quote & Probabilità (Poisson)",
+            "📊 Statistiche Gol & Mercati",
             "Simulatore Monte Carlo (10.000 Partite)",
         ]
     )
@@ -1808,6 +1871,54 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
             "Modalità Inizio Stagione e slider manuali applicati a monte, e "
             "correzione Dixon-Coles sui pareggi/risultati bassi."
         )
+
+    with tab_goal_markets:
+        st.markdown(
+            "Percentuali Under/Over e Goal/No Goal calcolate dalla stessa matrice "
+            "di Poisson bivariata con correzione Dixon-Coles usata per il "
+            "pronostico 1X2 e i risultati esatti, quindi pienamente coerenti "
+            "con le altre schede."
+        )
+        markets = goal_market_probabilities(model)
+
+        st.markdown("##### Under / Over gol totali (partita)")
+        total_cols = st.columns(4)
+        for index, line in enumerate((1.5, 2.5, 3.5, 4.5)):
+            over_p = markets["total_over"][line]
+            under_p = 1 - over_p
+            with total_cols[index]:
+                st.metric(f"Over {line:.1f}", f"{over_p:.1%}")
+                st.progress(min(max(over_p, 0.0), 1.0))
+                st.caption(f"Under {line:.1f}: {under_p:.1%}")
+
+        st.markdown("##### Under / Over gol squadra Casa")
+        home_cols = st.columns(3)
+        for index, line in enumerate((0.5, 1.5, 2.5)):
+            over_p = markets["home_over"][line]
+            under_p = 1 - over_p
+            with home_cols[index]:
+                st.metric(f"{home} · Over {line:.1f}", f"{over_p:.1%}")
+                st.progress(min(max(over_p, 0.0), 1.0))
+                st.caption(f"Under {line:.1f}: {under_p:.1%}")
+
+        st.markdown("##### Under / Over gol squadra Trasferta")
+        away_cols = st.columns(3)
+        for index, line in enumerate((0.5, 1.5, 2.5)):
+            over_p = markets["away_over"][line]
+            under_p = 1 - over_p
+            with away_cols[index]:
+                st.metric(f"{away} · Over {line:.1f}", f"{over_p:.1%}")
+                st.progress(min(max(over_p, 0.0), 1.0))
+                st.caption(f"Under {line:.1f}: {under_p:.1%}")
+
+        st.markdown("##### Goal / No Goal (entrambe le squadre segnano)")
+        gg_col, ng_col = st.columns(2)
+        with gg_col:
+            st.metric("Goal (GG)", f"{markets['goal_goal']:.1%}")
+            st.progress(min(max(markets["goal_goal"], 0.0), 1.0))
+        with ng_col:
+            st.metric("No Goal (NG)", f"{markets['no_goal']:.1%}")
+            st.progress(min(max(markets["no_goal"], 0.0), 1.0))
 
     with tab_montecarlo:
         st.markdown(
