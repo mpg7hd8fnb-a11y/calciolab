@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 import os
-from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from html import escape
@@ -492,6 +491,37 @@ CARD_UNDERDOG_BONUS = 0.25
 """Quota aggiuntiva di cartellini per la squadra più debole, che difende più
 a lungo e commette più falli tattici contro un avversario superiore."""
 
+# --- Time-Decay per i dati storici -------------------------------------------
+PREVIOUS_SEASON_MAX_WEIGHT = 0.35
+"""Peso massimo (35%) assegnato alle partite della STAGIONE PRECEDENTE nel
+calcolo delle medie (tiri, xG, forma). Le partite della stagione corrente
+valgono sempre il 100% (peso 1.0)."""
+
+# --- Modalità Inizio Stagione --------------------------------------------------
+EARLY_SEASON_MATCHDAY_THRESHOLD = 5
+"""Sotto questa soglia di partite REALI giocate nella stagione corrente, la
+squadra è considerata in 'Modalità Inizio Stagione': i dati osservati vengono
+mescolati con il Power Index teorico di base (vedi blend_with_theoretical)."""
+
+LEAGUE_AVERAGE_GOALS_PER_TEAM = 1.35
+"""Gol attesi 'di libro' per una squadra media in una singola partita di
+massima serie: ancoraggio del Power Index teorico di base a inizio stagione."""
+
+# --- Slider manuali "Impatto Mercato" e "Impatto Infortuni" -------------------
+MARKET_FACTOR_BOUNDS = (-0.20, 0.20)
+"""Range consentito per lo slider 'Fattore Mercato' (-20% / +20%)."""
+
+INJURY_FACTOR_BOUNDS = (-0.30, 0.30)
+"""Range consentito per lo slider 'Impatto Infortuni / Titolari Assenti'
+(-30% / +30%)."""
+
+# --- Correzione Dixon-Coles -----------------------------------------------------
+DIXON_COLES_RHO = -0.13
+"""Parametro ρ di Dixon-Coles (Dixon & Coles, 1997): corregge la Poisson
+bivariata indipendente sui 4 risultati a basso punteggio (0-0, 1-0, 0-1, 1-1),
+dove nella realtà i pareggi/risultati bassi sono leggermente più frequenti di
+quanto preveda il semplice prodotto di due Poisson indipendenti."""
+
 
 def base_power_rating(team: str, league: str) -> float:
     """Componente strutturale del Global Power Rating, prima del Form Factor.
@@ -542,19 +572,65 @@ def rating_scaling_factors(rating_diff: float, damping: float = 1.0) -> tuple[fl
     return boost, suppression
 
 
+def theoretical_expected_goals(team: str, league: str) -> float:
+    """Gol attesi 'di libro' derivati solo dal rating strutturale (senza dati
+    stagionali osservati): il Power Index teorico di base usato dalla
+    Modalità Inizio Stagione quando i dati reali disponibili sono pochi."""
+    rating_gap = base_power_rating(team, league) - BASE_RATING
+    return LEAGUE_AVERAGE_GOALS_PER_TEAM * math.exp(RATING_LAMBDA_SENSITIVITY * rating_gap)
+
+
+def blend_with_theoretical(observed_value: float, theoretical_value: float, matches_played: float) -> float:
+    """Modalità Inizio Stagione: con meno di EARLY_SEASON_MATCHDAY_THRESHOLD
+    partite REALI nella stagione corrente, mescola il valore osservato con
+    quello teorico (Power Index di base), dando sempre più peso ai dati reali
+    man mano che le giornate si accumulano (confidenza lineare 0→1)."""
+    confidence = clamp(matches_played / EARLY_SEASON_MATCHDAY_THRESHOLD, 0.0, 1.0)
+    return confidence * observed_value + (1 - confidence) * theoretical_value
+
+
+def is_early_season_match(home_stats: "LiveTeamStats", away_stats: "LiveTeamStats") -> bool:
+    """True se almeno una delle due squadre ha giocato meno di
+    EARLY_SEASON_MATCHDAY_THRESHOLD partite REALI nella stagione corrente."""
+    return (
+        home_stats.current_season_matches < EARLY_SEASON_MATCHDAY_THRESHOLD
+        or away_stats.current_season_matches < EARLY_SEASON_MATCHDAY_THRESHOLD
+    )
+
+
+def dixon_coles_tau(
+    home_goals: int, away_goals: int, home_lambda: float, away_lambda: float, rho: float = DIXON_COLES_RHO
+) -> float:
+    """Fattore correttivo di Dixon-Coles (Dixon & Coles, 1997) per i quattro
+    risultati a basso punteggio dove la Poisson bivariata indipendente è
+    sistematicamente imprecisa: 0-0, 1-0, 0-1, 1-1. Per tutti gli altri
+    risultati il fattore è 1.0 (nessuna correzione)."""
+    if home_goals == 0 and away_goals == 0:
+        return 1 - (home_lambda * away_lambda * rho)
+    if home_goals == 0 and away_goals == 1:
+        return 1 + (home_lambda * rho)
+    if home_goals == 1 and away_goals == 0:
+        return 1 + (away_lambda * rho)
+    if home_goals == 1 and away_goals == 1:
+        return 1 - rho
+    return 1.0
+
+
 def match_outcome_probabilities(
-    home_lambda: float, away_lambda: float, max_goals: int = 10
+    home_lambda: float, away_lambda: float, max_goals: int = 10, rho: float = DIXON_COLES_RHO
 ) -> tuple[float, float, float]:
     """Probabilità 1X2 (vittoria casa, pareggio, vittoria trasferta) calcolate
-    analiticamente dalla matrice di Poisson bivariata su home_lambda/away_lambda:
-    la stessa distribuzione usata per le tabelle micro-eventi e per la
-    simulazione Monte Carlo, a garanzia di coerenza fra tutte le viste."""
+    dalla matrice di Poisson bivariata su home_lambda/away_lambda, con la
+    correzione di Dixon-Coles applicata ai 4 risultati a basso punteggio per
+    una stima più accurata dei pareggi: la stessa distribuzione (Poisson +
+    Dixon-Coles) usata anche dalla simulazione Monte Carlo, a garanzia di
+    coerenza fra tutte le viste dell'app."""
     home_pmf = [poisson.pmf(i, home_lambda) for i in range(max_goals + 1)]
     away_pmf = [poisson.pmf(j, away_lambda) for j in range(max_goals + 1)]
     home_win = draw = away_win = 0.0
     for i, p_home in enumerate(home_pmf):
         for j, p_away in enumerate(away_pmf):
-            joint = p_home * p_away
+            joint = p_home * p_away * dixon_coles_tau(i, j, home_lambda, away_lambda, rho)
             if i > j:
                 home_win += joint
             elif i == j:
@@ -567,6 +643,29 @@ def match_outcome_probabilities(
     if total <= 0:
         return 1 / 3, 1 / 3, 1 / 3
     return home_win / total, draw / total, away_win / total
+
+
+def exact_score_probabilities(
+    home_lambda: float, away_lambda: float, max_goals: int = 6, rho: float = DIXON_COLES_RHO
+) -> list[tuple[str, float]]:
+    """Probabilità dei risultati esatti (Poisson bivariata + correzione
+    Dixon-Coles), ordinate per probabilità decrescente: stima ultra-accurata
+    dei punteggi a basso score (0-0, 1-0, 0-1, 1-1) e degli altri risultati."""
+    cells: list[tuple[str, float]] = []
+    total = 0.0
+    for i in range(max_goals + 1):
+        for j in range(max_goals + 1):
+            probability = poisson.pmf(i, home_lambda) * poisson.pmf(j, away_lambda)
+            probability *= dixon_coles_tau(i, j, home_lambda, away_lambda, rho)
+            cells.append((f"{i}-{j}", probability))
+            total += probability
+    if total <= 0:
+        return []
+    return sorted(
+        ((score, probability / total) for score, probability in cells),
+        key=lambda item: item[1],
+        reverse=True,
+    )
 
 
 @dataclass(frozen=True)
@@ -591,7 +690,16 @@ class MatchModel:
     away_win_prob: float = 1 / 3
     engine_note: str = ""
     """Riepilogo testuale dei correttivi (gap di rating, fattore campo, forma
-    recente) applicati dal motore per questo match."""
+    recente, slider manuali, Dixon-Coles) applicati dal motore per il match."""
+    early_season_warning: bool = False
+    """True se una delle due squadre ha meno di EARLY_SEASON_MATCHDAY_THRESHOLD
+    partite reali nella stagione corrente (Modalità Inizio Stagione attiva)."""
+    home_current_season_matches: int = 0
+    away_current_season_matches: int = 0
+    manual_factor_home: float = 0.0
+    """Somma di Fattore Mercato + Impatto Infortuni applicata alla squadra di casa."""
+    manual_factor_away: float = 0.0
+    """Somma di Fattore Mercato + Impatto Infortuni applicata alla squadra ospite."""
 
 
 
@@ -603,9 +711,9 @@ class FootballDataError(RuntimeError):
 class LiveTeamStats:
     team_id: int
     team_name: str
-    matches: int
-    home_matches: int
-    away_matches: int
+    matches: float
+    home_matches: float
+    away_matches: float
     goals_for: float
     goals_against: float
     home_goals_for: float
@@ -621,6 +729,9 @@ class LiveTeamStats:
     """Ultimi risultati (più recente per primo): 'V' vittoria, 'N' pareggio, 'P' sconfitta."""
     form_factor: float = 1.0
     """Moltiplicatore dinamico ricavato dal Form Factor (vedi compute_form_factor)."""
+    current_season_matches: int = 0
+    """Partite REALI (non pesate) disputate nella stagione in corso: usato per
+    la Modalità Inizio Stagione (vedi EARLY_SEASON_MATCHDAY_THRESHOLD)."""
 
 
 def current_season_start() -> int:
@@ -639,7 +750,7 @@ def season_label(season_start: int) -> str:
 
 
 def competition_season_status(league: str) -> str:
-    season_start, teams, matches = fetch_competition_snapshot(league)
+    season_start, teams, matches, _crests = fetch_competition_snapshot(league)
     if not matches and any(team_id < 0 for team_id, _ in teams):
         return f"stagione {season_label(season_start)} · lista di riserva (API non disponibile)"
     return f"stagione {season_label(season_start)} · corrente"
@@ -699,6 +810,23 @@ def _parse_teams(payload: dict[str, object]) -> tuple[tuple[int, str], ...]:
     return tuple(teams)
 
 
+def _parse_team_crests(payload: dict[str, object]) -> dict[str, str]:
+    """Estrae il campo 'crest' (URL dello stemma ufficiale) di ogni squadra,
+    usato per l'header della dashboard con i loghi dei club."""
+    response = payload.get("teams", [])
+    if not isinstance(response, list):
+        return {}
+    crest_map: dict[str, str] = {}
+    for team in response:
+        if not isinstance(team, dict):
+            continue
+        name = team.get("name") or team.get("shortName")
+        crest = team.get("crest")
+        if isinstance(name, str) and isinstance(crest, str) and crest:
+            crest_map[name] = crest
+    return crest_map
+
+
 def _parse_finished_matches(payload: dict[str, object]) -> tuple[dict[str, object], ...]:
     response = payload.get("matches", [])
     if not isinstance(response, list):
@@ -738,7 +866,7 @@ def _fallback_team_snapshot(league: str) -> tuple[tuple[int, str], ...]:
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_competition_snapshot(
     league: str,
-) -> tuple[int, tuple[tuple[int, str], ...], tuple[dict[str, object], ...]]:
+) -> tuple[int, tuple[tuple[int, str], ...], tuple[dict[str, object], ...], dict[str, str]]:
     competition_code = FOOTBALL_DATA_COMPETITIONS[league]
     season_start = current_season_start()
     try:
@@ -751,19 +879,27 @@ def fetch_competition_snapshot(
             raise FootballDataError(
                 f"Football-Data.org non ha restituito le squadre 2026/27 per {league}."
             )
-        return season_start, teams, _parse_finished_matches(matches_payload)
+        crest_map = _parse_team_crests(teams_payload)
+        return season_start, teams, _parse_finished_matches(matches_payload), crest_map
     except FootballDataError:
         fallback_teams = _fallback_team_snapshot(league)
         if len(fallback_teams) < 2:
             raise
         # L'API non è disponibile: continuiamo con la lista di riserva delle
-        # squadre della nuova stagione, senza calendario/risultati live.
-        return season_start, fallback_teams, ()
+        # squadre della nuova stagione, senza calendario/risultati live né loghi.
+        return season_start, fallback_teams, (), {}
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_league_teams(league: str) -> tuple[tuple[int, str], ...]:
     return fetch_competition_snapshot(league)[1]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_team_crests(league: str) -> dict[str, str]:
+    """URL degli stemmi ufficiali per ogni squadra del campionato (se
+    disponibili da Football-Data.org)."""
+    return fetch_competition_snapshot(league)[3]
 
 
 def _number(value: object) -> float | None:
@@ -779,7 +915,7 @@ def _number(value: object) -> float | None:
     return None
 
 
-def _average(total: float, count: int, label: str, team_name: str) -> float:
+def _average(total: float, count: float, label: str, team_name: str) -> float:
     if count <= 0:
         raise FootballDataError(f"Dati insufficienti per {label} di {team_name}.")
     return total / count
@@ -841,20 +977,10 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
             f"La squadra {team_name} non è disponibile in Football-Data.org."
         )
 
-    fixtures = [
-        match
-        for match in fetch_league_matches(league)
-        if _match_has_final_score(match)
-        and (
-            match["homeTeam"].get("id") == team_id
-            or match["awayTeam"].get("id") == team_id
-        )
-    ][:8]
-    if not fixtures:
-        previous_matches = fetch_previous_season_matches(league)
-        fixtures = [
+    def _team_fixtures(matches: tuple[dict[str, object], ...]) -> list[dict[str, object]]:
+        return [
             match
-            for match in previous_matches
+            for match in matches
             if _match_has_final_score(match)
             and (
                 match["homeTeam"].get("id") == team_id
@@ -862,18 +988,35 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
                 or match["homeTeam"].get("name") == team_name
                 or match["awayTeam"].get("name") == team_name
             )
-        ][:8]
+        ]
+
+    current_fixtures = _team_fixtures(fetch_league_matches(league))[:8]
+    try:
+        previous_fixtures = _team_fixtures(fetch_previous_season_matches(league))[:8]
+    except FootballDataError:
+        previous_fixtures = []
+
+    # Partite REALI (non pesate) disputate nella stagione in corso: base per
+    # la Modalità Inizio Stagione (vedi EARLY_SEASON_MATCHDAY_THRESHOLD).
+    current_season_matches = len(current_fixtures)
+
+    # --- Time-Decay: stagione corrente peso 1.0, precedente al massimo
+    # PREVIOUS_SEASON_MAX_WEIGHT (35%). La stagione corrente viene prima nel
+    # pool, così ha sempre la priorità anche nel calcolo del Form Factor.
+    weighted_pool: list[tuple[dict[str, object], float]] = [
+        (fixture, 1.0) for fixture in current_fixtures
+    ] + [(fixture, PREVIOUS_SEASON_MAX_WEIGHT) for fixture in previous_fixtures]
 
     goals_for = goals_against = 0.0
     home_goals_for = home_goals_against = 0.0
     away_goals_for = away_goals_against = 0.0
-    home_matches = away_matches = 0
+    home_matches = away_matches = 0.0
     recent_results: list[str] = []
     recent_points: list[int] = []
+    recent_weights: list[float] = []
 
-    for fixture_item in fixtures:
+    for fixture_item, weight in weighted_pool:
         home_data = fixture_item.get("homeTeam", {})
-        away_data = fixture_item.get("awayTeam", {})
         score = fixture_item.get("score", {})
         full_time = score.get("fullTime", {}) if isinstance(score, dict) else {}
         is_home = home_data.get("id") == team_id
@@ -882,19 +1025,21 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
         if scored is None or conceded is None:
             continue
 
-        goals_for += scored
-        goals_against += conceded
+        goals_for += scored * weight
+        goals_against += conceded * weight
         if is_home:
-            home_matches += 1
-            home_goals_for += scored
-            home_goals_against += conceded
+            home_matches += weight
+            home_goals_for += scored * weight
+            home_goals_against += conceded * weight
         else:
-            away_matches += 1
-            away_goals_for += scored
-            away_goals_against += conceded
+            away_matches += weight
+            away_goals_for += scored * weight
+            away_goals_against += conceded * weight
 
-        # Form Factor: tiene traccia solo delle ultime FORM_MATCHES_WINDOW
-        # partite (le fixtures sono già ordinate dalla più recente).
+        # Form Factor: le prime FORM_MATCHES_WINDOW partite del pool (la
+        # stagione corrente è in testa, quindi ha sempre la priorità; la
+        # stagione precedente riempie la finestra solo a inizio stagione, con
+        # peso ridotto tramite recent_weights).
         if len(recent_points) < FORM_MATCHES_WINDOW:
             if scored > conceded:
                 recent_results.append("V")
@@ -905,12 +1050,15 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
             else:
                 recent_results.append("P")
                 recent_points.append(0)
+            recent_weights.append(weight)
 
     matches = home_matches + away_matches
     if matches == 0:
+        # Nessuna partita utilizzabile né in stagione corrente né in quella
+        # precedente per questa squadra: fallback estremo sulla media di
+        # tutte le partite della stagione precedente nel campionato.
         previous_matches = fetch_previous_season_matches(league)
-        scored_values = []
-        conceded_values = []
+        scored_values: list[float] = []
         for match in previous_matches:
             score = match.get("score", {})
             full_time = score.get("fullTime", {}) if isinstance(score, dict) else {}
@@ -918,27 +1066,25 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
             conceded = _number(full_time.get("away"))
             if scored is not None and conceded is not None:
                 scored_values.extend((scored, conceded))
-                conceded_values.extend((conceded, scored))
         if not scored_values:
             raise FootballDataError(
                 f"Football-Data.org non ha dati storici utilizzabili per {team_name}."
             )
         neutral_average = sum(scored_values) / len(scored_values)
-        matches = 8
-        home_matches = away_matches = 4
+        matches = 8.0
+        home_matches = away_matches = 4.0
         goals_for = goals_against = neutral_average * matches
         home_goals_for = away_goals_for = neutral_average * 4
         home_goals_against = away_goals_against = neutral_average * 4
-        # Nessuna partita nella competizione corrente: niente serie di
-        # risultati recenti da pesare, il Form Factor resta neutro (1.0).
         recent_results = []
         recent_points = []
+        recent_weights = []
 
     baseline = MICRO_EVENT_BASELINES[FOOTBALL_DATA_COMPETITIONS[league]]
     # The provider has no micro-event endpoint. Scale the transparent baseline
     # slightly with recent scoring, while keeping the source distinction clear.
     scoring_factor = clamp(0.88 + (goals_for / matches) * 0.08, 0.88, 1.12)
-    form_factor = compute_form_factor(recent_points)
+    form_factor = compute_form_factor(recent_points, recent_weights)
 
     return LiveTeamStats(
         team_id=team_id,
@@ -959,6 +1105,7 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
         fouls=baseline["fouls"] * matches,
         recent_form=tuple(recent_results),
         form_factor=form_factor,
+        current_season_matches=current_season_matches,
     )
 
 
@@ -982,28 +1129,46 @@ FORM_FACTOR_MIN = 0.85
 FORM_FACTOR_MAX = 1.15
 
 
-def compute_form_factor(recent_points: Sequence[int]) -> float:
+def compute_form_factor(
+    recent_points: Sequence[int], season_weights: Sequence[float] | None = None
+) -> float:
     """Form Factor dinamico: calcola un moltiplicatore intorno a 1.0 pesando
     i punti (Vittoria=3, Pareggio=1, Sconfitta=0) delle ultime partite con
-    FORM_RECENCY_WEIGHTS. Una squadra in ottima forma recente arriva fino a
+    FORM_RECENCY_WEIGHTS, ulteriormente moltiplicati per `season_weights`
+    (Time-Decay: 1.0 per la stagione corrente, PREVIOUS_SEASON_MAX_WEIGHT per
+    la precedente), così un risultato della scorsa stagione pesa meno di uno
+    di questa. Una squadra in ottima forma recente arriva fino a
     FORM_FACTOR_MAX, una in crisi di risultati scende fino a FORM_FACTOR_MIN.
     Senza dati recenti restituisce 1.0 (nessuna correzione)."""
     if not recent_points:
         return 1.0
-    weights = FORM_RECENCY_WEIGHTS[: len(recent_points)]
-    weighted_points = sum(points * weight for points, weight in zip(recent_points, weights))
-    weighted_max = sum(3 * weight for weight in weights)
+    recency_weights = FORM_RECENCY_WEIGHTS[: len(recent_points)]
+    season_weights = season_weights if season_weights is not None else [1.0] * len(recent_points)
+    effective_weights = [rw * sw for rw, sw in zip(recency_weights, season_weights)]
+    weighted_points = sum(points * weight for points, weight in zip(recent_points, effective_weights))
+    weighted_max = sum(3 * weight for weight in effective_weights)
     if weighted_max <= 0:
         return 1.0
     ratio = clamp(weighted_points / weighted_max, 0.0, 1.0)
     return FORM_FACTOR_MIN + (FORM_FACTOR_MAX - FORM_FACTOR_MIN) * ratio
 
 
-def build_match_model(league: str, home: str, away: str) -> MatchModel:
+
+def build_match_model(
+    league: str,
+    home: str,
+    away: str,
+    market_factor_home: float = 0.0,
+    market_factor_away: float = 0.0,
+    injury_factor_home: float = 0.0,
+    injury_factor_away: float = 0.0,
+) -> MatchModel:
     home_stats = fetch_team_live_stats(league, home)
     away_stats = fetch_team_live_stats(league, away)
 
-    # --- 1. Statistiche osservate (baseline "grezza") --------------------------
+    # --- 1. Statistiche osservate, già pesate con Time-Decay in
+    # fetch_team_live_stats: stagione corrente 100%, precedente al massimo
+    # PREVIOUS_SEASON_MAX_WEIGHT. -------------------------------------------
     home_goal_for = (
         _average(home_stats.home_goals_for, home_stats.home_matches, "gol segnati in casa", home)
         if home_stats.home_matches
@@ -1048,21 +1213,59 @@ def build_match_model(league: str, home: str, away: str) -> MatchModel:
     fouls = _average(home_stats.fouls, home_stats.matches, "falli", home)
     fouls += _average(away_stats.fouls, away_stats.matches, "falli", away)
 
-    # --- 2. Global Power Rating (strutturale + Form Factor) --------------------
-    home_rating = global_power_rating(home, league, home_stats.form_factor)
-    away_rating = global_power_rating(away, league, away_stats.form_factor)
+    # --- 2. Modalità Inizio Stagione: con meno di EARLY_SEASON_MATCHDAY_
+    # THRESHOLD partite REALI in questa stagione, mescola il dato osservato
+    # con il Power Index teorico di base (nessun dato stagionale). -----------
+    early_season = is_early_season_match(home_stats, away_stats)
+    home_lambda_raw = blend_with_theoretical(
+        home_lambda_raw, theoretical_expected_goals(home, league), home_stats.current_season_matches
+    )
+    away_lambda_raw = blend_with_theoretical(
+        away_lambda_raw, theoretical_expected_goals(away, league), away_stats.current_season_matches
+    )
+
+    # --- 3. Slider manuali "Fattore Mercato" e "Impatto Infortuni/Titolari
+    # Assenti": la percentuale scelta nella sidebar incrementa/riduce sia il
+    # Power Index sia la stima di attacco/difesa attesa PRIMA di calcolare
+    # xG, tiri e probabilità. La squadra rinforzata segna di più (attacco) e
+    # concede meno (difesa migliorata riduce l'attacco avversario), e
+    # viceversa per un fattore negativo. -------------------------------------
+    manual_factor_home = clamp(market_factor_home, *MARKET_FACTOR_BOUNDS) + clamp(
+        injury_factor_home, *INJURY_FACTOR_BOUNDS
+    )
+    manual_factor_away = clamp(market_factor_away, *MARKET_FACTOR_BOUNDS) + clamp(
+        injury_factor_away, *INJURY_FACTOR_BOUNDS
+    )
+
+    home_lambda_raw *= (1 + manual_factor_home) * (1 - manual_factor_away)
+    away_lambda_raw *= (1 + manual_factor_away) * (1 - manual_factor_home)
+    home_shots_raw *= (1 + manual_factor_home) * (1 - manual_factor_away)
+    away_shots_raw *= (1 + manual_factor_away) * (1 - manual_factor_home)
+    home_sot_raw *= (1 + manual_factor_home) * (1 - manual_factor_away)
+    away_sot_raw *= (1 + manual_factor_away) * (1 - manual_factor_home)
+
+    home_lambda_raw = max(home_lambda_raw, 0.02)
+    away_lambda_raw = max(away_lambda_raw, 0.02)
+    home_shots_raw = max(home_shots_raw, 1.0)
+    away_shots_raw = max(away_shots_raw, 1.0)
+    home_sot_raw = max(home_sot_raw, 0.3)
+    away_sot_raw = max(away_sot_raw, 0.3)
+
+    # --- 4. Global Power Rating (strutturale + Form Factor + slider manuali) -
+    home_rating = global_power_rating(home, league, home_stats.form_factor) + manual_factor_home * RATING_SCALE
+    away_rating = global_power_rating(away, league, away_stats.form_factor) + manual_factor_away * RATING_SCALE
 
     # Il fattore campo entra come bonus di rating solo per il calcolo di questo
     # match: pesa quindi su OGNI metrica derivata dal differenziale, non solo
     # sui gol attesi, garantendo coerenza fra tutte le tabelle dell'app.
     rating_diff = (home_rating + HOME_ADVANTAGE_RATING) - away_rating
 
-    # --- 3. Gol attesi (xG): piena sensibilità al gap di rating -----------------
+    # --- 5. Gol attesi (xG): piena sensibilità al gap di rating -----------------
     goal_boost, goal_suppress = rating_scaling_factors(rating_diff, damping=1.0)
     home_lambda = clamp(home_lambda_raw * goal_boost, 0.05, 5.5)
     away_lambda = clamp(away_lambda_raw * goal_suppress, 0.05, 5.0)
 
-    # --- 4. Tiri totali/in porta: dipendono dal rating offensivo/difensivo -----
+    # --- 6. Tiri totali/in porta: dipendono dal rating offensivo/difensivo -----
     # relativo, con sensibilità smorzata rispetto ai gol (i tiri riflettono la
     # pressione di gioco più che l'efficienza sotto porta).
     shot_boost, shot_suppress = rating_scaling_factors(rating_diff, damping=SHOT_RATING_DAMPING)
@@ -1072,11 +1275,11 @@ def build_match_model(league: str, home: str, away: str) -> MatchModel:
     away_sot = away_sot_raw * shot_suppress
     shots_total = home_shots + away_shots
 
-    # --- 5. Corner: legati anche al possesso, sensibilità ulteriormente smorzata
+    # --- 7. Corner: legati anche al possesso, sensibilità ulteriormente smorzata
     corner_boost, corner_suppress = rating_scaling_factors(rating_diff, damping=CORNER_RATING_DAMPING)
     corners_total = home_corners_raw * corner_boost + away_corners_raw * corner_suppress
 
-    # --- 6. Cartellini: la squadra in difficoltà commette più falli tattici ----
+    # --- 8. Cartellini: la squadra in difficoltà commette più falli tattici ----
     normalized_gap = clamp(abs(rating_diff) / RATING_SCALE, 0.0, 1.0)
     if rating_diff >= 0:
         home_cards = home_cards_raw * (1 - 0.5 * CARD_UNDERDOG_BONUS * normalized_gap)
@@ -1087,7 +1290,7 @@ def build_match_model(league: str, home: str, away: str) -> MatchModel:
     home_cards = clamp(home_cards, 0.1, 6.0)
     away_cards = clamp(away_cards, 0.1, 6.0)
 
-    # --- 7. Probabilità 1X2: matrice di Poisson bivariata su home/away lambda --
+    # --- 9. Probabilità 1X2: Poisson bivariata + correzione Dixon-Coles --------
     # Stessa distribuzione usata dalle tabelle micro-eventi e dalla simulazione
     # Monte Carlo, cosicché ogni vista dell'app racconti lo stesso match.
     home_win_prob, draw_prob, away_win_prob = match_outcome_probabilities(home_lambda, away_lambda)
@@ -1095,12 +1298,22 @@ def build_match_model(league: str, home: str, away: str) -> MatchModel:
     engine_note = (
         f"Global Power Rating: {home} {home_rating:.0f} (+{HOME_ADVANTAGE_RATING:.0f} campo) "
         f"vs {away} {away_rating:.0f} · gap effettivo {rating_diff:+.0f} punti · "
-        f"xG ×{goal_boost:.2f}/×{goal_suppress:.2f} · tiri ×{shot_boost:.2f}/×{shot_suppress:.2f}"
+        f"xG ×{goal_boost:.2f}/×{goal_suppress:.2f} · tiri ×{shot_boost:.2f}/×{shot_suppress:.2f} · "
+        f"correzione Dixon-Coles ρ={DIXON_COLES_RHO:+.2f}"
     )
     if home_stats.recent_form:
         engine_note += f" · forma {home}: {''.join(home_stats.recent_form)}"
     if away_stats.recent_form:
         engine_note += f" · forma {away}: {''.join(away_stats.recent_form)}"
+    if manual_factor_home:
+        engine_note += f" · slider {home}: {manual_factor_home:+.0%}"
+    if manual_factor_away:
+        engine_note += f" · slider {away}: {manual_factor_away:+.0%}"
+    if early_season:
+        engine_note += (
+            f" · ⚠️ Inizio Stagione: {home} {home_stats.current_season_matches} "
+            f"partite, {away} {away_stats.current_season_matches} partite disputate finora"
+        )
 
     return MatchModel(
         home_lambda=home_lambda,
@@ -1120,6 +1333,11 @@ def build_match_model(league: str, home: str, away: str) -> MatchModel:
         draw_prob=draw_prob,
         away_win_prob=away_win_prob,
         engine_note=engine_note,
+        early_season_warning=early_season,
+        home_current_season_matches=home_stats.current_season_matches,
+        away_current_season_matches=away_stats.current_season_matches,
+        manual_factor_home=manual_factor_home,
+        manual_factor_away=manual_factor_away,
     )
 
 
@@ -1184,27 +1402,45 @@ def run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, 
     total_cards = home_cards + away_cards
     fouls = rng.poisson(model.fouls_lambda, n_simulations)
 
-    scores = Counter(zip(home_goals.tolist(), away_goals.tolist()))
-    top_scores = scores.most_common(5)
+    # --- Correzione Dixon-Coles sulla simulazione Monte Carlo -------------------
+    # Ogni partita simulata riceve un peso: 1.0 di default, oppure il fattore
+    # tau di Dixon-Coles per i 4 risultati a basso punteggio (0-0, 1-0, 0-1,
+    # 1-1), così le frequenze pesate restano coerenti con la stessa
+    # correzione applicata in match_outcome_probabilities.
+    weights = np.ones(n_simulations)
+    for h_goals, a_goals in ((0, 0), (0, 1), (1, 0), (1, 1)):
+        cell_mask = (home_goals == h_goals) & (away_goals == a_goals)
+        weights[cell_mask] = dixon_coles_tau(h_goals, a_goals, model.home_lambda, model.away_lambda)
+    total_weight = float(weights.sum())
+
+    weighted_scores: dict[tuple[int, int], float] = {}
+    for h_goal, a_goal, weight in zip(home_goals.tolist(), away_goals.tolist(), weights.tolist()):
+        key = (h_goal, a_goal)
+        weighted_scores[key] = weighted_scores.get(key, 0.0) + weight
+    top_scores = sorted(weighted_scores.items(), key=lambda item: item[1], reverse=True)[:5]
     score_rows = [
         {
-            "Risultato esatto": f"{home}-{away}",
-            "Simulazioni": count,
-            "Probabilità": count / n_simulations,
+            "Risultato esatto": f"{h_goal}-{a_goal}",
+            "Simulazioni": int(round(weight)),
+            "Probabilità": weight / total_weight,
         }
-        for (home, away), count in top_scores
+        for (h_goal, a_goal), weight in top_scores
     ]
 
-    # Frequenze 1X2 osservate nelle 10.000 simulazioni: servono a validare
-    # che la probabilità analitica (Poisson bivariata) e quella simulata dal
-    # motore Monte Carlo raccontino lo stesso match.
-    home_wins = int((home_goals > away_goals).sum())
-    draws = int((home_goals == away_goals).sum())
-    away_wins = int((home_goals < away_goals).sum())
+    # Frequenze 1X2 (pesate Dixon-Coles) osservate nelle 10.000 simulazioni:
+    # servono a validare che la probabilità analitica (Poisson bivariata +
+    # Dixon-Coles) e quella simulata dal motore Monte Carlo raccontino lo
+    # stesso match.
+    home_win_mask = home_goals > away_goals
+    draw_mask = home_goals == away_goals
+    away_win_mask = home_goals < away_goals
+    home_wins = float(weights[home_win_mask].sum())
+    draws = float(weights[draw_mask].sum())
+    away_wins = float(weights[away_win_mask].sum())
     outcome_rows = [
-        {"Esito": "1 (vittoria casa)", "Simulazioni": home_wins, "Probabilità": home_wins / n_simulations},
-        {"Esito": "X (pareggio)", "Simulazioni": draws, "Probabilità": draws / n_simulations},
-        {"Esito": "2 (vittoria trasferta)", "Simulazioni": away_wins, "Probabilità": away_wins / n_simulations},
+        {"Esito": "1 (vittoria casa)", "Simulazioni": int(round(home_wins)), "Probabilità": home_wins / total_weight},
+        {"Esito": "X (pareggio)", "Simulazioni": int(round(draws)), "Probabilità": draws / total_weight},
+        {"Esito": "2 (vittoria trasferta)", "Simulazioni": int(round(away_wins)), "Probabilità": away_wins / total_weight},
     ]
 
     key_events = [
@@ -1269,9 +1505,9 @@ def render_probability_table(frame: pd.DataFrame) -> str:
 
 
 def render_outcome_table(model: MatchModel, home: str, away: str) -> str:
-    """Tabella Pronostici 1X2 con quote implicite, calcolata dalla stessa
-    matrice di Poisson bivariata (home_lambda/away_lambda) usata per le
-    tabelle micro-eventi e per la simulazione Monte Carlo."""
+    """Tabella Pronostici 1X2 con quote implicite (Poisson bivariata +
+    Dixon-Coles), a complemento delle metriche in evidenza mostrate con
+    st.metric nella dashboard."""
     rows = [
         (f"1 · Vittoria {home}", model.home_win_prob),
         ("X · Pareggio", model.draw_prob),
@@ -1296,66 +1532,35 @@ def render_outcome_table(model: MatchModel, home: str, away: str) -> str:
     )
 
 
-def render_match_summary(league: str, home: str, away: str) -> str:
+def try_build_match_model(
+    league: str,
+    home: str,
+    away: str,
+    market_factor_home: float = 0.0,
+    market_factor_away: float = 0.0,
+    injury_factor_home: float = 0.0,
+    injury_factor_away: float = 0.0,
+) -> tuple[MatchModel | None, str]:
+    """Costruisce il MatchModel (unico motore di simulazione) gestendo in modo
+    uniforme i casi di squadre mancanti/uguali o dati Football-Data.org non
+    disponibili. Restituisce (None, messaggio_errore) in caso di problemi."""
     if not home or not away:
-        return '<p style="color:#64748b">Carica le squadre da Football-Data.org per iniziare.</p>'
+        return None, "Carica le squadre da Football-Data.org per iniziare."
     if home == away:
-        return '<p style="color:#b91c1c;font-weight:600">Seleziona due squadre diverse.</p>'
-
+        return None, "Seleziona due squadre diverse."
     try:
-        model = build_match_model(league, home, away)
+        model = build_match_model(
+            league,
+            home,
+            away,
+            market_factor_home=market_factor_home,
+            market_factor_away=market_factor_away,
+            injury_factor_home=injury_factor_home,
+            injury_factor_away=injury_factor_away,
+        )
     except FootballDataError as error:
-        return (
-            '<p style="color:#b91c1c;font-weight:600">'
-            f"Dati Football-Data.org non disponibili: {escape(str(error))}</p>"
-        )
-    metrics = [
-        (f"Global Power Rating {home}", model.home_rating),
-        (f"Global Power Rating {away}", model.away_rating),
-        ("xG casa", model.home_lambda),
-        ("xG ospite", model.away_lambda),
-        (f"Prob. vittoria {home}", model.home_win_prob * 100),
-        ("Prob. pareggio", model.draw_prob * 100),
-        (f"Prob. vittoria {away}", model.away_win_prob * 100),
-    ]
-    metric_html = "".join(
-        f'<div style="flex:1;min-width:150px;padding:14px;border:1px solid #dbe3ef;'
-        f'border-radius:10px"><div style="font-size:.85rem;color:#64748b">'
-        f"{escape(label)}</div><strong style=\"font-size:1.5rem\">{value:.1f}</strong></div>"
-        for label, value in metrics
-    )
-    note = escape(model.engine_note) if model.engine_note else "Global Power Rating calcolato."
-    return (
-        f"<h2>{escape(league)} · {escape(home)} — {escape(away)}</h2>"
-        '<div style="display:flex;gap:10px;flex-wrap:wrap;margin:14px 0">'
-        f"{metric_html}</div>"
-        f'<p style="color:#475569">{note}</p>'
-    )
-
-
-
-def update_analysis(league: str, home: str, away: str) -> tuple[str, str, str]:
-    if not home or not away or home == away:
-        return render_match_summary(league, home, away), "", ""
-    try:
-        model = build_match_model(league, home, away)
-    except FootballDataError as error:
-        error_html = (
-            '<p style="color:#b91c1c;font-weight:600">'
-            f"Dati Football-Data.org non disponibili: {escape(str(error))}</p>"
-        )
-        return (
-            error_html,
-            '<p style="color:#b91c1c">Impossibile calcolare le probabilità 1X2 senza '
-            f"risultati live: {escape(str(error))}</p>",
-            '<p style="color:#b91c1c">Impossibile calcolare le probabilità senza '
-            f"risultati live: {escape(str(error))}</p>",
-        )
-    return (
-        render_match_summary(league, home, away),
-        render_outcome_table(model, home, away),
-        render_probability_table(pd.DataFrame(micro_event_rows(model))),
-    )
+        return None, f"Dati Football-Data.org non disponibili: {error}"
+    return model, ""
 
 
 def render_login() -> None:
@@ -1378,7 +1583,70 @@ def render_login() -> None:
             st.error("Password non valida. I dati della dashboard restano nascosti.")
 
 
-def render_dashboard() -> None:
+def render_sidebar_controls() -> dict[str, float]:
+    """Slider manuali nella sidebar: Fattore Mercato (-20%/+20%) e Impatto
+    Infortuni/Titolari Assenti (-30%/+30%), per casa e trasferta. I valori
+    incrementano/riducono Power Index e attacco/difesa attesa PRIMA del
+    calcolo di xG, tiri e probabilità (vedi build_match_model)."""
+    st.markdown("### 💼 Impatto Mercato / Aspettative")
+    st.caption("Rinforzi o cessioni importanti rispetto alla media stagionale.")
+    market_factor_home = (
+        st.slider("Fattore Mercato Casa", -20, 20, 0, format="%d%%", key="market_factor_home") / 100
+    )
+    market_factor_away = (
+        st.slider("Fattore Mercato Trasferta", -20, 20, 0, format="%d%%", key="market_factor_away") / 100
+    )
+
+    st.markdown("### 🩹 Impatto Infortuni / Titolari Assenti")
+    st.caption("Assenze pesanti rispetto alla formazione tipo.")
+    injury_factor_home = (
+        st.slider("Impatto Infortuni Casa", -30, 30, 0, format="%d%%", key="injury_factor_home") / 100
+    )
+    injury_factor_away = (
+        st.slider("Impatto Infortuni Trasferta", -30, 30, 0, format="%d%%", key="injury_factor_away") / 100
+    )
+
+    return {
+        "market_factor_home": market_factor_home,
+        "market_factor_away": market_factor_away,
+        "injury_factor_home": injury_factor_home,
+        "injury_factor_away": injury_factor_away,
+    }
+
+
+def render_team_header(league: str, home: str, away: str, crests: dict[str, str]) -> None:
+    """Header con stemmi ufficiali (campo 'crest' di Football-Data.org)
+    affiancati ai nomi delle squadre in grande."""
+    st.markdown(f'<div class="league-tag">{escape(league)}</div>', unsafe_allow_html=True)
+    col_home, col_vs, col_away = st.columns([2, 0.6, 2])
+    with col_home:
+        if crests.get(home):
+            st.image(crests[home], width=84)
+        st.markdown(f'<div class="team-name">{escape(home)}</div>', unsafe_allow_html=True)
+        st.caption("Casa")
+    with col_vs:
+        st.markdown('<div class="vs-badge">VS</div>', unsafe_allow_html=True)
+    with col_away:
+        if crests.get(away):
+            st.image(crests[away], width=84)
+        st.markdown(f'<div class="team-name">{escape(away)}</div>', unsafe_allow_html=True)
+        st.caption("Trasferta")
+
+
+def render_metric_cards(cards: list[tuple[str, str]], columns: int = 4) -> None:
+    """Card visive pulite (CSS custom) organizzate su più colonne per le
+    stime dei micro-eventi (xG, tiri, corner, Under/Over...)."""
+    cols = st.columns(columns)
+    for index, (label, value) in enumerate(cards):
+        with cols[index % columns]:
+            st.markdown(
+                f'<div class="metric-card"><div class="metric-card-label">{escape(label)}</div>'
+                f'<div class="metric-card-value">{escape(value)}</div></div>',
+                unsafe_allow_html=True,
+            )
+
+
+def render_dashboard(sidebar_values: dict[str, float]) -> None:
     st.markdown(
         "### Impostazioni partita\n"
         "Squadre, calendario e risultati vengono recuperati direttamente da "
@@ -1436,11 +1704,73 @@ def render_dashboard() -> None:
         st.error(f"Calendario Football-Data.org non disponibile: {error}")
         calendar = pd.DataFrame(columns=["Data", "Stato", "Casa", "Trasferta"])
 
-    st.markdown("#### Calendario stagione 2026/27")
-    st.dataframe(calendar, use_container_width=True, hide_index=True)
+    with st.expander("📅 Calendario stagione 2026/27", expanded=False):
+        st.dataframe(calendar, use_container_width=True, hide_index=True)
 
-    match_summary_html, outcome_html, poisson_html = update_analysis(league, home, away)
-    st.markdown(match_summary_html, unsafe_allow_html=True)
+    if home == away:
+        st.info("Seleziona due squadre diverse per avviare l'analisi.")
+        return
+
+    try:
+        crests = fetch_team_crests(league)
+    except FootballDataError:
+        crests = {}
+
+    st.markdown("---")
+    render_team_header(league, home, away, crests)
+
+    model, error_message = try_build_match_model(
+        league,
+        home,
+        away,
+        market_factor_home=sidebar_values["market_factor_home"],
+        market_factor_away=sidebar_values["market_factor_away"],
+        injury_factor_home=sidebar_values["injury_factor_home"],
+        injury_factor_away=sidebar_values["injury_factor_away"],
+    )
+
+    if model is None:
+        st.error(error_message)
+        return
+
+    # --- Avviso Modalità Inizio Stagione (badge/warning giallo) -----------------
+    if model.early_season_warning:
+        st.warning(
+            "⚠️ Analisi a confidenza ridotta - Inizio Stagione in corso  \n"
+            f"{home}: {model.home_current_season_matches} partite disputate · "
+            f"{away}: {model.away_current_season_matches} partite disputate "
+            f"(soglia piena confidenza: {EARLY_SEASON_MATCHDAY_THRESHOLD}). "
+            "Il Power Index viene mescolato con dati reali ancora parziali."
+        )
+
+    # --- Visualizzazione 1X2 in evidenza (st.metric su 3 colonne) --------------
+    col_1x2_home, col_1x2_draw, col_1x2_away = st.columns(3)
+    with col_1x2_home:
+        st.metric(f"🏠 Vittoria {home}", f"{model.home_win_prob:.1%}")
+    with col_1x2_draw:
+        st.metric("🤝 Pareggio", f"{model.draw_prob:.1%}")
+    with col_1x2_away:
+        st.metric(f"✈️ Vittoria {away}", f"{model.away_win_prob:.1%}")
+
+    # --- Card visive pulite per le stime dei micro-eventi -----------------------
+    total_goals_lambda = model.home_lambda + model.away_lambda
+    over_25 = over_probability(total_goals_lambda, 2.5)
+    metric_cards = [
+        (f"Global Power Rating {home}", f"{model.home_rating:.0f}"),
+        (f"Global Power Rating {away}", f"{model.away_rating:.0f}"),
+        ("xG Casa", f"{model.home_lambda:.2f}"),
+        ("xG Trasferta", f"{model.away_lambda:.2f}"),
+        ("Tiri Totali", f"{model.shots_total_lambda:.1f}"),
+        ("Tiri in Porta (match)", f"{model.shots_on_target_total_lambda:.1f}"),
+        ("Corner Totali", f"{model.corners_total_lambda:.1f}"),
+        ("Cartellini Totali", f"{model.cards_total_lambda:.1f}"),
+        ("Over 2.5 Gol", f"{over_25:.1%}"),
+        ("Under 2.5 Gol", f"{1 - over_25:.1%}"),
+    ]
+    render_metric_cards(metric_cards, columns=5)
+
+    note = escape(model.engine_note) if model.engine_note else "Global Power Rating calcolato."
+    st.caption(note)
 
     tab_poisson, tab_montecarlo = st.tabs(
         [
@@ -1452,81 +1782,191 @@ def render_dashboard() -> None:
     with tab_poisson:
         st.markdown(
             "Le righe in verde brillante indicano probabilità superiori all'80%. "
-            "La fair odds è l'inverso della probabilità modellata."
+            "La fair odds è l'inverso della probabilità modellata. Pareggi e "
+            "risultati a basso punteggio sono corretti con Dixon-Coles."
         )
-        if home == away:
-            st.info("Seleziona due squadre diverse prima di analizzare le probabilità.")
-        else:
-            st.markdown("##### Pronostico 1X2")
-            if outcome_html:
-                st.markdown(outcome_html, unsafe_allow_html=True)
-            st.markdown("##### Micro-eventi (tiri, corner, cartellini, falli)")
-            if poisson_html:
-                st.markdown(poisson_html, unsafe_allow_html=True)
-            else:
-                st.info("Probabilità non disponibili per questa selezione.")
+        st.markdown("##### Dettaglio quote implicite 1X2")
+        st.markdown(render_outcome_table(model, home, away), unsafe_allow_html=True)
+
+        st.markdown("##### Risultati esatti più probabili (Poisson + Dixon-Coles)")
+        exact_scores = exact_score_probabilities(model.home_lambda, model.away_lambda)[:6]
+        exact_score_frame = pd.DataFrame(
+            [{"Risultato": score, "Probabilità": f"{prob:.1%}"} for score, prob in exact_scores]
+        )
+        st.dataframe(exact_score_frame, use_container_width=True, hide_index=True)
+
+        st.markdown("##### Micro-eventi (tiri, corner, cartellini, falli)")
+        poisson_html = render_probability_table(pd.DataFrame(micro_event_rows(model)))
+        st.markdown(poisson_html, unsafe_allow_html=True)
+
         st.markdown(
             "##### Lettura del modello\n"
             "Tutte le probabilità (1X2 e micro-eventi) derivano dallo stesso "
             "Global Power Rating: gol attesi, tiri fatti/subiti e corner sono "
             "scalati in base al differenziale di rating fra le due squadre "
-            "(fattore campo incluso), non da semplici medie grezze."
+            "(fattore campo incluso), con Time-Decay sui dati storici, "
+            "Modalità Inizio Stagione e slider manuali applicati a monte, e "
+            "correzione Dixon-Coles sui pareggi/risultati bassi."
         )
 
     with tab_montecarlo:
         st.markdown(
             "Ogni esecuzione genera 10.000 partite indipendenti con distribuzioni "
-            "di Poisson calcolate sugli stessi lambda del Global Power Rating: "
+            "di Poisson calcolate sugli stessi lambda del Global Power Rating, "
+            "pesate con la correzione Dixon-Coles sui risultati a basso punteggio: "
             "le frequenze qui sotto devono essere coerenti con il pronostico 1X2 "
             "mostrato nella scheda Poisson."
         )
-        if home == away:
-            st.info("Seleziona due squadre diverse prima di simulare.")
-        else:
-            run_clicked = st.button(
-                "Esegui 10.000 Simulazioni Monte Carlo",
-                type="primary",
-                key="simulate_button",
-            )
-            if run_clicked:
-                try:
-                    model = build_match_model(league, home, away)
-                except FootballDataError as error:
-                    st.error(f"Impossibile simulare: {error}")
-                else:
-                    simulation = run_simulation(model)
-                    score_frame: pd.DataFrame = simulation["scores"]
-                    outcome_frame: pd.DataFrame = simulation["outcomes"]
-                    event_frame: pd.DataFrame = simulation["events"]
+        run_clicked = st.button(
+            "Esegui 10.000 Simulazioni Monte Carlo",
+            type="primary",
+            key="simulate_button",
+        )
+        if run_clicked:
+            simulation = run_simulation(model)
+            score_frame: pd.DataFrame = simulation["scores"]
+            outcome_frame: pd.DataFrame = simulation["outcomes"]
+            event_frame: pd.DataFrame = simulation["events"]
 
-                    st.markdown("**Pronostico 1X2 simulato (confronto con il calcolo analitico)**")
-                    st.dataframe(outcome_frame, use_container_width=True, hide_index=True)
+            st.markdown("**Pronostico 1X2 simulato (confronto con il calcolo analitico)**")
+            st.dataframe(outcome_frame, use_container_width=True, hide_index=True)
 
-                    col_scores, col_chart = st.columns(2)
-                    with col_scores:
-                        st.markdown("**I 5 risultati esatti più frequenti**")
-                        st.dataframe(score_frame, use_container_width=True, hide_index=True)
-                    with col_chart:
-                        chart = px.bar(
-                            score_frame,
-                            x="Risultato esatto",
-                            y="Probabilità",
-                            text="Probabilità",
-                            labels={"Probabilità": "Probabilità", "Risultato esatto": "Risultato"},
-                            color="Probabilità",
-                            color_continuous_scale=["#d9f99d", "#16a34a"],
-                        )
-                        chart.update_traces(texttemplate="%{text:.1%}", textposition="outside")
-                        chart.update_layout(
-                            showlegend=False,
-                            yaxis_tickformat=".0%",
-                            margin={"l": 10, "r": 10, "t": 20, "b": 10},
-                        )
-                        st.plotly_chart(chart, use_container_width=True)
+            col_scores, col_chart = st.columns(2)
+            with col_scores:
+                st.markdown("**I 5 risultati esatti più frequenti (pesati Dixon-Coles)**")
+                st.dataframe(score_frame, use_container_width=True, hide_index=True)
+            with col_chart:
+                chart = px.bar(
+                    score_frame,
+                    x="Risultato esatto",
+                    y="Probabilità",
+                    text="Probabilità",
+                    labels={"Probabilità": "Probabilità", "Risultato esatto": "Risultato"},
+                    color="Probabilità",
+                    color_continuous_scale=["#d9f99d", "#16a34a"],
+                )
+                chart.update_traces(texttemplate="%{text:.1%}", textposition="outside")
+                chart.update_layout(
+                    showlegend=False,
+                    yaxis_tickformat=".0%",
+                    margin={"l": 10, "r": 10, "t": 20, "b": 10},
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font_color="#e2e8f0",
+                )
+                st.plotly_chart(chart, use_container_width=True)
 
-                    st.markdown("**Frequenza dei micro-eventi chiave**")
-                    st.dataframe(event_frame, use_container_width=True, hide_index=True)
-                    st.success("Simulazione completata: 10.000 partite generate.")
+            st.markdown("**Frequenza dei micro-eventi chiave**")
+            st.dataframe(event_frame, use_container_width=True, hide_index=True)
+            st.success("Simulazione completata: 10.000 partite generate.")
+
+
+DARK_THEME_CSS = """
+<style>
+:root {
+    --clab-bg: #0f1420;
+    --clab-card: #171e2e;
+    --clab-border: #2a3348;
+    --clab-accent: #22d3ee;
+    --clab-text: #e2e8f0;
+    --clab-muted: #94a3b8;
+}
+
+html, body, [class*="css"] {
+    font-family: "Inter", "Segoe UI", -apple-system, sans-serif;
+}
+
+.stApp {
+    background: radial-gradient(circle at top left, #131a2b 0%, var(--clab-bg) 55%);
+    color: var(--clab-text);
+}
+
+section[data-testid="stSidebar"] {
+    background: #0b0f19;
+    border-right: 1px solid var(--clab-border);
+}
+
+.league-tag {
+    display: inline-block;
+    padding: 4px 14px;
+    border-radius: 999px;
+    background: rgba(34, 211, 238, 0.12);
+    color: var(--clab-accent);
+    font-size: 0.8rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    margin-bottom: 10px;
+}
+
+.team-name {
+    font-size: 1.6rem;
+    font-weight: 800;
+    color: var(--clab-text);
+    margin-top: 6px;
+}
+
+.vs-badge {
+    text-align: center;
+    font-weight: 800;
+    font-size: 1.1rem;
+    color: var(--clab-muted);
+    margin-top: 34px;
+    border: 1px solid var(--clab-border);
+    border-radius: 999px;
+    padding: 6px 0;
+    background: var(--clab-card);
+}
+
+.metric-card {
+    background: linear-gradient(160deg, var(--clab-card) 0%, #131a2b 100%);
+    border: 1px solid var(--clab-border);
+    border-radius: 16px;
+    padding: 16px 14px;
+    margin-bottom: 14px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+}
+
+.metric-card-label {
+    font-size: 0.78rem;
+    color: var(--clab-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 6px;
+}
+
+.metric-card-value {
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: var(--clab-accent);
+}
+
+div[data-testid="stMetric"] {
+    background: var(--clab-card);
+    border: 1px solid var(--clab-border);
+    border-radius: 16px;
+    padding: 14px 10px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+}
+
+table {
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+thead tr {
+    background: #1c2438;
+    color: var(--clab-text);
+}
+
+tbody tr {
+    border-bottom: 1px solid var(--clab-border);
+}
+
+td, th {
+    padding: 8px 10px !important;
+}
+</style>
+"""
 
 
 def main() -> None:
@@ -1534,12 +1974,13 @@ def main() -> None:
         page_title="CalcioLab · Analisi e Simulazioni",
         layout="wide",
     )
+    st.markdown(DARK_THEME_CSS, unsafe_allow_html=True)
 
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
 
     st.markdown(
-        "# CalcioLab\n"
+        "# ⚽ CalcioLab\n"
         "Analisi probabilistica e simulazioni di calcio con dati live da Football-Data.org."
     )
 
@@ -1549,7 +1990,9 @@ def main() -> None:
             if st.button("Esci"):
                 st.session_state.authenticated = False
                 st.rerun()
-        render_dashboard()
+            st.markdown("---")
+            sidebar_values = render_sidebar_controls()
+        render_dashboard(sidebar_values)
     else:
         render_login()
 
