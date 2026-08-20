@@ -497,15 +497,17 @@ PREVIOUS_SEASON_MAX_WEIGHT = 0.35
 calcolo delle medie (tiri, xG, forma). Le partite della stagione corrente
 valgono sempre il 100% (peso 1.0)."""
 
-# --- Modalità Inizio Stagione --------------------------------------------------
+# --- Ancoraggio Bayesiano Personalizzato per Squadra (Inizio Stagione) -------
 EARLY_SEASON_MATCHDAY_THRESHOLD = 5
-"""Sotto questa soglia di partite REALI giocate nella stagione corrente, la
-squadra è considerata in 'Modalità Inizio Stagione': i dati osservati vengono
-mescolati con il Power Index teorico di base (vedi blend_with_theoretical)."""
+"""Dalla Giornata 5 (partite REALI giocate nella stagione corrente) si usa il
+100% dei dati reali. Sotto questa soglia si applica l'Ancoraggio Bayesiano
+Personalizzato per Squadra (vedi bayesian_baseline_weight)."""
 
 LEAGUE_AVERAGE_GOALS_PER_TEAM = 1.35
-"""Gol attesi 'di libro' per una squadra media in una singola partita di
-massima serie: ancoraggio del Power Index teorico di base a inizio stagione."""
+"""Gol attesi 'di libro' per una squadra di rating medio (BASE_RATING) in una
+singola partita di massima serie: punto di partenza della Baseline Specifica
+della Squadra, poi corretto per Power Index/rating storico e slider manuali
+(vedi team_specific_baseline)."""
 
 # --- Slider manuali "Impatto Mercato" e "Impatto Infortuni" -------------------
 MARKET_FACTOR_BOUNDS = (-0.20, 0.20)
@@ -572,21 +574,40 @@ def rating_scaling_factors(rating_diff: float, damping: float = 1.0) -> tuple[fl
     return boost, suppression
 
 
-def theoretical_expected_goals(team: str, league: str) -> float:
-    """Gol attesi 'di libro' derivati solo dal rating strutturale (senza dati
-    stagionali osservati): il Power Index teorico di base usato dalla
-    Modalità Inizio Stagione quando i dati reali disponibili sono pochi."""
+def bayesian_baseline_weight(matches_played: int) -> float:
+    """Peso della Baseline Specifica della Squadra nell'Ancoraggio Bayesiano
+    Personalizzato per le prime giornate di campionato:
+    - 0 partite reali → 100% baseline (nessun dato ancora disponibile)
+    - Giornata 1 → 80% Baseline Specifica + 20% Dati Reali
+    - Giornata 2 → 60% Baseline Specifica + 40% Dati Reali
+    - Giornata 3 → 40% Baseline Specifica + 60% Dati Reali
+    - Giornata 4 → 20% Baseline Specifica + 80% Dati Reali
+    - Dalla Giornata 5 → 0% baseline, 100% Dati Reali
+    """
+    return clamp(1.0 - 0.2 * matches_played, 0.0, 1.0)
+
+
+def team_specific_baseline(team: str, league: str, manual_factor: float = 0.0) -> tuple[float, float]:
+    """Baseline Specifica della Squadra: gol attesi 'di libro' che ci si
+    aspetta la squadra segni (attacco) e subisca (difesa) contro un
+    avversario di rating medio, derivati dal Power Index/rating storico
+    (base_power_rating, senza dati stagionali) e corretti con le regolazioni
+    manuali di Mercato/Assenze impostate nella sidebar per QUELLA squadra
+    (manual_factor = market_factor + injury_factor già clampati)."""
     rating_gap = base_power_rating(team, league) - BASE_RATING
-    return LEAGUE_AVERAGE_GOALS_PER_TEAM * math.exp(RATING_LAMBDA_SENSITIVITY * rating_gap)
+    boost = 1 + manual_factor
+    attack_baseline = LEAGUE_AVERAGE_GOALS_PER_TEAM * math.exp(RATING_LAMBDA_SENSITIVITY * rating_gap) * boost
+    defense_baseline = LEAGUE_AVERAGE_GOALS_PER_TEAM * math.exp(-RATING_LAMBDA_SENSITIVITY * rating_gap) / max(boost, 0.05)
+    return max(attack_baseline, 0.05), max(defense_baseline, 0.05)
 
 
-def blend_with_theoretical(observed_value: float, theoretical_value: float, matches_played: float) -> float:
-    """Modalità Inizio Stagione: con meno di EARLY_SEASON_MATCHDAY_THRESHOLD
-    partite REALI nella stagione corrente, mescola il valore osservato con
-    quello teorico (Power Index di base), dando sempre più peso ai dati reali
-    man mano che le giornate si accumulano (confidenza lineare 0→1)."""
-    confidence = clamp(matches_played / EARLY_SEASON_MATCHDAY_THRESHOLD, 0.0, 1.0)
-    return confidence * observed_value + (1 - confidence) * theoretical_value
+def apply_bayesian_anchor(observed_value: float, baseline_value: float, matches_played: int) -> float:
+    """Ancoraggio Bayesiano Personalizzato per Squadra: mescola il valore
+    osservato (dati reali della stagione corrente, già pesati con Time-Decay)
+    con la Baseline Specifica della Squadra, secondo il peso stabilito da
+    bayesian_baseline_weight in base alle giornate reali disputate finora."""
+    baseline_weight = bayesian_baseline_weight(matches_played)
+    return baseline_weight * baseline_value + (1 - baseline_weight) * observed_value
 
 
 def is_early_season_match(home_stats: "LiveTeamStats", away_stats: "LiveTeamStats") -> bool:
@@ -1166,6 +1187,16 @@ def build_match_model(
     home_stats = fetch_team_live_stats(league, home)
     away_stats = fetch_team_live_stats(league, away)
 
+    # --- 0. Slider manuali "Fattore Mercato" e "Impatto Infortuni/Titolari
+    # Assenti": calcolati subito perché entrano sia nella Baseline Specifica
+    # della Squadra (step 2) sia nell'effetto moltiplicativo finale (step 3).
+    manual_factor_home = clamp(market_factor_home, *MARKET_FACTOR_BOUNDS) + clamp(
+        injury_factor_home, *INJURY_FACTOR_BOUNDS
+    )
+    manual_factor_away = clamp(market_factor_away, *MARKET_FACTOR_BOUNDS) + clamp(
+        injury_factor_away, *INJURY_FACTOR_BOUNDS
+    )
+
     # --- 1. Statistiche osservate, già pesate con Time-Decay in
     # fetch_team_live_stats: stagione corrente 100%, precedente al massimo
     # PREVIOUS_SEASON_MAX_WEIGHT. -------------------------------------------
@@ -1199,9 +1230,6 @@ def build_match_model(
         if away_stats.away_matches
         else _average(away_stats.goals_against, away_stats.matches, "gol subiti", away)
     )
-
-    home_lambda_raw = (home_goal_for + away_goal_against) / 2
-    away_lambda_raw = (away_goal_for + home_goal_against) / 2
     home_sot_raw = _average(home_stats.shots_on_target, home_stats.matches, "tiri in porta", home)
     away_sot_raw = _average(away_stats.shots_on_target, away_stats.matches, "tiri in porta", away)
     home_shots_raw = _average(home_stats.total_shots, home_stats.matches, "tiri totali", home)
@@ -1213,30 +1241,49 @@ def build_match_model(
     fouls = _average(home_stats.fouls, home_stats.matches, "falli", home)
     fouls += _average(away_stats.fouls, away_stats.matches, "falli", away)
 
-    # --- 2. Modalità Inizio Stagione: con meno di EARLY_SEASON_MATCHDAY_
-    # THRESHOLD partite REALI in questa stagione, mescola il dato osservato
-    # con il Power Index teorico di base (nessun dato stagionale). -----------
+    # --- 2. Ancoraggio Bayesiano Personalizzato per Squadra (Inizio Stagione) --
+    # Invece della media generale di campionato, ogni squadra ha una Baseline
+    # Specifica (attacco/difesa attesi) derivata dal suo Power Index/rating
+    # storico e dallo slider manuale Mercato/Assenze di QUELLA squadra. Nelle
+    # prime 4 giornate della nuova stagione, xG e tiri sono un mix ponderato
+    # fra questa baseline e i dati reali già raccolti (bayesian_baseline_weight);
+    # dalla Giornata 5 si usa il 100% dei dati reali. --------------------------
     early_season = is_early_season_match(home_stats, away_stats)
-    home_lambda_raw = blend_with_theoretical(
-        home_lambda_raw, theoretical_expected_goals(home, league), home_stats.current_season_matches
-    )
-    away_lambda_raw = blend_with_theoretical(
-        away_lambda_raw, theoretical_expected_goals(away, league), away_stats.current_season_matches
-    )
 
-    # --- 3. Slider manuali "Fattore Mercato" e "Impatto Infortuni/Titolari
-    # Assenti": la percentuale scelta nella sidebar incrementa/riduce sia il
-    # Power Index sia la stima di attacco/difesa attesa PRIMA di calcolare
-    # xG, tiri e probabilità. La squadra rinforzata segna di più (attacco) e
-    # concede meno (difesa migliorata riduce l'attacco avversario), e
-    # viceversa per un fattore negativo. -------------------------------------
-    manual_factor_home = clamp(market_factor_home, *MARKET_FACTOR_BOUNDS) + clamp(
-        injury_factor_home, *INJURY_FACTOR_BOUNDS
-    )
-    manual_factor_away = clamp(market_factor_away, *MARKET_FACTOR_BOUNDS) + clamp(
-        injury_factor_away, *INJURY_FACTOR_BOUNDS
-    )
+    home_attack_baseline, home_defense_baseline = team_specific_baseline(home, league, manual_factor_home)
+    away_attack_baseline, away_defense_baseline = team_specific_baseline(away, league, manual_factor_away)
 
+    competition_code = FOOTBALL_DATA_COMPETITIONS[league]
+    micro_baseline = MICRO_EVENT_BASELINES[competition_code]
+    shots_per_goal = micro_baseline["shots"] / LEAGUE_AVERAGE_GOALS_PER_TEAM
+    sot_per_goal = micro_baseline["shots_on_target"] / LEAGUE_AVERAGE_GOALS_PER_TEAM
+    home_shots_baseline = home_attack_baseline * shots_per_goal
+    away_shots_baseline = away_attack_baseline * shots_per_goal
+    home_sot_baseline = home_attack_baseline * sot_per_goal
+    away_sot_baseline = away_attack_baseline * sot_per_goal
+
+    home_goal_for = apply_bayesian_anchor(home_goal_for, home_attack_baseline, home_stats.current_season_matches)
+    home_goal_against = apply_bayesian_anchor(
+        home_goal_against, home_defense_baseline, home_stats.current_season_matches
+    )
+    away_goal_for = apply_bayesian_anchor(away_goal_for, away_attack_baseline, away_stats.current_season_matches)
+    away_goal_against = apply_bayesian_anchor(
+        away_goal_against, away_defense_baseline, away_stats.current_season_matches
+    )
+    home_shots_raw = apply_bayesian_anchor(home_shots_raw, home_shots_baseline, home_stats.current_season_matches)
+    away_shots_raw = apply_bayesian_anchor(away_shots_raw, away_shots_baseline, away_stats.current_season_matches)
+    home_sot_raw = apply_bayesian_anchor(home_sot_raw, home_sot_baseline, home_stats.current_season_matches)
+    away_sot_raw = apply_bayesian_anchor(away_sot_raw, away_sot_baseline, away_stats.current_season_matches)
+
+    home_lambda_raw = (home_goal_for + away_goal_against) / 2
+    away_lambda_raw = (away_goal_for + home_goal_against) / 2
+
+    # --- 3. Effetto moltiplicativo persistente degli slider manuali: la
+    # percentuale scelta nella sidebar incrementa/riduce sia il Power Index
+    # sia la stima di attacco/difesa attesa PRIMA di calcolare xG, tiri e
+    # probabilità, ad OGNI giornata (non solo a inizio stagione). La squadra
+    # rinforzata segna di più (attacco) e concede meno (difesa migliorata
+    # riduce l'attacco avversario), e viceversa per un fattore negativo. ------
     home_lambda_raw *= (1 + manual_factor_home) * (1 - manual_factor_away)
     away_lambda_raw *= (1 + manual_factor_away) * (1 - manual_factor_home)
     home_shots_raw *= (1 + manual_factor_home) * (1 - manual_factor_away)
@@ -1310,9 +1357,12 @@ def build_match_model(
     if manual_factor_away:
         engine_note += f" · slider {away}: {manual_factor_away:+.0%}"
     if early_season:
+        home_weight = bayesian_baseline_weight(home_stats.current_season_matches)
+        away_weight = bayesian_baseline_weight(away_stats.current_season_matches)
         engine_note += (
-            f" · ⚠️ Inizio Stagione: {home} {home_stats.current_season_matches} "
-            f"partite, {away} {away_stats.current_season_matches} partite disputate finora"
+            f" · ⚠️ Ancoraggio Bayesiano Personalizzato per Squadra: {home} "
+            f"{home_stats.current_season_matches} partite (baseline {home_weight:.0%}), "
+            f"{away} {away_stats.current_season_matches} partite (baseline {away_weight:.0%})"
         )
 
     return MatchModel(
