@@ -465,11 +465,13 @@ RATING_SCALE = 400.0
 
 SECOND_TIER_RATING_GAP = 180.0
 """Gap di rating fra un campionato di seconda fascia (Championship, Serie B,
-Segunda División, 2. Bundesliga, Ligue 2) e la media della massima serie."""
+Segunda División, 2. Bundesliga, Ligue 2) e la media della massima serie.
+Storico: ora derivato dal League Tier Multiplier (vedi base_power_rating)."""
 
 PROMOTED_TEAM_RATING_GAP = 220.0
 """Gap di rating di partenza per una neo-promossa nella massima serie, prima
-che i risultati stagionali (Form Factor) lo aggiornino."""
+che i risultati stagionali (Form Factor) lo aggiornino. Storico: ora
+derivato dal League Tier Multiplier delle neo-promosse (vedi sotto)."""
 
 HOME_ADVANTAGE_RATING = 60.0
 """Bonus di rating ELO per il fattore campo, applicato solo nel calcolo del
@@ -490,6 +492,89 @@ smorzamento più marcato rispetto ai tiri."""
 CARD_UNDERDOG_BONUS = 0.25
 """Quota aggiuntiva di cartellini per la squadra più debole, che difende più
 a lungo e commette più falli tattici contro un avversario superiore."""
+
+# --- Coefficiente di Forza Lega / Categoria (League Tier Multiplier) --------
+# Corregge l'anomalia di valutazione fra squadre di categorie nettamente
+# diverse (es. una neo-promossa come Coventry contro una big storica come
+# Chelsea): 1.00 = massima serie di riferimento, valori più bassi per una
+# categoria di qualità inferiore. Il coefficiente serve a DUE scopi:
+#  1. derivare il gap di Power Index/rating strutturale (base_power_rating);
+#  2. riparametrare direttamente xG e tiri delle squadre di fascia inferiore
+#     (league_tier_correction, applicato in build_match_model) PRIMA di
+#     calcolare le probabilità, così l'effetto non dipende solo dal rating.
+LEAGUE_TIER_MULTIPLIER: dict[str, float] = {
+    "Italia · Serie A": 1.00,
+    "Inghilterra · Premier League": 1.00,
+    "Spagna · La Liga": 1.00,
+    "Germania · Bundesliga": 1.00,
+    "Francia · Ligue 1": 0.97,
+    "Paesi Bassi · Eredivisie": 0.90,
+    "Portogallo · Primeira Liga": 0.90,
+    # Competizione d'elite continentale: non un vero "campionato nazionale",
+    # la qualità dei singoli club è già catturata da TEAM_STRENGTHS.
+    "Europa · UEFA Champions League": 1.00,
+    "Inghilterra · EFL Championship": 0.72,
+}
+LEAGUE_TIER_MULTIPLIER_DEFAULT = 0.70
+"""Coefficiente di fallback per leghe non mappate esplicitamente (es. le
+leghe di seconda fascia usate solo come lista di riserva squadre)."""
+
+PROMOTED_TEAM_TIER_MULTIPLIER = 0.72
+"""Coefficiente di forza applicato alle neo-promosse: riflette la categoria
+di provenienza (Championship/Serie B/Segunda/2.Bundesliga/Ligue 2), coerente
+con LEAGUE_TIER_MULTIPLIER['Inghilterra · EFL Championship']."""
+
+MIN_TIER_RATING_ADVANTAGE = 90.0
+"""Vantaggio minimo di rating (punti ELO) garantito alla squadra di fascia
+superiore su una di fascia inferiore, anche dopo Form Factor e slider
+manuali — a meno che una pesante penalizzazione manuale sulla favorita (o un
+pesante rinforzo sulla sfavorita) non lo assorba (enforce_tier_rating_floor)."""
+
+
+def league_tier_multiplier(league: str) -> float:
+    """Coefficiente di forza/qualità della lega selezionata (1.00 = massima
+    serie di riferimento). Usato come fallback quando la squadra non ha un
+    coefficiente più specifico (vedi league_tier_correction)."""
+    return LEAGUE_TIER_MULTIPLIER.get(league, LEAGUE_TIER_MULTIPLIER_DEFAULT)
+
+
+def league_tier_correction(team: str, league: str) -> float:
+    """Coefficiente di forza legato alla categoria di provenienza della
+    squadra: PROMOTED_TEAM_TIER_MULTIPLIER per una neo-promossa (viene da un
+    campionato di seconda fascia anche se ora gioca in massima serie),
+    altrimenti il coefficiente della lega selezionata."""
+    if team in PROMOTED_TEAMS:
+        return PROMOTED_TEAM_TIER_MULTIPLIER
+    return league_tier_multiplier(league)
+
+
+def enforce_tier_rating_floor(
+    rating_diff: float,
+    home_tier_factor: float,
+    away_tier_factor: float,
+    manual_factor_home: float,
+    manual_factor_away: float,
+) -> float:
+    """Ranking Elo/Power Index assoluto: garantisce un vantaggio minimo
+    (MIN_TIER_RATING_ADVANTAGE) alla squadra di fascia superiore quando il
+    gap di categoria (League Tier Multiplier) è netto, evitando che poche
+    partite recenti azzerino un divario strutturale reale. Una pesante
+    penalizzazione manuale sulla favorita (o un pesante rinforzo sulla
+    sfavorita) può assorbire parzialmente o del tutto il floor."""
+    tier_gap = home_tier_factor - away_tier_factor
+    if abs(tier_gap) < 0.03:
+        return rating_diff  # nessun gap di categoria significativo
+    if tier_gap > 0:
+        # Home è di fascia superiore: uno slider che la penalizza (o rinforza
+        # la sfavorita) riduce il floor garantito.
+        manual_offset = (manual_factor_away - manual_factor_home) * RATING_SCALE
+        floor = MIN_TIER_RATING_ADVANTAGE - clamp(manual_offset, 0.0, MIN_TIER_RATING_ADVANTAGE)
+        return max(rating_diff, floor)
+    # Away è di fascia superiore.
+    manual_offset = (manual_factor_home - manual_factor_away) * RATING_SCALE
+    floor = MIN_TIER_RATING_ADVANTAGE - clamp(manual_offset, 0.0, MIN_TIER_RATING_ADVANTAGE)
+    return min(rating_diff, -floor)
+
 
 # --- Time-Decay per i dati storici -------------------------------------------
 PREVIOUS_SEASON_MAX_WEIGHT = 0.35
@@ -530,18 +615,21 @@ def base_power_rating(team: str, league: str) -> float:
 
     - Se la squadra ha un rating esplicito in TEAM_STRENGTHS (big club delle
       5 leghe principali), il rating ELO viene derivato da quel moltiplicatore.
-    - Se è una neo-promossa (PROMOTED_TEAMS), parte con un gap di rating che
-      riflette la provenienza da un campionato minore.
+    - Se è una neo-promossa (PROMOTED_TEAMS), parte con un gap di rating
+      derivato dal suo League Tier Multiplier (categoria di provenienza).
     - Se il campionato selezionato non è di massima serie (Championship,
-      Serie B, ecc.), l'intera squadra parte con il gap di seconda fascia.
+      Serie B, ecc.), l'intera squadra parte con il gap del proprio tier.
     - Altrimenti riceve il rating medio di massima serie (BASE_RATING).
+
+    Questo Power Index NON dipende dalle ultime partite: è un ranking Elo di
+    partenza assoluto, aggiornato solo dal Form Factor (componente dinamica).
     """
     if team in TEAM_STRENGTHS:
         return BASE_RATING + (TEAM_STRENGTHS[team] - 1.0) * RATING_SCALE
     if team in PROMOTED_TEAMS:
-        return BASE_RATING - PROMOTED_TEAM_RATING_GAP
+        return BASE_RATING - (1 - PROMOTED_TEAM_TIER_MULTIPLIER) * RATING_SCALE
     if league not in TOP_DIVISIONS:
-        return BASE_RATING - SECOND_TIER_RATING_GAP
+        return BASE_RATING - (1 - league_tier_multiplier(league)) * RATING_SCALE
     return BASE_RATING
 
 
@@ -1291,6 +1379,30 @@ def build_match_model(
     home_sot_raw *= (1 + manual_factor_home) * (1 - manual_factor_away)
     away_sot_raw *= (1 + manual_factor_away) * (1 - manual_factor_home)
 
+    # --- 3b. Coefficiente di Forza Lega / Categoria (League Tier Multiplier) ---
+    # Corregge l'anomalia di valutazione fra squadre di categorie nettamente
+    # diverse (es. una neo-promossa come Coventry contro una big come
+    # Chelsea): l'attacco della squadra di fascia inferiore viene riparametrato
+    # col proprio coefficiente di lega/categoria, mentre l'avversario di
+    # fascia superiore beneficia della difesa più debole che ha di fronte.
+    home_tier_factor = league_tier_correction(home, league)
+    away_tier_factor = league_tier_correction(away, league)
+
+    home_lambda_raw *= home_tier_factor
+    away_lambda_raw *= away_tier_factor
+    home_shots_raw *= home_tier_factor
+    away_shots_raw *= away_tier_factor
+    home_sot_raw *= home_tier_factor
+    away_sot_raw *= away_tier_factor
+    if home_tier_factor < 1.0:
+        away_lambda_raw /= home_tier_factor
+        away_shots_raw /= home_tier_factor
+        away_sot_raw /= home_tier_factor
+    if away_tier_factor < 1.0:
+        home_lambda_raw /= away_tier_factor
+        home_shots_raw /= away_tier_factor
+        home_sot_raw /= away_tier_factor
+
     home_lambda_raw = max(home_lambda_raw, 0.02)
     away_lambda_raw = max(away_lambda_raw, 0.02)
     home_shots_raw = max(home_shots_raw, 1.0)
@@ -1306,6 +1418,13 @@ def build_match_model(
     # match: pesa quindi su OGNI metrica derivata dal differenziale, non solo
     # sui gol attesi, garantendo coerenza fra tutte le tabelle dell'app.
     rating_diff = (home_rating + HOME_ADVANTAGE_RATING) - away_rating
+
+    # Ranking Elo/Power Index assoluto: la squadra di fascia superiore
+    # mantiene un vantaggio strutturale minimo garantito (MIN_TIER_RATING_
+    # ADVANTAGE), salvo una pesante penalizzazione manuale che lo assorba.
+    rating_diff = enforce_tier_rating_floor(
+        rating_diff, home_tier_factor, away_tier_factor, manual_factor_home, manual_factor_away
+    )
 
     # --- 5. Gol attesi (xG): piena sensibilità al gap di rating -----------------
     goal_boost, goal_suppress = rating_scaling_factors(rating_diff, damping=1.0)
@@ -1356,6 +1475,11 @@ def build_match_model(
         engine_note += f" · slider {home}: {manual_factor_home:+.0%}"
     if manual_factor_away:
         engine_note += f" · slider {away}: {manual_factor_away:+.0%}"
+    if abs(home_tier_factor - away_tier_factor) >= 0.03:
+        engine_note += (
+            f" · League Tier Multiplier: {home} ×{home_tier_factor:.2f} vs "
+            f"{away} ×{away_tier_factor:.2f} (floor min {MIN_TIER_RATING_ADVANTAGE:.0f} pt)"
+        )
     if early_season:
         home_weight = bayesian_baseline_weight(home_stats.current_season_matches)
         away_weight = bayesian_baseline_weight(away_stats.current_season_matches)
