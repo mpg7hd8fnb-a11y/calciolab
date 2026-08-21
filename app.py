@@ -610,39 +610,271 @@ dove nella realtà i pareggi/risultati bassi sono leggermente più frequenti di
 quanto preveda il semplice prodotto di due Poisson indipendenti."""
 
 
-def base_power_rating(team: str, league: str) -> float:
-    """Componente strutturale del Global Power Rating, prima del Form Factor.
+# --- Rating Iniziale per Fasce / Categoria (Tiered Initial Rating) -----------
+# Sostituisce il vecchio default piatto a 1500 per le squadre non catalogate:
+# una neo-promossa o un club non ancora curato in TEAM_STRENGTHS non deve mai
+# poter partire più in alto di un top club solo perché quest'ultimo
+# attraversa un calo di forma temporaneo (il bug segnalato).
+TOP_TIER_STRENGTH_THRESHOLD = 1.08
+"""Soglia sul moltiplicatore TEAM_STRENGTHS oltre la quale un club è
+considerato di fascia Top/Champions League ai fini del Tiered Initial Rating."""
 
-    - Se la squadra ha un rating esplicito in TEAM_STRENGTHS (big club delle
-      5 leghe principali), il rating ELO viene derivato da quel moltiplicatore.
-    - Se è una neo-promossa (PROMOTED_TEAMS), parte con un gap di rating
-      derivato dal suo League Tier Multiplier (categoria di provenienza).
-    - Se il campionato selezionato non è di massima serie (Championship,
-      Serie B, ecc.), l'intera squadra parte con il gap del proprio tier.
-    - Altrimenti riceve il rating medio di massima serie (BASE_RATING).
+TOP_TIER_BASE_RATING_MIN = 1700.0
+TOP_TIER_BASE_RATING_MAX = 1800.0
+"""Base Rating per squadre Top/Champions League (es. Inter, Juventus,
+Atalanta, Milan): 1700-1800, posizionato nella fascia in base al
+moltiplicatore storico in TEAM_STRENGTHS."""
+
+MID_TIER_BASE_RATING_MIN = 1500.0
+MID_TIER_BASE_RATING_MAX = 1600.0
+"""Base Rating per squadre di fascia media (es. Fiorentina, Torino, Bologna,
+o qualunque club di massima serie non ancora catalogato esplicitamente)."""
+
+LOW_TIER_BASE_RATING_MIN = 1350.0
+LOW_TIER_BASE_RATING_MAX = 1450.0
+"""Base Rating per squadre di bassa classifica/salvezza (LOW_TIER_TEAMS) e
+per i club di un campionato di seconda fascia selezionato direttamente."""
+
+PROMOTED_TIER_BASE_RATING_MAX = 1300.0
+"""Base Rating massimo per una neo-promossa dalla serie inferiore: non può
+mai superare questa soglia, qualunque sia la sua forma recente."""
+
+LOW_TIER_TEAMS: frozenset[str] = frozenset()
+"""Squadre di massima serie note per essere stabilmente di bassa classifica/
+lotta salvezza (fascia 1350-1450 invece che 1500-1600): popolabile a mano.
+Vuoto di default — senza una fonte dati verificata per l'intera rosa di ogni
+campionato, le squadre non catalogate ricadono prudentemente in fascia media."""
+
+TOP_TIER_RATING_FLOOR = 1600.0
+"""Anchoring al Rating di Serie (Floor Rating): una squadra Top/Champions
+League non scende sotto questo Power Rating per un calo di forma stagionale,
+restando sempre superiore a una neo-promossa (che parte al massimo da 1300)."""
+
+MID_TIER_RATING_FLOOR = 1450.0
+"""Floor per una squadra di fascia media di massima serie, a protezione da
+cali di forma eccessivi (resta comunque sopra fascia bassa/neo-promosse)."""
+
+OFFSEASON_REVERSION_WEIGHT = 0.30
+"""Quota di Regressione Stagionale (Off-Season Mean Reversion) verso la
+Baseline di Fascia a inizio stagione: 30% baseline + 70% rating calcolato
+alla Giornata 0, in scala con bayesian_baseline_weight fino ad azzerarsi da
+EARLY_SEASON_MATCHDAY_THRESHOLD partite reali in poi — elimina gli
+sbilanciamenti di Form Factor accumulati a fine campionato precedente."""
+
+
+def tiered_base_rating(team: str, league: str) -> float:
+    """Rating Iniziale per Fasce/Categoria (Tiered Initial Rating): Base
+    Rating proporzionato alla fascia della squadra invece del vecchio
+    default piatto a 1500 per tutti i club non catalogati.
+
+    - Neopromossa dalla serie inferiore (PROMOTED_TEAMS): base ≤1300.
+    - Squadra Top/Champions League (TEAM_STRENGTHS ≥ soglia): base 1700-1800.
+    - Squadra nota ma non "big" (TEAM_STRENGTHS < soglia): base 1500-1600.
+    - Squadra di bassa classifica/salvezza nota (LOW_TIER_TEAMS) o campionato
+      di seconda fascia selezionato direttamente: base 1350-1450.
+    - Squadra di massima serie non catalogata: fascia media 1500-1600.
 
     Questo Power Index NON dipende dalle ultime partite: è un ranking Elo di
-    partenza assoluto, aggiornato solo dal Form Factor (componente dinamica).
-    """
-    if team in TEAM_STRENGTHS:
-        return BASE_RATING + (TEAM_STRENGTHS[team] - 1.0) * RATING_SCALE
+    partenza assoluto, aggiornato solo dal Form Factor (componente dinamica)
+    e dalla Regressione Stagionale (vedi global_power_rating)."""
     if team in PROMOTED_TEAMS:
-        return BASE_RATING - (1 - PROMOTED_TEAM_TIER_MULTIPLIER) * RATING_SCALE
-    if league not in TOP_DIVISIONS:
-        return BASE_RATING - (1 - league_tier_multiplier(league)) * RATING_SCALE
-    return BASE_RATING
+        # Base massima 1300, proporzionale al League Tier Multiplier della
+        # categoria di provenienza (una neo-promossa "forte" fra le
+        # neo-promosse parte comunque più in alto di una molto debole).
+        tier_factor = clamp(league_tier_correction(team, league) / PROMOTED_TEAM_TIER_MULTIPLIER, 0.6, 1.0)
+        return PROMOTED_TIER_BASE_RATING_MAX * tier_factor
+
+    if team in TEAM_STRENGTHS:
+        strength = TEAM_STRENGTHS[team]
+        if strength >= TOP_TIER_STRENGTH_THRESHOLD:
+            span = TOP_TIER_BASE_RATING_MAX - TOP_TIER_BASE_RATING_MIN
+            ratio = clamp((strength - TOP_TIER_STRENGTH_THRESHOLD) / 0.10, 0.0, 1.0)
+            return TOP_TIER_BASE_RATING_MIN + span * ratio
+        span = MID_TIER_BASE_RATING_MAX - MID_TIER_BASE_RATING_MIN
+        ratio = clamp((strength - 0.95) / (TOP_TIER_STRENGTH_THRESHOLD - 0.95), 0.0, 1.0)
+        return MID_TIER_BASE_RATING_MIN + span * ratio
+
+    if team in LOW_TIER_TEAMS or league not in TOP_DIVISIONS:
+        return (LOW_TIER_BASE_RATING_MIN + LOW_TIER_BASE_RATING_MAX) / 2
+
+    # Squadra di massima serie non catalogata esplicitamente: fascia media,
+    # posizionata nel range in base al League Tier Multiplier del campionato.
+    span = MID_TIER_BASE_RATING_MAX - MID_TIER_BASE_RATING_MIN
+    return MID_TIER_BASE_RATING_MIN + span * clamp(league_tier_multiplier(league), 0.0, 1.0)
 
 
-def global_power_rating(team: str, league: str, form_factor: float) -> float:
-    """Global Power Rating dinamico usato per il match: rating strutturale
-    più la correzione data dal Form Factor (fino a ±RATING_SCALE·0.15 punti,
-    coerente con FORM_FACTOR_MIN/MAX)."""
-    return base_power_rating(team, league) + (form_factor - 1.0) * RATING_SCALE
+def apply_rating_floor(rating: float, team: str, league: str) -> float:
+    """Anchoring al Rating di Serie (Floor Rating): impedisce che un calo di
+    forma stagionale faccia scendere una squadra di massima serie sotto la
+    soglia minima della propria fascia (es. la Juventus non scende mai sotto
+    1600), garantendo che resti sempre superiore a una neo-promossa. Le
+    neo-promosse e i campionati di seconda fascia non hanno floor: devono
+    poter restare strutturalmente sotto la massima serie."""
+    if team in PROMOTED_TEAMS or league not in TOP_DIVISIONS:
+        return rating
+    if team in TEAM_STRENGTHS and TEAM_STRENGTHS[team] >= TOP_TIER_STRENGTH_THRESHOLD:
+        return max(rating, TOP_TIER_RATING_FLOOR)
+    return max(rating, MID_TIER_RATING_FLOOR)
+
+
+def apply_offseason_mean_reversion(rating: float, tier_baseline: float, matches_played: int) -> float:
+    """Regressione Stagionale (Off-Season Mean Reversion): a inizio stagione
+    avvicina il rating calcolato (che porta ancora l'inerzia del Form Factor
+    di fine campionato precedente) verso la Baseline di Fascia pulita, per
+    eliminare gli sbilanciamenti accumulati a fine stagione scorsa. Peso 30%
+    baseline / 70% rating alla Giornata 0 (OFFSEASON_REVERSION_WEIGHT), in
+    scala con bayesian_baseline_weight fino ad azzerarsi da
+    EARLY_SEASON_MATCHDAY_THRESHOLD partite reali in poi — stesso schema
+    dell'Ancoraggio Bayesiano già usato per xG/tiri, qui applicato al rating."""
+    reversion_intensity = OFFSEASON_REVERSION_WEIGHT * bayesian_baseline_weight(matches_played)
+    return (1 - reversion_intensity) * rating + reversion_intensity * tier_baseline
+
+
+def base_power_rating(team: str, league: str) -> float:
+    """Alias storico di tiered_base_rating: componente strutturale del
+    Global Power Rating, prima del Form Factor. Mantenuto per compatibilità
+    con le funzioni che già lo richiamano (es. team_specific_baseline)."""
+    return tiered_base_rating(team, league)
+
+
+# ==============================================================================
+# ANTEPOST TIERING — Inizializzatore di Power Rating basato sulle Fasce di
+# Mercato (pronostici pre-campionato: chi lotta per il titolo, chi per
+# l'Europa, chi per la salvezza, chi è appena salito di categoria).
+# ==============================================================================
+# Fino a EARLY_SEASON_MATCHDAY_THRESHOLD giornate reali, il Power Rating NON
+# deriva dai calcoli automatici (TEAM_STRENGTHS + Form Factor + storici della
+# stagione precedente), ma è FORZATO direttamente dalla Fascia di Forza
+# Iniziale della squadra: pochi risultati (magari fortunati o sfortunati)
+# nelle primissime giornate non possono ribaltare un pronostico di mercato
+# consolidato. Dalla Giornata 5 in poi il motore torna al calcolo dinamico
+# ordinario (tiered_base_rating + Form Factor + Floor Rating).
+ANTEPOST_TIER_RATING_RANGE: dict[int, tuple[float, float]] = {
+    1: (1750.0, 1850.0),  # Tier 1 · Top / Titolo
+    2: (1620.0, 1750.0),  # Tier 2 · Europa
+    3: (1480.0, 1620.0),  # Tier 3 · Metà classifica
+    4: (1350.0, 1480.0),  # Tier 4 · Salvezza
+    5: (1250.0, 1350.0),  # Tier 5 · Neopromosse
+}
+
+ANTEPOST_TIER_LABELS: dict[int, str] = {
+    1: "Tier 1 · Top/Titolo",
+    2: "Tier 2 · Europa",
+    3: "Tier 3 · Metà classifica",
+    4: "Tier 4 · Salvezza",
+    5: "Tier 5 · Neopromosse",
+}
+
+
+def _classify_antepost_tier(team: str) -> int:
+    """Deriva la Fascia di Forza (1-3) di un club già curato in
+    TEAM_STRENGTHS dal suo moltiplicatore storico, per costruire ANTEPOST_TIER
+    senza dover ricatalogare a mano ogni singolo club."""
+    strength = TEAM_STRENGTHS[team]
+    if strength >= TOP_TIER_STRENGTH_THRESHOLD:
+        return 1
+    if strength >= 1.00:
+        return 2
+    return 3
+
+
+ANTEPOST_TIER: dict[str, int] = {team: _classify_antepost_tier(team) for team in TEAM_STRENGTHS}
+ANTEPOST_TIER.update({team: 5 for team in PROMOTED_TEAMS})
+"""Fascia di Forza Iniziale (Antepost Tiering) per ciascuna squadra
+catalogata: Tier 1 = Top/Titolo, Tier 2 = Europa, Tier 3 = Metà classifica,
+Tier 4 = Salvezza, Tier 5 = Neopromosse. Le squadre non presenti ricadono sul
+fallback prudente di get_antepost_tier."""
+
+ANTEPOST_MARKET_ADJUSTMENT_SCALE = 120.0
+"""Punti di rating massimi che lo slider manuale (Mercato + Infortuni
+combinati, ±100%) può spostare il Rating di Fascia Antepost: un mercato
+eccellente fa salire la squadra ai vertici della propria fascia."""
+
+ANTEPOST_TIER_OVERFLOW_BUFFER = 40.0
+"""Margine oltre i confini della fascia che lo slider manuale può superare al
+massimo, così una squadra di fascia inferiore non scavalca mai
+irrealisticamente una squadra Top Club anche col miglior mercato possibile."""
+
+
+def get_antepost_tier(team: str, league: str) -> int:
+    """Fascia di Forza Iniziale della squadra: legge ANTEPOST_TIER se
+    catalogata, altrimenti un fallback prudente (Tier 3 · Metà classifica in
+    massima serie, Tier 4 · Salvezza per un campionato di seconda fascia
+    selezionato direttamente)."""
+    if team in ANTEPOST_TIER:
+        return ANTEPOST_TIER[team]
+    return 3 if league in TOP_DIVISIONS else 4
+
+
+def antepost_tier_rating(team: str, league: str) -> float:
+    """Rating di Fascia Antepost: posiziona la squadra all'interno del range
+    di rating della propria Fascia di Forza (ANTEPOST_TIER_RATING_RANGE),
+    usando il moltiplicatore TEAM_STRENGTHS/League Tier Multiplier per una
+    granularità più fine quando disponibile, altrimenti il centro fascia
+    (es. Tier 1 ≥1750, Tier 5 centrato a 1300)."""
+    tier = get_antepost_tier(team, league)
+    low, high = ANTEPOST_TIER_RATING_RANGE[tier]
+    if team in TEAM_STRENGTHS:
+        tier_strength_bounds = {
+            1: (TOP_TIER_STRENGTH_THRESHOLD, 1.20),
+            2: (1.00, TOP_TIER_STRENGTH_THRESHOLD),
+            3: (0.90, 1.00),
+        }
+        span_low, span_high = tier_strength_bounds.get(tier, (0.90, 1.20))
+        ratio = clamp((TEAM_STRENGTHS[team] - span_low) / (span_high - span_low), 0.0, 1.0)
+        return low + (high - low) * ratio
+    if team in PROMOTED_TEAMS:
+        tier_factor = clamp(league_tier_correction(team, league) / PROMOTED_TEAM_TIER_MULTIPLIER, 0.6, 1.0)
+        return low + (high - low) * tier_factor
+    return (low + high) / 2
+
+
+def apply_antepost_market_adjustment(tier_rating: float, tier: int, manual_factor: float) -> float:
+    """Applica gli slider manuali (Mercato + Infortuni) direttamente sul
+    Rating di Fascia Antepost: un buon mercato fa salire la squadra di
+    qualche punto all'interno (o appena oltre) la propria fascia, senza però
+    poter scavalcare irrealisticamente i Top Club di fascia superiore — il
+    risultato resta clampato entro i confini della fascia + un piccolo
+    margine (ANTEPOST_TIER_OVERFLOW_BUFFER)."""
+    adjusted = tier_rating + manual_factor * ANTEPOST_MARKET_ADJUSTMENT_SCALE
+    low, high = ANTEPOST_TIER_RATING_RANGE[tier]
+    return clamp(adjusted, low - ANTEPOST_TIER_OVERFLOW_BUFFER, high + ANTEPOST_TIER_OVERFLOW_BUFFER)
+
+
+def global_power_rating(
+    team: str,
+    league: str,
+    form_factor: float,
+    matches_played: int = 0,
+    manual_factor: float = 0.0,
+) -> float:
+    """Global Power Rating dinamico usato per il match.
+
+    Fino a EARLY_SEASON_MATCHDAY_THRESHOLD giornate reali (Antepost Tiering):
+    il rating è FORZATO dalla Fascia di Forza Iniziale della squadra
+    (antepost_tier_rating), sovrascrivendo Form Factor e storici minori; gli
+    slider manuali si applicano direttamente su questo rating di fascia,
+    clampati per non scavalcare la fascia superiore.
+
+    Dalla Giornata 5 in poi: Rating Iniziale per Fasce (tiered_base_rating)
+    più la correzione del Form Factor, con Anchoring al Rating di Serie
+    (apply_rating_floor) e Regressione Stagionale ormai azzerata; gli slider
+    manuali si applicano linearmente in punti di rating."""
+    if matches_played < EARLY_SEASON_MATCHDAY_THRESHOLD:
+        tier = get_antepost_tier(team, league)
+        tier_rating = antepost_tier_rating(team, league)
+        return apply_antepost_market_adjustment(tier_rating, tier, manual_factor)
+
+    tier_baseline = tiered_base_rating(team, league)
+    raw_rating = tier_baseline + (form_factor - 1.0) * RATING_SCALE
+    raw_rating = apply_rating_floor(raw_rating, team, league)
+    raw_rating = apply_offseason_mean_reversion(raw_rating, tier_baseline, matches_played)
+    return raw_rating + manual_factor * RATING_SCALE
 
 
 def is_top_tier(team: str) -> bool:
     """True se la squadra è un club di fascia alta secondo TEAM_STRENGTHS."""
-    return team in TEAM_STRENGTHS and TEAM_STRENGTHS[team] >= 1.08
+    return team in TEAM_STRENGTHS and TEAM_STRENGTHS[team] >= TOP_TIER_STRENGTH_THRESHOLD
 
 
 def elo_expected_score(rating_a: float, rating_b: float) -> float:
@@ -1410,9 +1642,16 @@ def build_match_model(
     home_sot_raw = max(home_sot_raw, 0.3)
     away_sot_raw = max(away_sot_raw, 0.3)
 
-    # --- 4. Global Power Rating (strutturale + Form Factor + slider manuali) -
-    home_rating = global_power_rating(home, league, home_stats.form_factor) + manual_factor_home * RATING_SCALE
-    away_rating = global_power_rating(away, league, away_stats.form_factor) + manual_factor_away * RATING_SCALE
+    # --- 4. Global Power Rating (Antepost Tiering nelle prime 5 giornate, poi
+    # strutturale + Form Factor + Floor Rating) con slider manuali applicati
+    # direttamente dentro global_power_rating (clampati per fascia a inizio
+    # stagione, lineari in punti di rating a stagione avviata). --------------
+    home_rating = global_power_rating(
+        home, league, home_stats.form_factor, home_stats.current_season_matches, manual_factor_home
+    )
+    away_rating = global_power_rating(
+        away, league, away_stats.form_factor, away_stats.current_season_matches, manual_factor_away
+    )
 
     # Il fattore campo entra come bonus di rating solo per il calcolo di questo
     # match: pesa quindi su OGNI metrica derivata dal differenziale, non solo
