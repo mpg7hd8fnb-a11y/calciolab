@@ -491,12 +491,13 @@ TEAM_TIER_KEYWORDS: dict[int, tuple[str, ...]] = {
         "psg", "paris saint", "atletico madrid", "atlético madrid",
         "bayer leverkusen", "borussia dortmund",
     ),
-    2: (  # Europa
+    2: (  # Europa / Champions League
         "roma", "lazio", "fiorentina", "bologna", "chelsea", "tottenham",
         "spurs", "newcastle", "aston villa", "manchester united",
         "man united", "man utd", "rb lipsia", "rb leipzig", "marsiglia",
         "marseille", "villarreal", "stoccarda", "stuttgart", "lione",
         "lyon", "monaco", "psv", "sporting cp", "sporting", "porto",
+        "como", "como 1907", "fc como",
     ),
     3: (  # Metà classifica
         "torino", "genoa", "udinese", "sassuolo", "everton", "fulham",
@@ -505,7 +506,7 @@ TEAM_TIER_KEYWORDS: dict[int, tuple[str, ...]] = {
         "galatasaray",
     ),
     4: (  # Salvezza
-        "lecce", "cagliari", "monza", "verona", "como", "parma",
+        "lecce", "cagliari", "monza", "verona", "parma",
         "brentford", "forest", "nottingham", "leeds", "sunderland",
         "elche", "levante", "shakhtar", "slavia praga", "slavia prague",
     ),
