@@ -1485,6 +1485,104 @@ def goal_market_probabilities(model: MatchModel, max_goals: int = 12) -> dict[st
     }
 
 
+# ==============================================================================
+# FASE 1: VALUE BETTING & UX — Kelly Criterion + Heatmap dei Mercati
+# ==============================================================================
+# Estensione puramente additiva: non modifica Power Rating, TEAM_TIERS,
+# Dixon-Coles, Dynamic Decay né alcun calcolo di xG esistente. Riusa solo le
+# probabilità già calcolate da match_outcome_probabilities/
+# goal_market_probabilities per garantire coerenza con le altre schede.
+KELLY_FRACTION = 0.25
+"""Quarter Kelly: frazione conservativa applicata al Kelly Criterion pieno
+per contenere la varianza sul bankroll (Fractional Kelly Stake)."""
+
+HEATMAP_HIGH_THRESHOLD = 0.70
+"""Soglia Heatmap 'Verde Chiaro/Smeraldo': probabilità >= 70%."""
+
+HEATMAP_MID_THRESHOLD = 0.50
+"""Soglia Heatmap 'Giallo/Arancione': probabilità fra 50% e 69%. Sotto il
+50% la cella è 'Rosso/Grigio'."""
+
+
+def kelly_stake_percent(probability: float, decimal_odds: float | None, fraction: float = KELLY_FRACTION) -> float | None:
+    """Fractional Kelly Stake (%):
+    ((Probabilità_Algoritmo * Quota_Bookmaker) - 1) / (Quota_Bookmaker - 1) * 100
+    moltiplicato per `fraction` (default Quarter Kelly, 25%). Restituisce
+    None se non è stata inserita una quota valida (>1.0) — nessuno stake
+    viene calcolato/mostrato in quel caso, solo la probabilità dell'algoritmo."""
+    if decimal_odds is None or decimal_odds <= 1.0:
+        return None
+    full_kelly = ((probability * decimal_odds) - 1) / (decimal_odds - 1)
+    return full_kelly * fraction * 100
+
+
+def value_bet_badge(stake_percent: float | None) -> tuple[str, str, str]:
+    """Badge Value Bet: (etichetta, colore_sfondo, colore_testo).
+    - Stake > 0% → 'VALUE BET DETECTED' (verde).
+    - Stake <= 0% → 'NO VALUE' (grigio neutro).
+    - Nessuna quota inserita → badge non mostrato (None gestito dal chiamante)."""
+    if stake_percent is None:
+        return "QUOTA NON INSERITA", "#1e293b", "#94a3b8"
+    if stake_percent > 0:
+        return "VALUE BET DETECTED", "#16a34a", "#052e16"
+    return "NO VALUE", "#475569", "#e2e8f0"
+
+
+def double_chance_probabilities(model: MatchModel) -> dict[str, float]:
+    """Probabilità Doppia Chance (1X, X2, 12), derivate dalle stesse
+    probabilità 1X2 (Poisson bivariata + Dixon-Coles) del motore — nessun
+    nuovo calcolo statistico, solo somme delle probabilità già esistenti."""
+    return {
+        "1X": clamp(model.home_win_prob + model.draw_prob, 0.0, 1.0),
+        "X2": clamp(model.draw_prob + model.away_win_prob, 0.0, 1.0),
+        "12": clamp(model.home_win_prob + model.away_win_prob, 0.0, 1.0),
+    }
+
+
+def heatmap_market_probabilities(model: MatchModel, home: str, away: str) -> list[dict[str, object]]:
+    """Elenco dei mercati (1X2, Doppia Chance, Over/Under 1.5-2.5-3.5,
+    Goal/No Goal) con la relativa probabilità, per la Heatmap ad alta
+    probabilità. Riusa goal_market_probabilities/double_chance_probabilities,
+    già coerenti con Dixon-Coles."""
+    markets = goal_market_probabilities(model)
+    dc = double_chance_probabilities(model)
+    return [
+        {"Mercato": f"1 · {home}", "Probabilità": model.home_win_prob},
+        {"Mercato": "X · Pareggio", "Probabilità": model.draw_prob},
+        {"Mercato": f"2 · {away}", "Probabilità": model.away_win_prob},
+        {"Mercato": "1X · Doppia Chance", "Probabilità": dc["1X"]},
+        {"Mercato": "X2 · Doppia Chance", "Probabilità": dc["X2"]},
+        {"Mercato": "12 · Doppia Chance", "Probabilità": dc["12"]},
+        {"Mercato": "Over 1.5", "Probabilità": markets["total_over"][1.5]},
+        {"Mercato": "Under 1.5", "Probabilità": 1 - markets["total_over"][1.5]},
+        {"Mercato": "Over 2.5", "Probabilità": markets["total_over"][2.5]},
+        {"Mercato": "Under 2.5", "Probabilità": 1 - markets["total_over"][2.5]},
+        {"Mercato": "Over 3.5", "Probabilità": markets["total_over"][3.5]},
+        {"Mercato": "Under 3.5", "Probabilità": 1 - markets["total_over"][3.5]},
+        {"Mercato": "Goal (GG)", "Probabilità": markets["goal_goal"]},
+        {"Mercato": "No Goal (NG)", "Probabilità": markets["no_goal"]},
+        {"Mercato": f"Over 1.5 {home}", "Probabilità": markets["home_over"][1.5]},
+        {"Mercato": f"Over 1.5 {away}", "Probabilità": markets["away_over"][1.5]},
+    ]
+
+
+def top_heatmap_markets(model: MatchModel, home: str, away: str, top_n: int = 5) -> list[dict[str, object]]:
+    """Top N mercati per probabilità decrescente, per la griglia visiva
+    compatta in cima alla scheda Value Betting & Heatmap."""
+    rows = heatmap_market_probabilities(model, home, away)
+    return sorted(rows, key=lambda row: row["Probabilità"], reverse=True)[:top_n]
+
+
+def heatmap_color(probability: float) -> tuple[str, str]:
+    """(colore_sfondo, colore_testo) per una cella della Heatmap, in base
+    alle soglie HEATMAP_HIGH_THRESHOLD/HEATMAP_MID_THRESHOLD."""
+    if probability >= HEATMAP_HIGH_THRESHOLD:
+        return "#10b981", "#052e16"  # Verde chiaro / smeraldo
+    if probability >= HEATMAP_MID_THRESHOLD:
+        return "#f59e0b", "#3a2400"  # Giallo / arancione
+    return "#7f1d1d", "#fee2e2"  # Rosso / grigio scuro
+
+
 def run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, object]:
     rng = np.random.default_rng()
     home_goals = rng.poisson(model.home_lambda, n_simulations)
@@ -1742,6 +1840,108 @@ def render_metric_cards(cards: list[tuple[str, str]], columns: int = 4) -> None:
             )
 
 
+def _render_heatmap_cell(label: str, probability: float, *, big: bool = False) -> None:
+    """Singola cella colorata della Heatmap (verde/arancione/rosso)."""
+    bg, text_color = heatmap_color(probability)
+    value_size = "1.6rem" if big else "1.05rem"
+    label_size = ".8rem" if big else ".72rem"
+    st.markdown(
+        f'<div style="background:{bg};color:{text_color};border-radius:12px;'
+        f'padding:{"16px 10px" if big else "10px 6px"};margin-bottom:10px;'
+        f'text-align:center;font-weight:700">'
+        f'<div style="font-size:{label_size};opacity:.9">{escape(str(label))}</div>'
+        f'<div style="font-size:{value_size};margin-top:4px">{probability:.0%}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_value_betting_tab(model: MatchModel, home: str, away: str) -> None:
+    """FASE 1: VALUE BETTING & UX — Heatmap dei mercati ad alta probabilità
+    + Calcolatore Kelly Criterion (Quarter Kelly). Estensione puramente
+    additiva: legge solo il MatchModel già calcolato dal motore esistente."""
+    st.markdown(
+        "### 🟩 Heatmap dei Mercati ad Alta Probabilità\n"
+        "I 5 mercati più probabili per questa partita, calcolati dalla stessa "
+        "matrice Poisson + Dixon-Coles usata nelle altre schede. "
+        "🟩 ≥70% · 🟧 50-69% · 🟥 <50%."
+    )
+    top_markets = top_heatmap_markets(model, home, away, top_n=5)
+    heatmap_cols = st.columns(len(top_markets))
+    for col, row in zip(heatmap_cols, top_markets):
+        with col:
+            _render_heatmap_cell(row["Mercato"], row["Probabilità"], big=True)
+
+    with st.expander("Griglia completa dei mercati (1X2, Doppia Chance, Over/Under, Goal/No Goal)"):
+        all_rows = heatmap_market_probabilities(model, home, away)
+        grid_cols = st.columns(4)
+        for index, row in enumerate(all_rows):
+            with grid_cols[index % 4]:
+                _render_heatmap_cell(row["Mercato"], row["Probabilità"])
+
+    st.markdown("---")
+    st.markdown(
+        "### 💰 Calcolatore Kelly Criterion (Quarter Kelly)\n"
+        "Inserisci la quota reale del bookmaker per ciascun mercato (lascia "
+        "0 se non la conosci): se la probabilità del nostro algoritmo supera "
+        "quella implicita nella quota, lo stake consigliato (25% del Kelly "
+        "pieno) sarà positivo — altrimenti nessun vantaggio (**NO VALUE**). "
+        "Senza quota inserita viene mostrata solo la probabilità dell'algoritmo."
+    )
+
+    goal_markets = goal_market_probabilities(model)
+    kelly_markets = [
+        ("kelly_home", f"1 · Vittoria {home}", model.home_win_prob),
+        ("kelly_draw", "X · Pareggio", model.draw_prob),
+        ("kelly_away", f"2 · Vittoria {away}", model.away_win_prob),
+        ("kelly_over25", "Over 2.5 gol", goal_markets["total_over"][2.5]),
+        ("kelly_under25", "Under 2.5 gol", 1 - goal_markets["total_over"][2.5]),
+        ("kelly_gg", "Goal (GG)", goal_markets["goal_goal"]),
+        ("kelly_ng", "No Goal (NG)", goal_markets["no_goal"]),
+    ]
+
+    header_cols = st.columns([2.4, 1, 1.1, 2.5])
+    header_cols[0].caption("Mercato")
+    header_cols[1].caption("Probabilità algoritmo")
+    header_cols[2].caption("Quota bookmaker")
+    header_cols[3].caption("Esito Kelly")
+
+    for key, label, probability in kelly_markets:
+        col_label, col_prob, col_odds, col_badge = st.columns([2.4, 1, 1.1, 2.5])
+        with col_label:
+            st.markdown(f"**{label}**")
+        with col_prob:
+            st.markdown(f"{probability:.1%}")
+        with col_odds:
+            odds = st.number_input(
+                "Quota",
+                min_value=0.0,
+                max_value=50.0,
+                value=0.0,
+                step=0.05,
+                key=f"{key}_odds",
+                label_visibility="collapsed",
+            )
+        with col_badge:
+            stake = kelly_stake_percent(probability, odds if odds > 1.0 else None)
+            badge_label, bg, text_color = value_bet_badge(stake)
+            if stake is None:
+                st.caption("Inserisci una quota per calcolare lo stake")
+            else:
+                detail = f"Stake consigliato: {stake:.1f}%" if stake > 0 else "Quota sbilanciata a favore del bookmaker"
+                st.markdown(
+                    f'<div style="background:{bg};color:{text_color};border-radius:8px;'
+                    f'padding:6px 10px;font-weight:700;text-align:center">{badge_label}'
+                    f'<br><span style="font-size:.82rem;font-weight:500">{detail}</span></div>',
+                    unsafe_allow_html=True,
+                )
+
+    st.caption(
+        f"Fractional Kelly Stake = ((Probabilità × Quota) - 1) / (Quota - 1) × 100, "
+        f"scalato al {KELLY_FRACTION:.0%} (Quarter Kelly) per contenere la varianza sul bankroll."
+    )
+
+
 def render_dashboard(sidebar_values: dict[str, float]) -> None:
     st.markdown(
         "### Impostazioni partita\n"
@@ -1868,10 +2068,11 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
     note = escape(model.engine_note) if model.engine_note else "Global Power Rating calcolato."
     st.caption(note)
 
-    tab_poisson, tab_goal_markets, tab_montecarlo = st.tabs(
+    tab_poisson, tab_goal_markets, tab_value_betting, tab_montecarlo = st.tabs(
         [
             "Analisi Quote & Probabilità (Poisson)",
             "📊 Statistiche Gol & Mercati",
+            "💰 Value Betting & Heatmap",
             "Simulatore Monte Carlo (10.000 Partite)",
         ]
     )
@@ -1953,6 +2154,9 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
         with ng_col:
             st.metric("No Goal (NG)", f"{markets['no_goal']:.1%}")
             st.progress(min(max(markets["no_goal"], 0.0), 1.0))
+
+    with tab_value_betting:
+        render_value_betting_tab(model, home, away)
 
     with tab_montecarlo:
         st.markdown(
