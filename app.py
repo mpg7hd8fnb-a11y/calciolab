@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 from dataclasses import dataclass
@@ -1722,6 +1723,347 @@ def fatigue_alert_message(team: str, fatigue: dict[str, object]) -> str | None:
     return f"⚠️ Allerta Affaticamento: {team} {detail_text} (malus attacco {fatigue['attack_malus']:+.0%})"
 
 
+# ==============================================================================
+# FASE 3a: TRACCIAMENTO FINANZIARIO BANKROLL (ROI / YIELD)
+# ==============================================================================
+# Estensione puramente additiva e indipendente dal motore di simulazione: non
+# legge né modifica Power Rating, TEAM_TIERS, Dixon-Coles, slider manuali o
+# Affaticamento/Turnover. Persistenza su file locali (CSV/JSON con pandas),
+# così lo storico non si azzera al ricaricamento della pagina — in hosting
+# con filesystem effimero (es. redeploy) i file vengono ricreati vuoti al
+# riavvio del processo, ma sopravvivono a un normale refresh del browser.
+BANKROLL_LOG_PATH = "bankroll_log.csv"
+BANKROLL_CONFIG_PATH = "bankroll_config.json"
+BANKROLL_LOG_COLUMNS = [
+    "timestamp", "league", "match", "market", "odds", "stake", "stake_type", "outcome", "profit",
+]
+BET_OUTCOMES = ("In Corso", "Vinta", "Persa")
+DEFAULT_INITIAL_BANKROLL = 1000.0
+
+
+def load_bankroll_config() -> dict[str, float]:
+    """Carica il Bankroll Iniziale da file JSON; fallback al default se il
+    file non esiste ancora (prima esecuzione) o è corrotto."""
+    try:
+        with open(BANKROLL_CONFIG_PATH, "r", encoding="utf-8") as config_file:
+            config = json.load(config_file)
+        return {"initial_bankroll": float(config.get("initial_bankroll", DEFAULT_INITIAL_BANKROLL))}
+    except (FileNotFoundError, json.JSONDecodeError, ValueError, TypeError):
+        return {"initial_bankroll": DEFAULT_INITIAL_BANKROLL}
+
+
+def save_bankroll_config(initial_bankroll: float) -> None:
+    try:
+        with open(BANKROLL_CONFIG_PATH, "w", encoding="utf-8") as config_file:
+            json.dump({"initial_bankroll": float(initial_bankroll)}, config_file)
+    except OSError:
+        pass  # Filesystem in sola lettura o non disponibile: si prosegue senza persistenza.
+
+
+def load_bankroll_log() -> pd.DataFrame:
+    """Carica lo storico delle giocate da CSV, creando un DataFrame vuoto
+    (con le colonne corrette) se il file non esiste ancora o è vuoto."""
+    try:
+        df = pd.read_csv(BANKROLL_LOG_PATH)
+        for column in BANKROLL_LOG_COLUMNS:
+            if column not in df.columns:
+                df[column] = pd.Series(dtype="object")
+        return df[BANKROLL_LOG_COLUMNS]
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        return pd.DataFrame(columns=BANKROLL_LOG_COLUMNS)
+
+
+def save_bankroll_log(df: pd.DataFrame) -> None:
+    try:
+        df.to_csv(BANKROLL_LOG_PATH, index=False)
+    except OSError:
+        pass  # Filesystem in sola lettura o non disponibile: si prosegue senza persistenza.
+
+
+def compute_bet_profit(odds: float, stake: float, outcome: str) -> float:
+    """Profitto/perdita di una singola giocata: stake*(quota-1) se vinta,
+    -stake se persa, 0 se ancora 'In Corso' (non ancora conteggiata nel ROI)."""
+    if outcome == "Vinta":
+        return stake * (odds - 1)
+    if outcome == "Persa":
+        return -stake
+    return 0.0
+
+
+def append_bet(league: str, match: str, market: str, odds: float, stake: float, stake_type: str, outcome: str) -> pd.DataFrame:
+    """Aggiunge una nuova giocata allo storico persistito e lo restituisce
+    aggiornato (già salvato su file)."""
+    df = load_bankroll_log()
+    new_row = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "league": league,
+        "match": match,
+        "market": market,
+        "odds": odds,
+        "stake": stake,
+        "stake_type": stake_type,
+        "outcome": outcome,
+        "profit": compute_bet_profit(odds, stake, outcome),
+    }
+    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    save_bankroll_log(df)
+    return df
+
+
+def recompute_and_save_log(df: pd.DataFrame) -> pd.DataFrame:
+    """Ricalcola la colonna 'profit' per ogni riga (es. dopo che l'utente ha
+    aggiornato manualmente un esito da 'In Corso' a 'Vinta'/'Persa' nella
+    tabella) e ripersiste lo storico aggiornato."""
+    df = df.copy()
+    df["profit"] = [
+        compute_bet_profit(float(row["odds"]), float(row["stake"]), str(row["outcome"]))
+        for _, row in df.iterrows()
+    ]
+    save_bankroll_log(df)
+    return df
+
+
+def bankroll_metrics(df: pd.DataFrame, initial_bankroll: float) -> dict[str, float]:
+    """Metriche finanziarie in tempo reale: Profitto/Perdita Totale, ROI%,
+    Win Rate% (solo su giocate concluse), Bankroll Attuale."""
+    if df.empty:
+        return {
+            "total_staked": 0.0, "total_profit": 0.0, "roi": 0.0,
+            "win_rate": 0.0, "current_bankroll": initial_bankroll, "settled_count": 0,
+        }
+    settled = df[df["outcome"].isin(["Vinta", "Persa"])]
+    total_staked = float(settled["stake"].sum()) if not settled.empty else 0.0
+    total_profit = float(settled["profit"].sum()) if not settled.empty else 0.0
+    roi = (total_profit / total_staked * 100) if total_staked > 0 else 0.0
+    win_rate = (float((settled["outcome"] == "Vinta").sum()) / len(settled) * 100) if len(settled) > 0 else 0.0
+    return {
+        "total_staked": total_staked,
+        "total_profit": total_profit,
+        "roi": roi,
+        "win_rate": win_rate,
+        "current_bankroll": initial_bankroll + total_profit,
+        "settled_count": len(settled),
+    }
+
+
+def bankroll_timeline(df: pd.DataFrame, initial_bankroll: float) -> pd.DataFrame:
+    """Serie storica del Bankroll (per il grafico st.line_chart): valore
+    dopo ciascuna giocata conclusa, in ordine cronologico."""
+    settled = df[df["outcome"].isin(["Vinta", "Persa"])].copy()
+    if settled.empty:
+        return pd.DataFrame({"Giocata": [0], "Bankroll (€)": [initial_bankroll]})
+    settled = settled.sort_values("timestamp")
+    settled["Bankroll (€)"] = initial_bankroll + settled["profit"].astype(float).cumsum()
+    settled["Giocata"] = range(1, len(settled) + 1)
+    timeline = settled[["Giocata", "Bankroll (€)"]].reset_index(drop=True)
+    starting_point = pd.DataFrame({"Giocata": [0], "Bankroll (€)": [initial_bankroll]})
+    return pd.concat([starting_point, timeline], ignore_index=True)
+
+
+# ==============================================================================
+# FASE 3b: SINTESI TESTUALE GENERATA DA AI (MATCH EXECUTIVE SUMMARY)
+# ==============================================================================
+def _get_llm_api_key() -> tuple[str, str] | None:
+    """Cerca una chiave API LLM (Anthropic, OpenAI, Gemini) fra le variabili
+    d'ambiente o gli st.secrets, in questo ordine di priorità. Ritorna
+    (provider, chiave) oppure None se nessuna è configurata — in quel caso il
+    chiamante ripiega automaticamente sul generatore di template Python."""
+    candidates = (
+        ("anthropic", "ANTHROPIC_API_KEY"),
+        ("openai", "OPENAI_API_KEY"),
+        ("gemini", "GOOGLE_API_KEY"),
+        ("gemini", "GEMINI_API_KEY"),
+    )
+    for provider, env_name in candidates:
+        api_key = os.environ.get(env_name)
+        if not api_key:
+            try:
+                api_key = st.secrets.get(env_name)
+            except Exception:
+                api_key = None
+        if api_key:
+            return provider, api_key
+    return None
+
+
+def build_match_summary_prompt(
+    model: MatchModel,
+    home: str,
+    away: str,
+    fatigue_home: dict[str, object] | None,
+    fatigue_away: dict[str, object] | None,
+    kelly_rows: list[tuple[str, float, float | None]],
+) -> str:
+    """Costruisce il prompt testuale con tutti i dati già calcolati dal
+    motore (Power Rating, xG, 1X2, affaticamento, value bet), da passare
+    all'LLM per generare il Report Analitico Intelligence."""
+    value_bets = [f"{label} (prob. {prob:.0%}, stake consigliato {stake:.1f}%)" for label, prob, stake in kelly_rows if stake is not None and stake > 0]
+    lines = [
+        f"Partita: {home} vs {away}.",
+        f"Power Rating: {home} {model.home_rating:.0f}, {away} {model.away_rating:.0f}.",
+        f"xG attesi: {home} {model.home_lambda:.2f}, {away} {model.away_lambda:.2f}.",
+        f"Probabilità 1X2: 1={model.home_win_prob:.0%} X={model.draw_prob:.0%} 2={model.away_win_prob:.0%}.",
+    ]
+    if model.manual_factor_home or model.manual_factor_away:
+        lines.append(
+            f"Slider manuali (Mercato+Infortuni): {home} {model.manual_factor_home:+.0%}, "
+            f"{away} {model.manual_factor_away:+.0%}."
+        )
+    if fatigue_home and abs(float(fatigue_home.get("attack_malus", 0.0))) >= FATIGUE_ALERT_THRESHOLD:
+        lines.append(f"Affaticamento {home}: malus attacco {float(fatigue_home['attack_malus']):+.0%}.")
+    if fatigue_away and abs(float(fatigue_away.get("attack_malus", 0.0))) >= FATIGUE_ALERT_THRESHOLD:
+        lines.append(f"Affaticamento {away}: malus attacco {float(fatigue_away['attack_malus']):+.0%}.")
+    lines.append("Value bet rilevate: " + ("; ".join(value_bets) if value_bets else "nessuna al momento."))
+    lines.append(
+        "Scrivi un Report Analitico Intelligence di 3-4 punti chiave in italiano, in linguaggio "
+        "naturale e professionale, in formato elenco puntato Markdown, per un utente che deve "
+        "decidere se scommettere su questa partita. Copri: 1) confronto Power Rating/favorita, "
+        "2) impatto di slider manuali/affaticamento se presenti, 3) eventuali value bet rilevate, "
+        "4) sintesi del pronostico 1X2/xG. Non inventare dati non forniti."
+    )
+    return "\n".join(lines)
+
+
+def generate_match_summary_ai(prompt: str, provider: str, api_key: str) -> str | None:
+    """Tenta la generazione del report via LLM (Anthropic/OpenAI/Gemini).
+    Ritorna None per qualunque errore (libreria non installata, rete, quota,
+    chiave non valida...), così il chiamante ripiega sul template Python
+    senza mai far crashare l'app."""
+    try:
+        if provider == "anthropic":
+            import anthropic
+
+            client = anthropic.Anthropic(api_key=api_key)
+            response = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=400,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = "".join(getattr(block, "text", "") for block in response.content)
+            return text.strip() or None
+        if provider == "openai":
+            import openai
+
+            client = openai.OpenAI(api_key=api_key)
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=400,
+            )
+            text = response.choices[0].message.content
+            return text.strip() if text else None
+        if provider == "gemini":
+            import google.generativeai as genai
+
+            genai.configure(api_key=api_key)
+            gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+            response = gemini_model.generate_content(prompt)
+            return response.text.strip() if getattr(response, "text", None) else None
+    except Exception:
+        return None
+    return None
+
+
+def generate_match_summary_template(
+    model: MatchModel,
+    home: str,
+    away: str,
+    fatigue_home: dict[str, object] | None,
+    fatigue_away: dict[str, object] | None,
+    kelly_rows: list[tuple[str, float, float | None]],
+) -> str:
+    """Fallback senza LLM: genera 3-4 punti chiave in linguaggio naturale
+    incrociando i dati già calcolati dal motore, con un generatore di
+    template testuale condizionale in Python (nessuna chiamata esterna)."""
+    bullets: list[str] = []
+
+    favorite = home if model.home_rating >= model.away_rating else away
+    underdog = away if favorite == home else home
+    favorite_rating = model.home_rating if favorite == home else model.away_rating
+    underdog_rating = model.away_rating if favorite == home else model.home_rating
+    bullets.append(
+        f"**Power Rating**: {favorite} parte favorita con un Power Rating di {favorite_rating:.0f} "
+        f"contro il {underdog_rating:.0f} di {underdog}."
+    )
+
+    impact_notes = []
+    if model.manual_factor_home:
+        impact_notes.append(f"{home} (slider {model.manual_factor_home:+.0%})")
+    if model.manual_factor_away:
+        impact_notes.append(f"{away} (slider {model.manual_factor_away:+.0%})")
+    if fatigue_home and abs(float(fatigue_home.get("attack_malus", 0.0))) >= FATIGUE_ALERT_THRESHOLD:
+        impact_notes.append(f"{home} affaticata (malus attacco {float(fatigue_home['attack_malus']):+.0%})")
+    if fatigue_away and abs(float(fatigue_away.get("attack_malus", 0.0))) >= FATIGUE_ALERT_THRESHOLD:
+        impact_notes.append(f"{away} affaticata (malus attacco {float(fatigue_away['attack_malus']):+.0%})")
+    if impact_notes:
+        bullets.append("**Assenze / Mercato / Affaticamento**: attenzione a " + ", ".join(impact_notes) + ".")
+    else:
+        bullets.append("**Assenze / Mercato / Affaticamento**: nessun correttivo manuale rilevante applicato.")
+
+    value_bets = [
+        f"'{label}' quota inserita, probabilità stimata {prob:.0%}, stake consigliato {stake:.1f}%"
+        for label, prob, stake in kelly_rows
+        if stake is not None and stake > 0
+    ]
+    if value_bets:
+        bullets.append("**Value Bet rilevate**: " + "; ".join(value_bets) + ".")
+    else:
+        bullets.append("**Value Bet**: nessuna quota inserita o nessun vantaggio rilevato al momento nel tab Value Betting.")
+
+    total_goals = model.home_lambda + model.away_lambda
+    bullets.append(
+        f"**Pronostico**: 1={model.home_win_prob:.0%} · X={model.draw_prob:.0%} · 2={model.away_win_prob:.0%}, "
+        f"con xG combinato atteso di {total_goals:.2f} gol."
+    )
+
+    return "\n\n".join(f"- {bullet}" for bullet in bullets)
+
+
+def generate_match_executive_summary(
+    model: MatchModel,
+    home: str,
+    away: str,
+    fatigue_home: dict[str, object] | None,
+    fatigue_away: dict[str, object] | None,
+    kelly_rows: list[tuple[str, float, float | None]],
+) -> tuple[str, str]:
+    """Ritorna (testo_report, fonte) dove fonte è 'AI (<provider>)' o
+    'Template Python'. Prova prima l'LLM se una chiave API è configurata;
+    in assenza di chiave o in caso di qualunque errore, ripiega
+    automaticamente sul generatore di template — l'app non si blocca mai."""
+    api = _get_llm_api_key()
+    if api is not None:
+        provider, api_key = api
+        prompt = build_match_summary_prompt(model, home, away, fatigue_home, fatigue_away, kelly_rows)
+        ai_text = generate_match_summary_ai(prompt, provider, api_key)
+        if ai_text:
+            return ai_text, f"AI ({provider})"
+    return generate_match_summary_template(model, home, away, fatigue_home, fatigue_away, kelly_rows), "Template Python"
+
+
+def compute_kelly_rows_from_session(model: MatchModel, home: str, away: str) -> list[tuple[str, float, float | None]]:
+    """Rilegge le quote eventualmente già inserite dall'utente nel tab Value
+    Betting (session_state, stesse chiavi widget di render_value_betting_tab)
+    e calcola lo stake Kelly per ciascun mercato, senza ridisegnare i widget:
+    usato dal Report Analitico Intelligence per citare le value bet rilevate."""
+    goal_markets = goal_market_probabilities(model)
+    kelly_markets = [
+        ("kelly_home", f"1 · Vittoria {home}", model.home_win_prob),
+        ("kelly_draw", "X · Pareggio", model.draw_prob),
+        ("kelly_away", f"2 · Vittoria {away}", model.away_win_prob),
+        ("kelly_over25", "Over 2.5 gol", goal_markets["total_over"][2.5]),
+        ("kelly_under25", "Under 2.5 gol", 1 - goal_markets["total_over"][2.5]),
+        ("kelly_gg", "Goal (GG)", goal_markets["goal_goal"]),
+        ("kelly_ng", "No Goal (NG)", goal_markets["no_goal"]),
+    ]
+    rows: list[tuple[str, float, float | None]] = []
+    for key, label, probability in kelly_markets:
+        odds = st.session_state.get(f"{key}_odds", 0.0)
+        stake = kelly_stake_percent(probability, odds if odds and odds > 1.0 else None)
+        rows.append((label, probability, stake))
+    return rows
+
+
 def run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, object]:
     rng = np.random.default_rng()
     home_goals = rng.poisson(model.home_lambda, n_simulations)
@@ -2129,6 +2471,124 @@ def render_value_betting_tab(model: MatchModel, home: str, away: str) -> None:
     )
 
 
+def render_match_executive_summary(
+    model: MatchModel,
+    home: str,
+    away: str,
+    fatigue_home: dict[str, object] | None,
+    fatigue_away: dict[str, object] | None,
+) -> None:
+    """🤖 Report Analitico Intelligence: expander in cima alla pagina match
+    con 3-4 punti chiave in linguaggio naturale, generati via LLM se una
+    chiave API è configurata, altrimenti tramite template Python (fallback
+    automatico trasparente — non richiede alcuna azione dell'utente)."""
+    kelly_rows = compute_kelly_rows_from_session(model, home, away)
+    with st.expander("🤖 Report Analitico Intelligence", expanded=True):
+        summary_text, source = generate_match_executive_summary(model, home, away, fatigue_home, fatigue_away, kelly_rows)
+        st.markdown(summary_text)
+        st.caption(f"Generato da: {source} · aggiornato in base a Power Rating, slider manuali e quote inserite.")
+
+
+def render_bankroll_tab() -> None:
+    """📊 Gestione Bankroll & Storico: Bankroll Iniziale, form nuova giocata,
+    storico persistito su file (CSV/JSON), metriche ROI/Yield/Win Rate e
+    grafico dell'andamento del bankroll. Modulo indipendente dal motore di
+    simulazione (non legge Power Rating/Dixon-Coles/slider manuali)."""
+    st.markdown(
+        "### 📊 Gestione Bankroll & Storico\n"
+        "Traccia le giocate effettuate e monitora ROI, Win Rate e andamento "
+        "del bankroll nel tempo. Lo storico è salvato su file e non si "
+        "azzera ricaricando la pagina."
+    )
+
+    config = load_bankroll_config()
+    initial_bankroll = st.number_input(
+        "Bankroll Iniziale (€)",
+        min_value=0.0,
+        value=float(config["initial_bankroll"]),
+        step=50.0,
+        key="initial_bankroll_input",
+    )
+    if initial_bankroll != config["initial_bankroll"]:
+        save_bankroll_config(initial_bankroll)
+
+    st.markdown("---")
+    st.markdown("##### ➕ Registra una nuova giocata")
+    with st.form("new_bet_form", clear_on_submit=True):
+        col_league, col_match = st.columns(2)
+        with col_league:
+            bet_league = st.selectbox("Campionato", options=list(FOOTBALL_DATA_COMPETITIONS), key="bet_league")
+        with col_match:
+            bet_match = st.text_input("Partita", placeholder="es. Inter - Cagliari", key="bet_match")
+
+        col_market, col_odds, col_outcome = st.columns(3)
+        with col_market:
+            bet_market = st.text_input("Mercato / Pronostico", placeholder="es. 1, Over 2.5", key="bet_market")
+        with col_odds:
+            bet_odds = st.number_input("Quota", min_value=1.01, value=1.90, step=0.05, key="bet_odds")
+        with col_outcome:
+            bet_outcome = st.selectbox("Esito", options=BET_OUTCOMES, key="bet_outcome")
+
+        col_stake_type, col_stake_value = st.columns(2)
+        with col_stake_type:
+            stake_type = st.radio("Stake in", options=["€", "% Bankroll (Kelly)"], horizontal=True, key="bet_stake_type")
+        with col_stake_value:
+            if stake_type == "€":
+                stake_amount = st.number_input("Stake (€)", min_value=0.0, value=10.0, step=1.0, key="bet_stake_eur")
+            else:
+                stake_percent = st.number_input("Stake (% bankroll)", min_value=0.0, value=2.0, step=0.5, key="bet_stake_pct")
+                current_bankroll_for_stake = bankroll_metrics(load_bankroll_log(), initial_bankroll)["current_bankroll"]
+                stake_amount = current_bankroll_for_stake * stake_percent / 100
+
+        submitted = st.form_submit_button("Registra giocata", type="primary")
+        if submitted:
+            if not bet_match or not bet_market:
+                st.warning("Inserisci almeno Partita e Mercato prima di registrare la giocata.")
+            else:
+                append_bet(bet_league, bet_match, bet_market, bet_odds, stake_amount, stake_type, bet_outcome)
+                st.success(f"Giocata registrata: {bet_match} · {bet_market} · stake {stake_amount:.2f}€")
+                st.rerun()
+
+    st.markdown("---")
+    log_df = load_bankroll_log()
+
+    if log_df.empty:
+        st.info("Nessuna giocata registrata finora. Usa il form sopra per iniziare a tracciare il tuo storico.")
+        return
+
+    st.markdown("##### ✏️ Storico giocate (modifica l'esito per aggiornare ROI/Bankroll)")
+    edited_df = st.data_editor(
+        log_df,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic",
+        column_config={
+            "outcome": st.column_config.SelectboxColumn("outcome", options=list(BET_OUTCOMES)),
+            "profit": st.column_config.NumberColumn("profit", disabled=True, format="%.2f €"),
+        },
+        key="bankroll_log_editor",
+    )
+    if not edited_df.equals(log_df):
+        edited_df = recompute_and_save_log(edited_df)
+        st.rerun()
+
+    metrics = bankroll_metrics(edited_df, initial_bankroll)
+    st.markdown("##### 📈 Metriche finanziarie")
+    col_pnl, col_roi, col_winrate, col_bankroll = st.columns(4)
+    with col_pnl:
+        st.metric("Profitto/Perdita Totale", f"{metrics['total_profit']:+.2f} €")
+    with col_roi:
+        st.metric("ROI", f"{metrics['roi']:+.1f}%")
+    with col_winrate:
+        st.metric("Win Rate", f"{metrics['win_rate']:.1f}%", help=f"Su {metrics['settled_count']} giocate concluse")
+    with col_bankroll:
+        st.metric("Bankroll Attuale", f"{metrics['current_bankroll']:.2f} €", delta=f"{metrics['total_profit']:+.2f} €")
+
+    st.markdown("##### 📉 Andamento del Bankroll")
+    timeline = bankroll_timeline(edited_df, initial_bankroll)
+    st.line_chart(timeline.set_index("Giocata"))
+
+
 def render_dashboard(sidebar_values: dict[str, float]) -> None:
     st.markdown(
         "### Impostazioni partita\n"
@@ -2217,6 +2677,11 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
     if model is None:
         st.error(error_message)
         return
+
+    # --- 🤖 Report Analitico Intelligence (Fase 3b), in cima alla pagina match --
+    render_match_executive_summary(
+        model, home, away, sidebar_values.get("fatigue_home"), sidebar_values.get("fatigue_away")
+    )
 
     # --- Avviso Modalità Inizio Stagione (badge/warning giallo) -----------------
     if model.early_season_warning:
@@ -2542,7 +3007,14 @@ def main() -> None:
                 st.rerun()
             st.markdown("---")
             sidebar_values = render_sidebar_controls()
-        render_dashboard(sidebar_values)
+
+        main_tab_analysis, main_tab_bankroll = st.tabs(
+            ["⚽ Analisi Match", "📊 Gestione Bankroll & Storico"]
+        )
+        with main_tab_analysis:
+            render_dashboard(sidebar_values)
+        with main_tab_bankroll:
+            render_bankroll_tab()
     else:
         render_login()
 
