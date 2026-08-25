@@ -693,6 +693,12 @@ class MatchModel:
     """Somma di Fattore Mercato + Impatto Infortuni applicata alla squadra di casa."""
     manual_factor_away: float = 0.0
     """Somma di Fattore Mercato + Impatto Infortuni applicata alla squadra ospite."""
+    fatigue_attack_malus_home: float = 0.0
+    fatigue_defense_malus_home: float = 0.0
+    fatigue_attack_malus_away: float = 0.0
+    fatigue_defense_malus_away: float = 0.0
+    """Malus di Affaticamento & Turnover (Fase 2) effettivamente applicati ad
+    attacco/difesa di ciascuna squadra, usati per il badge di allerta in UI."""
 
 
 
@@ -1155,6 +1161,8 @@ def build_match_model(
     market_factor_away: float = 0.0,
     injury_factor_home: float = 0.0,
     injury_factor_away: float = 0.0,
+    fatigue_home: dict[str, object] | None = None,
+    fatigue_away: dict[str, object] | None = None,
 ) -> MatchModel:
     home_stats = fetch_team_live_stats(league, home)
     away_stats = fetch_team_live_stats(league, away)
@@ -1168,6 +1176,16 @@ def build_match_model(
     manual_factor_away = clamp(market_factor_away, *MARKET_FACTOR_BOUNDS) + clamp(
         injury_factor_away, *INJURY_FACTOR_BOUNDS
     )
+
+    # --- 0b. Indice di Affaticamento & Turnover (Fase 2): si SOMMA agli
+    # slider manuali di Mercato/Infortuni, senza sovrascriverli — vedi step 3
+    # dove attacco/difesa/malus vengono combinati additivamente.
+    fatigue_home = fatigue_home or {"attack_malus": 0.0, "defense_malus": 0.0}
+    fatigue_away = fatigue_away or {"attack_malus": 0.0, "defense_malus": 0.0}
+    fatigue_attack_malus_home = float(fatigue_home.get("attack_malus", 0.0))
+    fatigue_defense_malus_home = float(fatigue_home.get("defense_malus", 0.0))
+    fatigue_attack_malus_away = float(fatigue_away.get("attack_malus", 0.0))
+    fatigue_defense_malus_away = float(fatigue_away.get("defense_malus", 0.0))
 
     # --- 1. Statistiche osservate, già pesate con Time-Decay in
     # fetch_team_live_stats: stagione corrente 100%, precedente al massimo
@@ -1248,15 +1266,25 @@ def build_match_model(
     attacco_finale_away = away_tier["attack"] * away_tier_weight + away_stats_attack * away_stats_weight
     difesa_finale_away = away_tier["defense"] * away_tier_weight + away_stats_defense * away_stats_weight
 
-    # --- 3. Slider manuali applicati DIRETTAMENTE su Attacco_Finale/
-    # Difesa_Finale (e sul Rating_Finale per coerenza con tiri/corner/
-    # cartellini), PRIMA del calcolo della matrice Dixon-Coles/Monte Carlo. --
-    attacco_finale_home = clamp(attacco_finale_home * (1 + manual_factor_home), 0.25, 2.6)
-    difesa_finale_home = clamp(difesa_finale_home * (1 - manual_factor_home), 0.25, 2.6)
-    attacco_finale_away = clamp(attacco_finale_away * (1 + manual_factor_away), 0.25, 2.6)
-    difesa_finale_away = clamp(difesa_finale_away * (1 - manual_factor_away), 0.25, 2.6)
-    rating_finale_home += manual_factor_home * RATING_SCALE
-    rating_finale_away += manual_factor_away * RATING_SCALE
+    # --- 3. Slider manuali (Mercato/Infortuni) + Indice di Affaticamento &
+    # Turnover (Fase 2), SOMMATI fra loro (nessuno sovrascrive l'altro) e
+    # applicati DIRETTAMENTE su Attacco_Finale/Difesa_Finale (e sul Rating_
+    # Finale per coerenza con tiri/corner/cartellini), PRIMA del calcolo
+    # della matrice Dixon-Coles/Monte Carlo. -----------------------------------
+    attacco_finale_home = clamp(
+        attacco_finale_home * (1 + manual_factor_home + fatigue_attack_malus_home), 0.25, 2.6
+    )
+    difesa_finale_home = clamp(
+        difesa_finale_home * (1 - manual_factor_home + fatigue_defense_malus_home), 0.25, 2.6
+    )
+    attacco_finale_away = clamp(
+        attacco_finale_away * (1 + manual_factor_away + fatigue_attack_malus_away), 0.25, 2.6
+    )
+    difesa_finale_away = clamp(
+        difesa_finale_away * (1 - manual_factor_away + fatigue_defense_malus_away), 0.25, 2.6
+    )
+    rating_finale_home += (manual_factor_home + fatigue_attack_malus_home) * RATING_SCALE
+    rating_finale_away += (manual_factor_away + fatigue_attack_malus_away) * RATING_SCALE
 
     # --- 4. Gol attesi (xG) dal modello Attacco × Difesa avversaria ------------
     # (parametrizzazione classica alla Dixon-Coles: λ_casa = lega × Attacco_
@@ -1293,10 +1321,10 @@ def build_match_model(
     home_sot_blended = home_sot_tier_baseline * home_tier_weight + home_sot_raw * home_stats_weight
     away_sot_blended = away_sot_tier_baseline * away_tier_weight + away_sot_raw * away_stats_weight
 
-    home_shots_blended *= 1 + manual_factor_home
-    home_sot_blended *= 1 + manual_factor_home
-    away_shots_blended *= 1 + manual_factor_away
-    away_sot_blended *= 1 + manual_factor_away
+    home_shots_blended *= 1 + manual_factor_home + fatigue_attack_malus_home
+    home_sot_blended *= 1 + manual_factor_home + fatigue_attack_malus_home
+    away_shots_blended *= 1 + manual_factor_away + fatigue_attack_malus_away
+    away_sot_blended *= 1 + manual_factor_away + fatigue_attack_malus_away
 
     shot_boost, shot_suppress = rating_scaling_factors(rating_diff, damping=SHOT_RATING_DAMPING)
     home_shots = max(home_shots_blended * shot_boost, 1.0)
@@ -1342,6 +1370,16 @@ def build_match_model(
         engine_note += f" · slider {home}: {manual_factor_home:+.0%}"
     if manual_factor_away:
         engine_note += f" · slider {away}: {manual_factor_away:+.0%}"
+    if fatigue_attack_malus_home or fatigue_defense_malus_home:
+        engine_note += (
+            f" · affaticamento {home}: attacco {fatigue_attack_malus_home:+.0%}/"
+            f"difesa {fatigue_defense_malus_home:+.0%}"
+        )
+    if fatigue_attack_malus_away or fatigue_defense_malus_away:
+        engine_note += (
+            f" · affaticamento {away}: attacco {fatigue_attack_malus_away:+.0%}/"
+            f"difesa {fatigue_defense_malus_away:+.0%}"
+        )
     if early_season:
         engine_note += (
             f" · ⚠️ Antepost Tiering attivo: {home} {home_stats.current_season_matches} "
@@ -1372,6 +1410,10 @@ def build_match_model(
         away_current_season_matches=away_stats.current_season_matches,
         manual_factor_home=manual_factor_home,
         manual_factor_away=manual_factor_away,
+        fatigue_attack_malus_home=fatigue_attack_malus_home,
+        fatigue_defense_malus_home=fatigue_defense_malus_home,
+        fatigue_attack_malus_away=fatigue_attack_malus_away,
+        fatigue_defense_malus_away=fatigue_defense_malus_away,
     )
 
 
@@ -1583,6 +1625,103 @@ def heatmap_color(probability: float) -> tuple[str, str]:
     return "#7f1d1d", "#fee2e2"  # Rosso / grigio scuro
 
 
+# ==============================================================================
+# FASE 2: MODELLO DI AFFATICAMENTO, IMPEGNI INFRASETTIMANALI E TURNOVER
+# ==============================================================================
+# Estensione puramente additiva: non sovrascrive gli slider di Mercato/
+# Infortuni già esistenti, ma si SOMMA a loro come ulteriore modificatore
+# dinamico su Attacco_Finale/Difesa_Finale, applicato PRIMA della matrice di
+# Dixon-Coles (vedi build_match_model, step 3).
+FATIGUE_ATTACK_MALUS_SHORT_REST = -0.08
+"""< 72 ore (≤3 giorni) dall'ultimo impegno ufficiale: malus attacco -8%."""
+FATIGUE_DEFENSE_MALUS_SHORT_REST = 0.08
+"""< 72 ore: malus difesa (vulnerabilità difensiva) +8% (concede di più)."""
+
+FATIGUE_ATTACK_MALUS_MID_REST = -0.04
+"""Tra 72 e 96 ore (4 giorni) dall'ultimo impegno: malus attacco -4%."""
+FATIGUE_DEFENSE_MALUS_MID_REST = 0.04
+"""Tra 72 e 96 ore: malus difesa +4%."""
+
+FATIGUE_TRAVEL_ATTACK_MALUS = -0.03
+"""Trasferta europea/viaggio lungo nei 4 giorni precedenti: malus
+aggiuntivo attacco -3% (si somma al malus da giorni di riposo)."""
+FATIGUE_TRAVEL_DEFENSE_MALUS = 0.03
+"""Trasferta europea/viaggio lungo: malus aggiuntivo difesa +3%."""
+
+TURNOVER_LEVELS: dict[str, float] = {
+    "Nessun turnover": 0.0,
+    "Turnover parziale (-3%)": -0.03,
+    "Turnover massiccio (-7%)": -0.07,
+}
+"""Malus attacco per il Livello di Turnover Previsto in formazione."""
+
+TURNOVER_DEFENSE_FACTOR = 0.5
+"""Quota del malus di turnover che si riflette anche sulla vulnerabilità
+difensiva: una formazione rimaneggiata concede di più, ma in misura minore
+rispetto a quanto perde in fase offensiva."""
+
+FATIGUE_ALERT_THRESHOLD = 0.05
+"""Soglia (5%) di malus complessivo sull'attacco oltre la quale mostrare il
+badge di allerta affaticamento nell'interfaccia."""
+
+
+def fatigue_rest_component(rest_days: int) -> tuple[float, float]:
+    """Componente 'giorni di riposo' del Malus Fisiologico: ritorna
+    (malus_attacco, malus_difesa) in base ai giorni trascorsi dall'ultimo
+    match ufficiale.
+    - ≤3 giorni (< 72 ore, es. giovedì di Europa League + domenica): malus
+      pieno.
+    - 4 giorni (fra 72 e 96 ore): malus ridotto.
+    - ≥5 giorni (> 96 ore): nessun malus."""
+    if rest_days <= 3:
+        return FATIGUE_ATTACK_MALUS_SHORT_REST, FATIGUE_DEFENSE_MALUS_SHORT_REST
+    if rest_days == 4:
+        return FATIGUE_ATTACK_MALUS_MID_REST, FATIGUE_DEFENSE_MALUS_MID_REST
+    return 0.0, 0.0
+
+
+def fatigue_turnover_index(rest_days: int, european_away_trip: bool, turnover_level: str) -> dict[str, object]:
+    """Indice di Affaticamento & Turnover completo per una squadra: somma la
+    componente 'giorni di riposo' (fatigue_rest_component), l'eventuale
+    trasferta europea/viaggio lungo nei 4 giorni precedenti, e il Livello di
+    Turnover Previsto. Ritorna i malus totali su attacco/difesa più il
+    dettaglio delle singole componenti, usato per il badge di allerta."""
+    rest_attack, rest_defense = fatigue_rest_component(rest_days)
+
+    has_travel_malus = european_away_trip and rest_days <= 4
+    travel_attack = FATIGUE_TRAVEL_ATTACK_MALUS if has_travel_malus else 0.0
+    travel_defense = FATIGUE_TRAVEL_DEFENSE_MALUS if has_travel_malus else 0.0
+
+    turnover_attack = TURNOVER_LEVELS.get(turnover_level, 0.0)
+    turnover_defense = turnover_attack * TURNOVER_DEFENSE_FACTOR
+
+    return {
+        "attack_malus": rest_attack + travel_attack + turnover_attack,
+        "defense_malus": rest_defense + travel_defense + turnover_defense,
+        "rest_days": rest_days,
+        "european_away_trip": european_away_trip,
+        "turnover_level": turnover_level,
+        "has_travel_malus": has_travel_malus,
+    }
+
+
+def fatigue_alert_message(team: str, fatigue: dict[str, object]) -> str | None:
+    """Messaggio di allerta ('⚠️ Allerta Affaticamento: <squadra> ...') se il
+    malus complessivo sull'attacco supera FATIGUE_ALERT_THRESHOLD (5% in
+    valore assoluto), altrimenti None (nessun badge da mostrare)."""
+    if abs(fatigue["attack_malus"]) < FATIGUE_ALERT_THRESHOLD:
+        return None
+    details = []
+    if fatigue["rest_days"] <= 4:
+        details.append(f"ha giocato {fatigue['rest_days']} giorni fa")
+    if fatigue["has_travel_malus"]:
+        details.append("in trasferta europea")
+    if fatigue["turnover_level"] != "Nessun turnover":
+        details.append(f"turnover previsto: {fatigue['turnover_level'].split(' (')[0].lower()}")
+    detail_text = " · ".join(details) if details else "condizione fisica non ottimale"
+    return f"⚠️ Allerta Affaticamento: {team} {detail_text} (malus attacco {fatigue['attack_malus']:+.0%})"
+
+
 def run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, object]:
     rng = np.random.default_rng()
     home_goals = rng.poisson(model.home_lambda, n_simulations)
@@ -1734,6 +1873,8 @@ def try_build_match_model(
     market_factor_away: float = 0.0,
     injury_factor_home: float = 0.0,
     injury_factor_away: float = 0.0,
+    fatigue_home: dict[str, object] | None = None,
+    fatigue_away: dict[str, object] | None = None,
 ) -> tuple[MatchModel | None, str]:
     """Costruisce il MatchModel (unico motore di simulazione) gestendo in modo
     uniforme i casi di squadre mancanti/uguali o dati Football-Data.org non
@@ -1751,6 +1892,8 @@ def try_build_match_model(
             market_factor_away=market_factor_away,
             injury_factor_home=injury_factor_home,
             injury_factor_away=injury_factor_away,
+            fatigue_home=fatigue_home,
+            fatigue_away=fatigue_away,
         )
     except FootballDataError as error:
         return None, f"Dati Football-Data.org non disponibili: {error}"
@@ -1777,11 +1920,12 @@ def render_login() -> None:
             st.error("Password non valida. I dati della dashboard restano nascosti.")
 
 
-def render_sidebar_controls() -> dict[str, float]:
+def render_sidebar_controls() -> dict[str, object]:
     """Slider manuali nella sidebar: Fattore Mercato (-20%/+20%) e Impatto
-    Infortuni/Titolari Assenti (-30%/+30%), per casa e trasferta. I valori
-    incrementano/riducono Power Index e attacco/difesa attesa PRIMA del
-    calcolo di xG, tiri e probabilità (vedi build_match_model)."""
+    Infortuni/Titolari Assenti (-30%/+30%), per casa e trasferta, più
+    l'Indice di Affaticamento & Turnover (Fase 2). I valori incrementano/
+    riducono Power Index e attacco/difesa attesa PRIMA del calcolo di xG,
+    tiri e probabilità (vedi build_match_model)."""
     st.markdown("### 💼 Impatto Mercato / Aspettative")
     st.caption("Rinforzi o cessioni importanti rispetto alla media stagionale.")
     market_factor_home = (
@@ -1800,11 +1944,54 @@ def render_sidebar_controls() -> dict[str, float]:
         st.slider("Impatto Infortuni Trasferta", -30, 30, 0, format="%d%%", key="injury_factor_away") / 100
     )
 
+    st.markdown("### 🩺 Affaticamento & Impegni Infrasettimanali")
+    with st.expander("Affaticamento & Impegni Infrasettimanali", expanded=False):
+        st.caption(
+            "Giorni di riposo, trasferte europee e turnover previsto: si SOMMANO "
+            "agli slider di Mercato/Assenze qui sopra, senza sovrascriverli."
+        )
+        col_rest_home, col_rest_away = st.columns(2)
+        with col_rest_home:
+            rest_days_home = st.slider(
+                "Giorni di riposo Casa", 2, 7, 7, key="rest_days_home",
+                help="7 = 7 o più giorni di riposo (nessun malus).",
+            )
+        with col_rest_away:
+            rest_days_away = st.slider(
+                "Giorni di riposo Trasferta", 2, 7, 7, key="rest_days_away",
+                help="7 = 7 o più giorni di riposo (nessun malus).",
+            )
+
+        col_travel_home, col_travel_away = st.columns(2)
+        with col_travel_home:
+            travel_home = st.checkbox(
+                "Trasferta europea faticosa Casa", key="travel_home",
+            )
+        with col_travel_away:
+            travel_away = st.checkbox(
+                "Trasferta europea faticosa Trasferta", key="travel_away",
+            )
+
+        col_turnover_home, col_turnover_away = st.columns(2)
+        with col_turnover_home:
+            turnover_home = st.selectbox(
+                "Turnover previsto Casa", options=list(TURNOVER_LEVELS), key="turnover_home",
+            )
+        with col_turnover_away:
+            turnover_away = st.selectbox(
+                "Turnover previsto Trasferta", options=list(TURNOVER_LEVELS), key="turnover_away",
+            )
+
+    fatigue_home = fatigue_turnover_index(rest_days_home, travel_home, turnover_home)
+    fatigue_away = fatigue_turnover_index(rest_days_away, travel_away, turnover_away)
+
     return {
         "market_factor_home": market_factor_home,
         "market_factor_away": market_factor_away,
         "injury_factor_home": injury_factor_home,
         "injury_factor_away": injury_factor_away,
+        "fatigue_home": fatigue_home,
+        "fatigue_away": fatigue_away,
     }
 
 
@@ -2023,6 +2210,8 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
         market_factor_away=sidebar_values["market_factor_away"],
         injury_factor_home=sidebar_values["injury_factor_home"],
         injury_factor_away=sidebar_values["injury_factor_away"],
+        fatigue_home=sidebar_values.get("fatigue_home"),
+        fatigue_away=sidebar_values.get("fatigue_away"),
     )
 
     if model is None:
@@ -2038,6 +2227,18 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
             f"(soglia piena confidenza: {EARLY_SEASON_MATCHDAY_THRESHOLD}). "
             "Il Power Index viene mescolato con dati reali ancora parziali."
         )
+
+    # --- Avviso Affaticamento & Turnover (Fase 2, badge/warning giallo) --------
+    fatigue_home_input = sidebar_values.get("fatigue_home")
+    fatigue_away_input = sidebar_values.get("fatigue_away")
+    if fatigue_home_input:
+        home_fatigue_alert = fatigue_alert_message(home, fatigue_home_input)
+        if home_fatigue_alert:
+            st.warning(home_fatigue_alert)
+    if fatigue_away_input:
+        away_fatigue_alert = fatigue_alert_message(away, fatigue_away_input)
+        if away_fatigue_alert:
+            st.warning(away_fatigue_alert)
 
     # --- Visualizzazione 1X2 in evidenza (st.metric su 3 colonne) --------------
     col_1x2_home, col_1x2_draw, col_1x2_away = st.columns(3)
