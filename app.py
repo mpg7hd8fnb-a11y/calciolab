@@ -1571,6 +1571,58 @@ def value_bet_badge(stake_percent: float | None) -> tuple[str, str, str]:
     return "NO VALUE", "#475569", "#e2e8f0"
 
 
+def expected_value_percent(probability: float, decimal_odds: float | None) -> float | None:
+    """Expected Value %: EV% = (Probabilità_Algoritmo × Quota_Bookmaker - 1)
+    × 100. Restituisce None se non è stata inserita una quota valida (>1.0)."""
+    if decimal_odds is None or decimal_odds <= 1.0:
+        return None
+    return ((probability * decimal_odds) - 1) * 100
+
+
+KELLY_MARKET_GROUPS: dict[str, str] = {
+    "kelly_home": "Esito 1X2",
+    "kelly_draw": "Esito 1X2",
+    "kelly_away": "Esito 1X2",
+    "kelly_over25": "Over/Under 2.5",
+    "kelly_under25": "Over/Under 2.5",
+    "kelly_gg": "Goal/No Goal",
+    "kelly_ng": "Goal/No Goal",
+}
+"""Raggruppamento dei mercati Kelly per famiglia correlata: usato per
+escludere Value Bet duplicate/correlate (es. Over 2.5 e Under 2.5, o due
+esiti dello stesso 1X2) dall'ordinamento e dal box Best Value Bet — solo la
+scommessa con lo Stake Kelly più alto del gruppo viene mantenuta."""
+
+
+def rank_value_bets(
+    kelly_rows: list[tuple[str, str, float, float | None, float | None]],
+) -> list[dict[str, object]]:
+    """Rileva, calcola l'Expected Value e ORDINA le Value Bet (Stake Kelly
+    > 0) dalla più alta alla più bassa percentuale di Stake consigliata,
+    escludendo scommesse duplicate/correlate: per ciascun gruppo di mercati
+    collegati (KELLY_MARKET_GROUPS) mantiene solo quella con lo Stake più
+    alto. kelly_rows: (key, label, probabilità, quota, stake) — vedi
+    compute_kelly_rows_detailed."""
+    best_per_group: dict[str, dict[str, object]] = {}
+    for key, label, probability, odds, stake in kelly_rows:
+        if stake is None or stake <= 0:
+            continue
+        group = KELLY_MARKET_GROUPS.get(key, key)
+        candidate = {
+            "key": key,
+            "label": label,
+            "probability": probability,
+            "odds": odds,
+            "stake": stake,
+            "ev": expected_value_percent(probability, odds),
+            "group": group,
+        }
+        current_best = best_per_group.get(group)
+        if current_best is None or stake > current_best["stake"]:
+            best_per_group[group] = candidate
+    return sorted(best_per_group.values(), key=lambda row: row["stake"], reverse=True)
+
+
 def double_chance_probabilities(model: MatchModel) -> dict[str, float]:
     """Probabilità Doppia Chance (1X, X2, 12), derivate dalle stesse
     probabilità 1X2 (Poisson bivariata + Dixon-Coles) del motore — nessun
@@ -2041,13 +2093,12 @@ def generate_match_executive_summary(
     return generate_match_summary_template(model, home, away, fatigue_home, fatigue_away, kelly_rows), "Template Python"
 
 
-def compute_kelly_rows_from_session(model: MatchModel, home: str, away: str) -> list[tuple[str, float, float | None]]:
-    """Rilegge le quote eventualmente già inserite dall'utente nel tab Value
-    Betting (session_state, stesse chiavi widget di render_value_betting_tab)
-    e calcola lo stake Kelly per ciascun mercato, senza ridisegnare i widget:
-    usato dal Report Analitico Intelligence per citare le value bet rilevate."""
+def _kelly_market_definitions(model: MatchModel, home: str, away: str) -> list[tuple[str, str, float]]:
+    """Elenco (key, label, probabilità) dei mercati coperti dal Calcolatore
+    Kelly: unica fonte condivisa fra render_value_betting_tab,
+    compute_kelly_rows_from_session e compute_kelly_rows_detailed."""
     goal_markets = goal_market_probabilities(model)
-    kelly_markets = [
+    return [
         ("kelly_home", f"1 · Vittoria {home}", model.home_win_prob),
         ("kelly_draw", "X · Pareggio", model.draw_prob),
         ("kelly_away", f"2 · Vittoria {away}", model.away_win_prob),
@@ -2056,12 +2107,33 @@ def compute_kelly_rows_from_session(model: MatchModel, home: str, away: str) -> 
         ("kelly_gg", "Goal (GG)", goal_markets["goal_goal"]),
         ("kelly_ng", "No Goal (NG)", goal_markets["no_goal"]),
     ]
-    rows: list[tuple[str, float, float | None]] = []
-    for key, label, probability in kelly_markets:
+
+
+def compute_kelly_rows_detailed(
+    model: MatchModel, home: str, away: str
+) -> list[tuple[str, str, float, float | None, float | None]]:
+    """Rilegge le quote eventualmente già inserite dall'utente nel tab Value
+    Betting (session_state, stesse chiavi widget di render_value_betting_tab)
+    e calcola lo stake Kelly per ciascun mercato. Ritorna (key, label,
+    probabilità, quota, stake) — versione completa usata per l'ordinamento
+    delle Value Bet e il box Best Value Bet of the Match."""
+    rows: list[tuple[str, str, float, float | None, float | None]] = []
+    for key, label, probability in _kelly_market_definitions(model, home, away):
         odds = st.session_state.get(f"{key}_odds", 0.0)
-        stake = kelly_stake_percent(probability, odds if odds and odds > 1.0 else None)
-        rows.append((label, probability, stake))
+        valid_odds = odds if odds and odds > 1.0 else None
+        stake = kelly_stake_percent(probability, valid_odds)
+        rows.append((key, label, probability, valid_odds, stake))
     return rows
+
+
+def compute_kelly_rows_from_session(model: MatchModel, home: str, away: str) -> list[tuple[str, float, float | None]]:
+    """Versione compatta (label, probabilità, stake) di
+    compute_kelly_rows_detailed: usata dal Report Analitico Intelligence per
+    citare le value bet rilevate senza dover conoscere key/quota."""
+    return [
+        (label, probability, stake)
+        for _key, label, probability, _odds, stake in compute_kelly_rows_detailed(model, home, away)
+    ]
 
 
 def run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, object]:
@@ -2385,10 +2457,59 @@ def _render_heatmap_cell(label: str, probability: float, *, big: bool = False) -
     )
 
 
+def render_best_value_bet_box(ranked_bets: list[dict[str, object]]) -> None:
+    """👑 BEST VALUE BET OF THE MATCH: box in evidenza con la Value Bet dallo
+    Stake Kelly più alto (già deduplicata per mercati correlati da
+    rank_value_bets), seguito dalla classifica delle altre Value Bet
+    rilevate, ordinate per Stake Kelly decrescente."""
+    if not ranked_bets:
+        st.info(
+            "Nessuna Value Bet rilevata al momento: inserisci le quote reali del "
+            "bookmaker nel Calcolatore Kelly qui sotto per attivare l'ordinamento."
+        )
+        return
+
+    best = ranked_bets[0]
+    ev_text = f"{best['ev']:+.1f}%" if best["ev"] is not None else "n/d"
+    st.markdown(
+        '<div style="background:linear-gradient(135deg,#f59e0b,#facc15);color:#1c1300;'
+        'border-radius:16px;padding:18px 22px;margin-bottom:18px;'
+        'box-shadow:0 6px 20px rgba(245,158,11,.35)">'
+        '<div style="font-size:1rem;font-weight:800;letter-spacing:.03em">'
+        '👑 BEST VALUE BET OF THE MATCH</div>'
+        f'<div style="font-size:1.5rem;font-weight:800;margin-top:6px">{escape(str(best["label"]))}</div>'
+        '<div style="margin-top:8px;font-weight:600;font-size:.95rem">'
+        f'Quota {best["odds"]:.2f} · Probabilità algoritmo {best["probability"]:.1%} · '
+        f'Expected Value {ev_text} · <u>Stake consigliato {best["stake"]:.1f}%</u>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    if len(ranked_bets) > 1:
+        st.markdown("##### 📋 Altre Value Bet rilevate (ordinate per Stake Kelly)")
+        ranking_frame = pd.DataFrame(
+            [
+                {
+                    "Mercato": row["label"],
+                    "Quota": f"{row['odds']:.2f}",
+                    "Probabilità": f"{row['probability']:.1%}",
+                    "Expected Value": f"{row['ev']:+.1f}%" if row["ev"] is not None else "n/d",
+                    "Stake Kelly": f"{row['stake']:.1f}%",
+                }
+                for row in ranked_bets[1:]
+            ]
+        )
+        st.dataframe(ranking_frame, use_container_width=True, hide_index=True)
+    st.markdown("---")
+
+
 def render_value_betting_tab(model: MatchModel, home: str, away: str) -> None:
     """FASE 1: VALUE BETTING & UX — Heatmap dei mercati ad alta probabilità
     + Calcolatore Kelly Criterion (Quarter Kelly). Estensione puramente
     additiva: legge solo il MatchModel già calcolato dal motore esistente."""
+    ranked_bets = rank_value_bets(compute_kelly_rows_detailed(model, home, away))
+    render_best_value_bet_box(ranked_bets)
+
     st.markdown(
         "### 🟩 Heatmap dei Mercati ad Alta Probabilità\n"
         "I 5 mercati più probabili per questa partita, calcolati dalla stessa "
