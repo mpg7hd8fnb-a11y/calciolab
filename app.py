@@ -1623,6 +1623,160 @@ def rank_value_bets(
     return sorted(best_per_group.values(), key=lambda row: row["stake"], reverse=True)
 
 
+# ==============================================================================
+# INTEGRAZIONE THE ODDS API — Recupero automatico quote reali (con fallback
+# manuale). Estensione puramente additiva: legge solo probabilità già
+# calcolate dal motore esistente e non modifica Dixon-Coles, TEAM_TIERS,
+# Power Rating o alcun altro calcolo statistico.
+# ==============================================================================
+ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4"
+
+ODDS_API_SPORT_KEYS: dict[str, str] = {
+    "Italia · Serie A": "soccer_italy_serie_a",
+    "Inghilterra · Premier League": "soccer_epl",
+    "Inghilterra · EFL Championship": "soccer_efl_champ",
+    "Spagna · La Liga": "soccer_spain_la_liga",
+    "Germania · Bundesliga": "soccer_germany_bundesliga",
+    "Francia · Ligue 1": "soccer_france_ligue_one",
+    "Paesi Bassi · Eredivisie": "soccer_netherlands_eredivisie",
+    "Portogallo · Primeira Liga": "soccer_portugal_primeira_liga",
+    "Europa · UEFA Champions League": "soccer_uefa_champs_league",
+}
+"""Mappatura campionato interno -> sport key di The Odds API. Se la lega
+selezionata non è mappata, get_live_odds ripiega automaticamente su None
+(inserimento manuale)."""
+
+ODDS_API_MARKET_MAP: dict[str, tuple[str, str]] = {
+    "kelly_home": ("h2h", "home"),
+    "kelly_draw": ("h2h", "draw"),
+    "kelly_away": ("h2h", "away"),
+    "kelly_over25": ("totals", "Over"),
+    "kelly_under25": ("totals", "Under"),
+    "kelly_gg": ("btts", "Yes"),
+    "kelly_ng": ("btts", "No"),
+}
+"""Mappatura chiave mercato Kelly interna -> (mercato The Odds API, esito)."""
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_live_odds(
+    home_team: str, away_team: str, market: str, league: str, api_key: str
+) -> dict[str, float] | None:
+    """Recupera le quote reali da The Odds API per il mercato richiesto
+    (`market`: una delle chiavi Kelly interne, es. 'kelly_home') sulla
+    partita home_team-away_team. Ritorna {bookmaker: quota} oppure None se
+    l'API Key non è inserita, la lega non è mappata, la chiamata fallisce o
+    l'evento/mercato non è disponibile — in tutti questi casi il chiamante
+    deve ripiegare sull'inserimento manuale (st.number_input), senza mai
+    bloccare l'app."""
+    if not api_key:
+        return None
+    odds_market = ODDS_API_MARKET_MAP.get(market)
+    sport_key = ODDS_API_SPORT_KEYS.get(league)
+    if odds_market is None or sport_key is None:
+        return None
+    api_market, outcome_selector = odds_market
+
+    try:
+        response = requests.get(
+            f"{ODDS_API_BASE_URL}/sports/{sport_key}/odds",
+            params={
+                "apiKey": api_key,
+                "regions": "eu",
+                "markets": api_market,
+                "oddsFormat": "decimal",
+            },
+            timeout=8,
+        )
+        response.raise_for_status()
+        events = response.json()
+    except (requests.RequestException, ValueError):
+        return None
+    if not isinstance(events, list):
+        return None
+
+    target_home = _normalize_team_name(home_team)
+    target_away = _normalize_team_name(away_team)
+    event = next(
+        (
+            item
+            for item in events
+            if isinstance(item, dict)
+            and target_home in _normalize_team_name(str(item.get("home_team", "")))
+            and target_away in _normalize_team_name(str(item.get("away_team", "")))
+        ),
+        None,
+    )
+    if event is None:
+        return None
+
+    bookmaker_odds: dict[str, float] = {}
+    for bookmaker in event.get("bookmakers", []) or []:
+        if not isinstance(bookmaker, dict):
+            continue
+        title = str(bookmaker.get("title") or "Bookmaker")
+        for bm_market in bookmaker.get("markets", []) or []:
+            if not isinstance(bm_market, dict) or bm_market.get("key") != api_market:
+                continue
+            for outcome in bm_market.get("outcomes", []) or []:
+                if not isinstance(outcome, dict):
+                    continue
+                outcome_name = str(outcome.get("name", "")).strip()
+                price = outcome.get("price")
+                if price is None:
+                    continue
+                matched = False
+                if api_market == "h2h":
+                    normalized_outcome = _normalize_team_name(outcome_name)
+                    if outcome_selector == "home" and (
+                        target_home in normalized_outcome or normalized_outcome in target_home
+                    ):
+                        matched = True
+                    elif outcome_selector == "away" and (
+                        target_away in normalized_outcome or normalized_outcome in target_away
+                    ):
+                        matched = True
+                    elif outcome_selector == "draw" and outcome_name.lower() == "draw":
+                        matched = True
+                elif api_market == "totals":
+                    if outcome.get("point") == 2.5 and outcome_name.lower() == outcome_selector.lower():
+                        matched = True
+                elif api_market == "btts":
+                    if outcome_name.lower() == outcome_selector.lower():
+                        matched = True
+                if matched:
+                    try:
+                        bookmaker_odds[title] = float(price)
+                    except (TypeError, ValueError):
+                        pass
+    return bookmaker_odds or None
+
+
+def render_bookmaker_comparison_table(our_fair_odds: float, bookmaker_odds: dict[str, float]) -> None:
+    """Tabella 'Confronto Bookmaker': la quota equa del nostro algoritmo
+    (fair odds, inverso della probabilità stimata) affiancata alle quote
+    reali recuperate da The Odds API, con il bookmaker che offre la quota
+    più alta evidenziato in verde (il maggior valore per chi scommette)."""
+    if not bookmaker_odds:
+        return
+    best_bookmaker = max(bookmaker_odds, key=bookmaker_odds.get)
+    rows_html = [f"<tr><td>🤖 Il nostro algoritmo (fair odds)</td><td>{our_fair_odds:.2f}</td></tr>"]
+    for bookmaker, price in sorted(bookmaker_odds.items(), key=lambda item: item[1], reverse=True):
+        row_style = (
+            ' style="background:#16a34a;color:#052e16;font-weight:700"'
+            if bookmaker == best_bookmaker
+            else ""
+        )
+        marker = " 🏆" if bookmaker == best_bookmaker else ""
+        rows_html.append(f"<tr{row_style}><td>{escape(bookmaker)}{marker}</td><td>{price:.2f}</td></tr>")
+    st.markdown(
+        '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse">'
+        "<thead><tr><th>Fonte</th><th>Quota</th></tr></thead>"
+        f"<tbody>{''.join(rows_html)}</tbody></table></div>",
+        unsafe_allow_html=True,
+    )
+
+
 def double_chance_probabilities(model: MatchModel) -> dict[str, float]:
     """Probabilità Doppia Chance (1X, X2, 12), derivate dalle stesse
     probabilità 1X2 (Poisson bivariata + Dixon-Coles) del motore — nessun
@@ -2396,6 +2550,21 @@ def render_sidebar_controls() -> dict[str, object]:
                 "Turnover previsto Trasferta", options=list(TURNOVER_LEVELS), key="turnover_away",
             )
 
+    st.markdown("### 🎲 The Odds API (quote reali)")
+    with st.expander("Recupero automatico quote bookmaker", expanded=False):
+        st.caption(
+            "Inserisci una API Key gratuita di [The Odds API](https://the-odds-api.com) "
+            "per recuperare automaticamente le quote reali (Sisal, Snai, bet365...) nel "
+            "Calcolatore Kelly. Senza chiave, o se la chiamata fallisce, restano attivi "
+            "gli inserimenti manuali delle quote — l'app non si blocca mai."
+        )
+        odds_api_key = st.text_input(
+            "API Key The Odds API",
+            type="password",
+            key="odds_api_key",
+            placeholder="Lascia vuoto per inserire le quote manualmente",
+        )
+
     fatigue_home = fatigue_turnover_index(rest_days_home, travel_home, turnover_home)
     fatigue_away = fatigue_turnover_index(rest_days_away, travel_away, turnover_away)
 
@@ -2406,6 +2575,7 @@ def render_sidebar_controls() -> dict[str, object]:
         "injury_factor_away": injury_factor_away,
         "fatigue_home": fatigue_home,
         "fatigue_away": fatigue_away,
+        "odds_api_key": odds_api_key,
     }
 
 
@@ -2503,10 +2673,12 @@ def render_best_value_bet_box(ranked_bets: list[dict[str, object]]) -> None:
     st.markdown("---")
 
 
-def render_value_betting_tab(model: MatchModel, home: str, away: str) -> None:
+def render_value_betting_tab(model: MatchModel, home: str, away: str, league: str, odds_api_key: str) -> None:
     """FASE 1: VALUE BETTING & UX — Heatmap dei mercati ad alta probabilità
-    + Calcolatore Kelly Criterion (Quarter Kelly). Estensione puramente
-    additiva: legge solo il MatchModel già calcolato dal motore esistente."""
+    + Calcolatore Kelly Criterion (Quarter Kelly), con recupero automatico
+    delle quote reali da The Odds API (fallback manuale se assente/fallisce).
+    Estensione puramente additiva: legge solo il MatchModel già calcolato dal
+    motore esistente."""
     ranked_bets = rank_value_bets(compute_kelly_rows_detailed(model, home, away))
     render_best_value_bet_box(ranked_bets)
 
@@ -2532,23 +2704,16 @@ def render_value_betting_tab(model: MatchModel, home: str, away: str) -> None:
     st.markdown("---")
     st.markdown(
         "### 💰 Calcolatore Kelly Criterion (Quarter Kelly)\n"
-        "Inserisci la quota reale del bookmaker per ciascun mercato (lascia "
-        "0 se non la conosci): se la probabilità del nostro algoritmo supera "
-        "quella implicita nella quota, lo stake consigliato (25% del Kelly "
-        "pieno) sarà positivo — altrimenti nessun vantaggio (**NO VALUE**). "
-        "Senza quota inserita viene mostrata solo la probabilità dell'algoritmo."
+        "Con una API Key di The Odds API inserita in sidebar, la quota "
+        "migliore disponibile viene recuperata e proposta automaticamente "
+        "per ciascun mercato — resta comunque modificabile a mano. Senza "
+        "chiave (o se il recupero fallisce) inserisci la quota reale "
+        "manualmente: se la probabilità del nostro algoritmo supera quella "
+        "implicita nella quota, lo stake consigliato (25% del Kelly pieno) "
+        "sarà positivo — altrimenti nessun vantaggio (**NO VALUE**)."
     )
-
-    goal_markets = goal_market_probabilities(model)
-    kelly_markets = [
-        ("kelly_home", f"1 · Vittoria {home}", model.home_win_prob),
-        ("kelly_draw", "X · Pareggio", model.draw_prob),
-        ("kelly_away", f"2 · Vittoria {away}", model.away_win_prob),
-        ("kelly_over25", "Over 2.5 gol", goal_markets["total_over"][2.5]),
-        ("kelly_under25", "Under 2.5 gol", 1 - goal_markets["total_over"][2.5]),
-        ("kelly_gg", "Goal (GG)", goal_markets["goal_goal"]),
-        ("kelly_ng", "No Goal (NG)", goal_markets["no_goal"]),
-    ]
+    if odds_api_key:
+        st.caption("🎲 The Odds API collegata: recupero automatico attivo per i mercati disponibili.")
 
     header_cols = st.columns([2.4, 1, 1.1, 2.5])
     header_cols[0].caption("Mercato")
@@ -2556,10 +2721,22 @@ def render_value_betting_tab(model: MatchModel, home: str, away: str) -> None:
     header_cols[2].caption("Quota bookmaker")
     header_cols[3].caption("Esito Kelly")
 
-    for key, label, probability in kelly_markets:
+    for key, label, probability in _kelly_market_definitions(model, home, away):
+        live_odds = get_live_odds(home, away, key, league, odds_api_key) if odds_api_key else None
+        best_live_odds = max(live_odds.values()) if live_odds else None
+
+        odds_input_key = f"{key}_odds"
+        if best_live_odds is not None and odds_input_key not in st.session_state:
+            # Pre-compila l'input manuale con la quota migliore recuperata
+            # automaticamente, SENZA sovrascrivere un valore già inserito
+            # dall'utente in una sessione precedente — resta sempre modificabile.
+            st.session_state[odds_input_key] = round(best_live_odds, 2)
+
         col_label, col_prob, col_odds, col_badge = st.columns([2.4, 1, 1.1, 2.5])
         with col_label:
             st.markdown(f"**{label}**")
+            if best_live_odds is not None:
+                st.caption(f"🎲 Auto da The Odds API: {best_live_odds:.2f}")
         with col_prob:
             st.markdown(f"{probability:.1%}")
         with col_odds:
@@ -2569,7 +2746,7 @@ def render_value_betting_tab(model: MatchModel, home: str, away: str) -> None:
                 max_value=50.0,
                 value=0.0,
                 step=0.05,
-                key=f"{key}_odds",
+                key=odds_input_key,
                 label_visibility="collapsed",
             )
         with col_badge:
@@ -2585,6 +2762,10 @@ def render_value_betting_tab(model: MatchModel, home: str, away: str) -> None:
                     f'<br><span style="font-size:.82rem;font-weight:500">{detail}</span></div>',
                     unsafe_allow_html=True,
                 )
+
+        if live_odds:
+            with st.expander(f"📊 Confronto Bookmaker — {label}"):
+                render_bookmaker_comparison_table(fair_odds(probability), live_odds)
 
     st.caption(
         f"Fractional Kelly Stake = ((Probabilità × Quota) - 1) / (Quota - 1) × 100, "
@@ -2943,7 +3124,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
             st.progress(min(max(markets["no_goal"], 0.0), 1.0))
 
     with tab_value_betting:
-        render_value_betting_tab(model, home, away)
+        render_value_betting_tab(model, home, away, league, sidebar_values.get("odds_api_key", ""))
 
     with tab_montecarlo:
         st.markdown(
