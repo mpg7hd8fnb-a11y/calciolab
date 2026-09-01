@@ -328,34 +328,32 @@ TOP_DIVISIONS = {
     "Europa · UEFA Champions League",
 }
 
-FOOTBALL_DATA_COMPETITIONS: dict[str, str] = {
-    "Italia · Serie A": "SA",
-    "Inghilterra · Premier League": "PL",
-    "Inghilterra · EFL Championship": "ELC",
-    "Spagna · La Liga": "PD",
-    "Germania · Bundesliga": "BL1",
-    "Francia · Ligue 1": "FL1",
-    "Paesi Bassi · Eredivisie": "DED",
-    "Portogallo · Primeira Liga": "PPL",
-    "Europa · UEFA Champions League": "CL",
+FOOTBALL_DATA_COMPETITIONS: dict[str, int] = {
+    # Migrato da Football-Data.org ad API-Football (api-sports.io): i valori
+    # sono ora i League ID numerici di API-Football, non più i codici a
+    # lettere di Football-Data.org. Il nome della variabile è stato lasciato
+    # invariato per non dover toccare le decine di punti del codice che già
+    # la referenziano (MICRO_EVENT_BASELINES, sidebar, fetch_*).
+    "Italia · Serie A": 135,
+    "Italia · Serie B": 136,
+    "Spagna · La Liga": 140,
+    "Spagna · Segunda División": 141,
 }
 
-# Football-Data.org uses the current season when no season filter is sent.
-FOOTBALL_DATA_BASE_URL = "https://api.football-data.org/v4"
+# API-Football (api-sports.io): endpoint REST v3, autenticazione via header
+# 'x-apisports-key' (vedi _get_api_football_key/_api_football_request).
+API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
 
-# Football-Data.org does not expose match-level shots, corners, cards or fouls.
-# These are transparent league baselines used only for the micro-event model.
-MICRO_EVENT_BASELINES: dict[str, dict[str, float]] = {
-    "SA": {"shots": 12.0, "shots_on_target": 4.1, "corners": 4.6, "cards": 2.3, "fouls": 12.8},
-    "PL": {"shots": 12.5, "shots_on_target": 4.3, "corners": 5.0, "cards": 1.8, "fouls": 10.8},
-    "ELC": {"shots": 11.8, "shots_on_target": 3.9, "corners": 4.8, "cards": 2.1, "fouls": 12.2},
-    "PD": {"shots": 12.0, "shots_on_target": 4.0, "corners": 4.9, "cards": 2.4, "fouls": 13.0},
-    "BL1": {"shots": 13.0, "shots_on_target": 4.5, "corners": 4.8, "cards": 2.0, "fouls": 11.5},
-    "FL1": {"shots": 11.7, "shots_on_target": 3.9, "corners": 4.7, "cards": 2.2, "fouls": 12.4},
-    "DED": {"shots": 13.2, "shots_on_target": 4.6, "corners": 5.2, "cards": 1.9, "fouls": 11.0},
-    "PPL": {"shots": 11.5, "shots_on_target": 3.8, "corners": 4.5, "cards": 2.6, "fouls": 13.5},
-    "CL": {"shots": 12.6, "shots_on_target": 4.4, "corners": 4.9, "cards": 1.7, "fouls": 10.5},
+# API-Football non espone tiri/corner/cartellini/falli a livello di singola
+# partita nel piano gratuito. Queste restano baseline di lega trasparenti,
+# usate solo per il modello dei micro-eventi — ora chiavate per League ID.
+MICRO_EVENT_BASELINES: dict[int, dict[str, float]] = {
+    135: {"shots": 12.0, "shots_on_target": 4.1, "corners": 4.6, "cards": 2.3, "fouls": 12.8},  # Serie A
+    136: {"shots": 11.5, "shots_on_target": 3.7, "corners": 4.4, "cards": 2.5, "fouls": 13.2},  # Serie B
+    140: {"shots": 12.0, "shots_on_target": 4.0, "corners": 4.9, "cards": 2.4, "fouls": 13.0},  # La Liga
+    141: {"shots": 11.3, "shots_on_target": 3.6, "corners": 4.3, "cards": 2.7, "fouls": 13.4},  # Segunda División
 }
+
 
 PROMOTED_TEAMS = {
     # Italia · Serie A
@@ -497,7 +495,7 @@ TEAM_TIER_KEYWORDS: dict[int, tuple[str, ...]] = {
         "spurs", "newcastle", "aston villa", "manchester united",
         "man united", "man utd", "rb lipsia", "rb leipzig", "marsiglia",
         "marseille", "villarreal", "stoccarda", "stuttgart", "lione",
-        "lyon", "monaco", "psv", "sporting cp", "sporting", "porto",
+        "lyon", "monaco", "psv", "sporting cp", "sporting lisbon", "porto",
         "como", "como 1907", "fc como",
     ),
     3: (  # Metà classifica
@@ -506,17 +504,31 @@ TEAM_TIER_KEYWORDS: dict[int, tuple[str, ...]] = {
         "real betis", "lens", "lille", "feyenoord", "club brugge",
         "galatasaray",
     ),
-    4: (  # Salvezza
+    4: (  # Salvezza / club storici di seconda fascia
         "lecce", "cagliari", "monza", "verona", "parma",
         "brentford", "forest", "nottingham", "leeds", "sunderland",
         "elche", "levante", "shakhtar", "slavia praga", "slavia prague",
+        # Serie B: club principali/storici con pedigree di massima serie.
+        "sampdoria", "palermo", "bari", "empoli", "spezia",
+        # Segunda División: club principali/storici con pedigree di LaLiga.
+        "almeria", "almería", "cadiz", "cádiz", "granada",
+        "real zaragoza", "zaragoza", "sporting gijon", "sporting gijón",
+        "valladolid", "eibar", "las palmas",
     ),
-    5: (  # Neopromosse
+    5: (  # Neopromosse / club minori di seconda fascia (default)
         "frosinone", "venezia", "coventry", "hull", "ipswich",
         "racing santander", "deportivo", "coruña", "coruna", "málaga",
         "malaga", "schalke", "elversberg", "paderborn", "troyes",
         "le mans", "ado den haag", "cambuur", "académico de viseu",
         "academico de viseu", "marítimo", "maritimo",
+        # Serie B: club minori/di categoria inferiore (default Tier 5).
+        "avellino", "catanzaro", "cesena", "juve stabia", "mantova",
+        "modena", "padova", "pescara", "reggiana", "südtirol", "sudtirol",
+        "vicenza", "virtus entella",
+        # Segunda División: club minori/di categoria inferiore (default Tier 5).
+        "albacete", "burgos", "castellon", "castellón", "cordoba", "córdoba",
+        "eldense", "fc andorra", "huesca", "leganes", "leganés",
+        "mirandes", "mirandés", "tenerife",
     ),
 }
 
@@ -704,7 +716,9 @@ class MatchModel:
 
 
 class FootballDataError(RuntimeError):
-    """Raised when Football-Data.org cannot provide the requested live data."""
+    """Raised when the football data provider (API-Football) cannot supply
+    the requested live data. Il nome è storico (l'app usava in origine
+    Football-Data.org) ma copre qualunque errore del provider dati attuale."""
 
 
 @dataclass(frozen=True)
@@ -756,54 +770,80 @@ def competition_season_status(league: str) -> str:
     return f"stagione {season_label(season_start)} · corrente"
 
 
-def _get_football_data_api_key() -> str | None:
-    """Legge il secret FOOTBALL_DATA_API_KEY sia da variabile d'ambiente sia
-    dai secrets di Streamlit (st.secrets), a seconda di come è stato configurato."""
-    api_key = os.environ.get("FOOTBALL_DATA_API_KEY")
+# Chiave API-Football (api-sports.io) di default: usata solo se l'utente non
+# ha configurato un proprio secret/variabile d'ambiente (vedi
+# _get_api_football_key), così l'app funziona da subito senza configurazione.
+_DEFAULT_API_FOOTBALL_KEY = "991d4e3231c7296625c36ad666105f93"
+
+
+def _get_api_football_key() -> str | None:
+    """Legge la chiave API-Football da variabile d'ambiente (API_FOOTBALL_KEY)
+    o dai secrets di Streamlit; se nessuna delle due è configurata, ripiega
+    sulla chiave di default fornita, così l'app funziona senza configurazione
+    aggiuntiva."""
+    api_key = os.environ.get("API_FOOTBALL_KEY")
     if api_key:
         return api_key
     try:
-        return st.secrets.get("FOOTBALL_DATA_API_KEY")
+        secret_key = st.secrets.get("API_FOOTBALL_KEY")
+        if secret_key:
+            return secret_key
     except Exception:
-        return None
+        pass
+    return _DEFAULT_API_FOOTBALL_KEY
 
 
-def _football_data_request(endpoint: str, params: dict[str, object] | None = None) -> dict[str, object]:
-    api_key = _get_football_data_api_key()
+def _api_football_request(endpoint: str, params: dict[str, object] | None = None) -> dict[str, object]:
+    """Esegue una chiamata GET autenticata verso API-Football
+    (https://v3.football.api-sports.io), con l'header 'x-apisports-key'
+    richiesto dal provider. Solleva FootballDataError per qualunque problema
+    (chiave mancante, rete, risposta non valida, errori applicativi
+    restituiti dall'API), così i chiamanti possono ripiegare in modo
+    trasparente sui dati di riserva (vedi _fallback_team_snapshot)."""
+    api_key = _get_api_football_key()
     if not api_key:
         raise FootballDataError(
-            "Secret FOOTBALL_DATA_API_KEY non configurato. Aggiungilo prima di usare i dati live."
+            "Chiave API-Football non configurata. Impostala prima di usare i dati live."
         )
 
     try:
         response = requests.get(
-            f"{FOOTBALL_DATA_BASE_URL}{endpoint}",
-            headers={"X-Auth-Token": api_key},
+            f"{API_FOOTBALL_BASE_URL}{endpoint}",
+            headers={"x-apisports-key": api_key},
             params=params or {},
             timeout=25,
         )
         response.raise_for_status()
         payload = response.json()
     except requests.RequestException as error:
-        raise FootballDataError(f"Connessione a Football-Data.org non riuscita: {error}") from error
+        raise FootballDataError(f"Connessione ad API-Football non riuscita: {error}") from error
     except ValueError as error:
-        raise FootballDataError("Football-Data.org ha restituito una risposta non valida.") from error
+        raise FootballDataError("API-Football ha restituito una risposta non valida.") from error
 
     if not isinstance(payload, dict):
-        raise FootballDataError("Risposta Football-Data.org inattesa.")
+        raise FootballDataError("Risposta API-Football inattesa.")
+    api_errors = payload.get("errors")
+    if api_errors:
+        raise FootballDataError(f"API-Football ha segnalato un errore: {api_errors}")
     return payload
 
 
 def _parse_teams(payload: dict[str, object]) -> tuple[tuple[int, str], ...]:
-    response = payload.get("teams", [])
+    """Adatta la risposta /teams di API-Football (item['team']['id']/['name'])
+    allo stesso formato interno (id, name) già usato da tutta la logica a
+    valle, così fetch_league_teams/fetch_team_live_stats restano invariate."""
+    response = payload.get("response", [])
     if not isinstance(response, list):
         return ()
     teams: list[tuple[int, str]] = []
-    for team in response:
+    for item in response:
+        if not isinstance(item, dict):
+            continue
+        team = item.get("team")
         if not isinstance(team, dict):
             continue
         team_id = team.get("id")
-        team_name = team.get("name") or team.get("shortName")
+        team_name = team.get("name")
         if isinstance(team_id, int) and isinstance(team_name, str):
             teams.append((team_id, team_name))
     teams.sort(key=lambda team: team[1].casefold())
@@ -811,34 +851,85 @@ def _parse_teams(payload: dict[str, object]) -> tuple[tuple[int, str], ...]:
 
 
 def _parse_team_crests(payload: dict[str, object]) -> dict[str, str]:
-    """Estrae il campo 'crest' (URL dello stemma ufficiale) di ogni squadra,
-    usato per l'header della dashboard con i loghi dei club."""
-    response = payload.get("teams", [])
+    """Estrae il campo 'logo' di ciascuna squadra dalla risposta /teams di
+    API-Football, usato per l'header della dashboard con i loghi dei club
+    (stesso ruolo del vecchio 'crest' di Football-Data.org)."""
+    response = payload.get("response", [])
     if not isinstance(response, list):
         return {}
     crest_map: dict[str, str] = {}
-    for team in response:
+    for item in response:
+        if not isinstance(item, dict):
+            continue
+        team = item.get("team")
         if not isinstance(team, dict):
             continue
-        name = team.get("name") or team.get("shortName")
-        crest = team.get("crest")
-        if isinstance(name, str) and isinstance(crest, str) and crest:
-            crest_map[name] = crest
+        name = team.get("name")
+        logo = team.get("logo")
+        if isinstance(name, str) and isinstance(logo, str) and logo:
+            crest_map[name] = logo
     return crest_map
 
 
+# Stati fixture di API-Football raggruppati nelle stesse etichette usate da
+# calendar_frame (già pensate per il vecchio formato Football-Data.org), così
+# quella funzione non necessita di alcuna modifica.
+_API_FOOTBALL_STATUS_MAP: dict[str, str] = {
+    "FT": "FINISHED",
+    "AET": "FINISHED",
+    "PEN": "FINISHED",
+    "NS": "SCHEDULED",
+    "TBD": "SCHEDULED",
+    "1H": "TIMED",
+    "HT": "TIMED",
+    "2H": "TIMED",
+    "ET": "TIMED",
+    "P": "TIMED",
+    "LIVE": "TIMED",
+    "BT": "TIMED",
+    "SUSP": "POSTPONED",
+    "INT": "POSTPONED",
+    "PST": "POSTPONED",
+    "CANC": "CANCELED",
+    "ABD": "CANCELED",
+    "AWD": "CANCELED",
+    "WO": "CANCELED",
+}
+
+
 def _parse_finished_matches(payload: dict[str, object]) -> tuple[dict[str, object], ...]:
-    response = payload.get("matches", [])
+    """Adatta la risposta /fixtures di API-Football (fixture/teams/goals)
+    allo STESSO formato interno usato in precedenza da tutta la logica a
+    valle (homeTeam/awayTeam/score.fullTime/utcDate/status) — così
+    fetch_team_live_stats, calendar_frame e _match_has_final_score
+    continuano a funzionare senza alcuna modifica."""
+    response = payload.get("response", [])
     if not isinstance(response, list):
         return ()
-    matches = [
-        match
-        for match in response
-        if isinstance(match, dict)
-        and isinstance(match.get("homeTeam"), dict)
-        and isinstance(match.get("awayTeam"), dict)
-        and isinstance(match.get("score"), dict)
-    ]
+    matches: list[dict[str, object]] = []
+    for item in response:
+        if not isinstance(item, dict):
+            continue
+        fixture = item.get("fixture")
+        teams = item.get("teams")
+        goals = item.get("goals")
+        if not isinstance(fixture, dict) or not isinstance(teams, dict) or not isinstance(goals, dict):
+            continue
+        home_team = teams.get("home")
+        away_team = teams.get("away")
+        if not isinstance(home_team, dict) or not isinstance(away_team, dict):
+            continue
+        status = fixture.get("status")
+        status_short = status.get("short") if isinstance(status, dict) else None
+        matches.append(
+            {
+                "utcDate": fixture.get("date"),
+                "status": _API_FOOTBALL_STATUS_MAP.get(str(status_short), str(status_short or "")),
+                "homeTeam": {"id": home_team.get("id"), "name": home_team.get("name")},
+                "awayTeam": {"id": away_team.get("id"), "name": away_team.get("name")},
+                "score": {"fullTime": {"home": goals.get("home"), "away": goals.get("away")}},
+            }
+        )
     matches.sort(key=lambda match: str(match.get("utcDate", "")), reverse=True)
     return tuple(matches)
 
@@ -858,7 +949,7 @@ def _match_has_final_score(match: dict[str, object]) -> bool:
 
 def _fallback_team_snapshot(league: str) -> tuple[tuple[int, str], ...]:
     """Lista di riserva delle squadre della nuova stagione, usata quando
-    Football-Data.org non è raggiungibile o non ha ancora pubblicato i dati."""
+    API-Football non è raggiungibile o non ha ancora pubblicato i dati."""
     fallback_names = LEAGUES.get(league, [])
     return tuple((-(index + 1), name) for index, name in enumerate(fallback_names))
 
@@ -867,17 +958,22 @@ def _fallback_team_snapshot(league: str) -> tuple[tuple[int, str], ...]:
 def fetch_competition_snapshot(
     league: str,
 ) -> tuple[int, tuple[tuple[int, str], ...], tuple[dict[str, object], ...], dict[str, str]]:
-    competition_code = FOOTBALL_DATA_COMPETITIONS[league]
+    league_id = FOOTBALL_DATA_COMPETITIONS[league]
     season_start = current_season_start()
     try:
-        # Nessun parametro "season": Football-Data.org usa automaticamente la
-        # stagione corrente quando il filtro non viene inviato.
-        teams_payload = _football_data_request(f"/competitions/{competition_code}/teams")
-        matches_payload = _football_data_request(f"/competitions/{competition_code}/matches")
+        # API-Football richiede sempre i parametri "league" e "season"
+        # espliciti (a differenza di Football-Data.org, che deduceva la
+        # stagione corrente in automatico se omessa).
+        teams_payload = _api_football_request(
+            "/teams", {"league": league_id, "season": season_start}
+        )
+        matches_payload = _api_football_request(
+            "/fixtures", {"league": league_id, "season": season_start}
+        )
         teams = _parse_teams(teams_payload)
         if len(teams) < 2:
             raise FootballDataError(
-                f"Football-Data.org non ha restituito le squadre 2026/27 per {league}."
+                f"API-Football non ha restituito le squadre {season_label(season_start)} per {league}."
             )
         crest_map = _parse_team_crests(teams_payload)
         return season_start, teams, _parse_finished_matches(matches_payload), crest_map
@@ -898,7 +994,7 @@ def fetch_league_teams(league: str) -> tuple[tuple[int, str], ...]:
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_team_crests(league: str) -> dict[str, str]:
     """URL degli stemmi ufficiali per ogni squadra del campionato (se
-    disponibili da Football-Data.org)."""
+    disponibili da API-Football)."""
     return fetch_competition_snapshot(league)[3]
 
 
@@ -928,11 +1024,11 @@ def fetch_league_matches(league: str) -> tuple[dict[str, object], ...]:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_previous_season_matches(league: str) -> tuple[dict[str, object], ...]:
-    competition_code = FOOTBALL_DATA_COMPETITIONS[league]
+    league_id = FOOTBALL_DATA_COMPETITIONS[league]
     previous_season = current_season_start() - 1
-    payload = _football_data_request(
-        f"/competitions/{competition_code}/matches",
-        {"season": previous_season, "status": "FINISHED"},
+    payload = _api_football_request(
+        "/fixtures",
+        {"league": league_id, "season": previous_season, "status": "FT"},
     )
     return _parse_finished_matches(payload)
 
@@ -974,7 +1070,7 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
     team_id = next((id_ for id_, name in team_map.items() if name == team_name), None)
     if team_id is None:
         raise FootballDataError(
-            f"La squadra {team_name} non è disponibile in Football-Data.org."
+            f"La squadra {team_name} non è disponibile in API-Football."
         )
 
     def _team_fixtures(matches: tuple[dict[str, object], ...]) -> list[dict[str, object]]:
@@ -1068,7 +1164,7 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
                 scored_values.extend((scored, conceded))
         if not scored_values:
             raise FootballDataError(
-                f"Football-Data.org non ha dati storici utilizzabili per {team_name}."
+                f"API-Football non ha dati storici utilizzabili per {team_name}."
             )
         neutral_average = sum(scored_values) / len(scored_values)
         matches = 8.0
@@ -1307,8 +1403,8 @@ def build_match_model(
     # --- 5. Tiri totali/in porta: stessa Transizione Dinamica (baseline di
     # Fascia derivata dall'Attacco di Tier, mescolata alle statistiche reali),
     # poi slider manuali e infine il gap di rating (smorzato). -----------------
-    competition_code = FOOTBALL_DATA_COMPETITIONS[league]
-    micro_baseline = MICRO_EVENT_BASELINES[competition_code]
+    league_id = FOOTBALL_DATA_COMPETITIONS[league]
+    micro_baseline = MICRO_EVENT_BASELINES[league_id]
     shots_per_goal = micro_baseline["shots"] / LEAGUE_AVERAGE_GOALS_PER_TEAM
     sot_per_goal = micro_baseline["shots_on_target"] / LEAGUE_AVERAGE_GOALS_PER_TEAM
 
@@ -2445,10 +2541,10 @@ def try_build_match_model(
     fatigue_away: dict[str, object] | None = None,
 ) -> tuple[MatchModel | None, str]:
     """Costruisce il MatchModel (unico motore di simulazione) gestendo in modo
-    uniforme i casi di squadre mancanti/uguali o dati Football-Data.org non
+    uniforme i casi di squadre mancanti/uguali o dati API-Football non
     disponibili. Restituisce (None, messaggio_errore) in caso di problemi."""
     if not home or not away:
-        return None, "Carica le squadre da Football-Data.org per iniziare."
+        return None, "Carica le squadre da API-Football per iniziare."
     if home == away:
         return None, "Seleziona due squadre diverse."
     try:
@@ -2464,7 +2560,7 @@ def try_build_match_model(
             fatigue_away=fatigue_away,
         )
     except FootballDataError as error:
-        return None, f"Dati Football-Data.org non disponibili: {error}"
+        return None, f"Dati API-Football non disponibili: {error}"
     return model, ""
 
 
@@ -2580,7 +2676,7 @@ def render_sidebar_controls() -> dict[str, object]:
 
 
 def render_team_header(league: str, home: str, away: str, crests: dict[str, str]) -> None:
-    """Header con stemmi ufficiali (campo 'crest' di Football-Data.org)
+    """Header con stemmi ufficiali (campo 'crest' di API-Football)
     affiancati ai nomi delle squadre in grande."""
     st.markdown(f'<div class="league-tag">{escape(league)}</div>', unsafe_allow_html=True)
     col_home, col_vs, col_away = st.columns([2, 0.6, 2])
@@ -2895,7 +2991,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
     st.markdown(
         "### Impostazioni partita\n"
         "Squadre, calendario e risultati vengono recuperati direttamente da "
-        "Football-Data.org. Non sono quotazioni di un bookmaker."
+        "API-Football. Non sono quotazioni di un bookmaker."
     )
 
     col_league, col_home, col_away = st.columns(3)
@@ -2909,7 +3005,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
     try:
         team_rows = fetch_league_teams(league)
     except FootballDataError as error:
-        st.error(f"Football-Data.org non disponibile: {error}")
+        st.error(f"API-Football non disponibile: {error}")
         team_rows = ()
 
     teams = [name for _, name in team_rows]
@@ -2919,7 +3015,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
             st.selectbox("Squadra di casa", options=teams, disabled=True)
         with col_away:
             st.selectbox("Squadra ospite", options=teams, disabled=True)
-        st.warning("Football-Data.org non ha restituito due squadre disponibili.")
+        st.warning("API-Football non ha restituito due squadre disponibili.")
         return
 
     # Se il campionato è cambiato, riporta le selezioni squadra ai valori di default.
@@ -2935,7 +3031,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
 
     try:
         status_text = (
-            f"Football-Data.org: {len(teams)} squadre caricate · "
+            f"API-Football: {len(teams)} squadre caricate · "
             f"{competition_season_status(league)}. "
             "Micro-eventi stimati su baseline di campionato."
         )
@@ -2946,7 +3042,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
     try:
         calendar = calendar_frame(league)
     except FootballDataError as error:
-        st.error(f"Calendario Football-Data.org non disponibile: {error}")
+        st.error(f"Calendario API-Football non disponibile: {error}")
         calendar = pd.DataFrame(columns=["Data", "Stato", "Casa", "Trasferta"])
 
     with st.expander("📅 Calendario stagione 2026/27", expanded=False):
@@ -3298,7 +3394,7 @@ def main() -> None:
 
     st.markdown(
         "# ⚽ CalcioLab\n"
-        "Analisi probabilistica e simulazioni di calcio con dati live da Football-Data.org."
+        "Analisi probabilistica e simulazioni di calcio con dati live da API-Football."
     )
 
     if st.session_state.authenticated:
