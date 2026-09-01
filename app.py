@@ -355,7 +355,52 @@ MICRO_EVENT_BASELINES: dict[str, dict[str, float]] = {
     "DED": {"shots": 13.2, "shots_on_target": 4.6, "corners": 5.2, "cards": 1.9, "fouls": 11.0},
     "PPL": {"shots": 11.5, "shots_on_target": 3.8, "corners": 4.5, "cards": 2.6, "fouls": 13.5},
     "CL": {"shots": 12.6, "shots_on_target": 4.4, "corners": 4.9, "cards": 1.7, "fouls": 10.5},
+    # Campionati "secondari" (scraping FBref, vedi SECONDARY_LEAGUES più sotto):
+    # baseline trasparenti stimate su medie storiche di categoria, sulla stessa
+    # falsariga delle massime serie qui sopra.
+    "SB": {"shots": 11.6, "shots_on_target": 3.8, "corners": 4.4, "cards": 2.5, "fouls": 13.2},
+    "SD": {"shots": 11.4, "shots_on_target": 3.7, "corners": 4.3, "cards": 2.7, "fouls": 13.6},
 }
+
+
+# ==============================================================================
+# CAMPIONATI SECONDARI (SCRAPING AUTOMATICO E GRATUITO) — Serie B & Segunda
+# ==============================================================================
+# Football-Data.org (piano gratuito) non copre la Serie B italiana né la
+# Segunda División spagnola. Per questi due campionati i dati della stagione
+# corrente (classifica, gol fatti/subiti, partite giocate) vengono estratti
+# automaticamente da FBref tramite web scraping (pandas.read_html), SENZA
+# alcuna chiave API. Questa fonte alimenta un ramo di calcolo dedicato in
+# build_match_model che NON usa il DIZIONARIO FASCE DI FORZA fisso (vedi
+# fetch_secondary_team_profile), ma calcola Attacco/Difesa dinamicamente
+# dalla classifica reale, squadra per squadra.
+SECONDARY_LEAGUES: dict[str, dict[str, str]] = {
+    "Italia · Serie B": {
+        "code": "SB",
+        "fbref_url": "https://fbref.com/en/comps/18/Serie-B-Stats",
+        "table_id_hint": "overall",
+    },
+    "Spagna · Segunda División": {
+        "code": "SD",
+        "fbref_url": "https://fbref.com/en/comps/17/Segunda-Division-Stats",
+        "table_id_hint": "overall",
+    },
+}
+"""Mappatura campionato -> {codice interno, URL FBref della pagina
+'Stats' del campionato, frammento id della tabella classifica}. Aggiungere un
+nuovo campionato scrapato richiede solo una nuova voce qui + un'eventuale
+riga in MICRO_EVENT_BASELINES."""
+
+SECONDARY_LEAGUE_SCRAPE_HEADERS = {
+    # Alcuni siti (incluso FBref) restituiscono una risposta ridotta o un
+    # blocco anti-bot senza uno User-Agent "da browser".
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+}
+
 
 PROMOTED_TEAMS = {
     # Italia · Serie A
@@ -1154,6 +1199,260 @@ def compute_form_factor(
 
 
 
+# ==============================================================================
+# SCRAPING SERIE B / SEGUNDA DIVISIÓN (FBref) — 100% AUTOMATICO E GRATUITO
+# ==============================================================================
+# Estensione puramente additiva: NON tocca in alcun modo il percorso dati
+# Football-Data.org (fetch_team_live_stats/build_match_model per i campionati
+# principali restano identici). Per Serie B e Segunda División la classifica
+# reale della stagione corrente viene scaricata da FBref e usata per calcolare
+# Alpha (Attacco) e Beta (Difesa) DINAMICI squadra per squadra — mai un Tier
+# fisso uguale per tutte le squadre.
+class SecondaryLeagueDataError(FootballDataError):
+    """Errore nello scraping FBref per un campionato secondario (Serie B,
+    Segunda División). Eredita da FootballDataError così i punti dell'app che
+    già gestiscono 'except FootballDataError' continuano a funzionare senza
+    modifiche."""
+
+
+def is_secondary_league(league: str) -> bool:
+    """True se il campionato è coperto tramite scraping FBref (Serie B,
+    Segunda División) invece che da Football-Data.org."""
+    return league in SECONDARY_LEAGUES
+
+
+def _extract_all_tables_html(page_html: str) -> list[str]:
+    """FBref nasconde alcune tabelle dentro commenti HTML (<!-- ... -->) per
+    scoraggiare lo scraping ingenuo. Restituisce sia le tabelle visibili sia
+    quelle commentate, come frammenti HTML pronti per pandas.read_html."""
+    import re
+
+    commented_blocks = re.findall(r"<!--(.*?)-->", page_html, flags=re.DOTALL)
+    return [page_html] + [block for block in commented_blocks if "<table" in block]
+
+
+def _read_standings_table(page_html: str) -> pd.DataFrame:
+    """Cerca, fra tutte le tabelle della pagina FBref (comprese quelle nei
+    commenti HTML), la tabella-classifica con le colonne minime necessarie
+    (Squad, MP, GF, GA) e la normalizza."""
+    import io
+
+    required_columns = {"Squad", "MP", "GF", "GA"}
+    for html_fragment in _extract_all_tables_html(page_html):
+        try:
+            tables = pd.read_html(io.StringIO(html_fragment))
+        except ValueError:
+            continue
+        for table in tables:
+            # FBref usa spesso intestazioni multi-livello: le appiattiamo
+            # tenendo solo l'ultimo livello (il nome colonna "reale").
+            if isinstance(table.columns, pd.MultiIndex):
+                table = table.copy()
+                table.columns = [str(col[-1]) for col in table.columns]
+            columns = set(str(col) for col in table.columns)
+            if required_columns.issubset(columns):
+                return table
+    raise SecondaryLeagueDataError(
+        "Impossibile individuare la tabella classifica su FBref (struttura pagina cambiata?)."
+    )
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_secondary_league_data(league: str) -> pd.DataFrame:
+    """Scarica automaticamente e gratuitamente la classifica REALE della
+    stagione corrente per un campionato secondario (Serie B, Segunda
+    División) da FBref, con pandas.read_html. Ritorna un DataFrame con almeno
+    le colonne Squad, MP, W, D, L, GF, GA, Pts, indicizzato per squadra.
+    Cache 30 minuti (ttl=1800): il campionato non cambia classifica più volte
+    in mezz'ora, e riduce il carico sul sito sorgente."""
+    config = SECONDARY_LEAGUES.get(league)
+    if config is None:
+        raise SecondaryLeagueDataError(f"{league} non è un campionato secondario configurato.")
+
+    try:
+        response = requests.get(
+            config["fbref_url"], headers=SECONDARY_LEAGUE_SCRAPE_HEADERS, timeout=25
+        )
+        response.raise_for_status()
+    except requests.RequestException as error:
+        raise SecondaryLeagueDataError(
+            f"Connessione a FBref non riuscita per {league}: {error}"
+        ) from error
+
+    table = _read_standings_table(response.text)
+    table = table.copy()
+    table = table[table["Squad"].notna()]
+    # Righe di intestazione ripetute a metà tabella (comuni su FBref) hanno
+    # 'Squad' uguale al testo dell'intestazione: le scartiamo confrontando MP.
+    for column in ("MP", "W", "D", "L", "GF", "GA", "Pts"):
+        if column in table.columns:
+            table[column] = pd.to_numeric(table[column], errors="coerce")
+    table = table.dropna(subset=["MP", "GF", "GA"])
+    table = table[table["MP"] > 0]
+    table["Squad"] = table["Squad"].astype(str).str.strip()
+    if table.empty:
+        raise SecondaryLeagueDataError(f"Classifica FBref vuota o non interpretabile per {league}.")
+    return table.reset_index(drop=True)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_secondary_league_teams(league: str) -> tuple[str, ...]:
+    """Elenco squadre (ordine alfabetico) del campionato secondario, letto
+    dalla classifica scrapata. Fallback sulla lista statica in LEAGUES se lo
+    scraping fallisce, così la UI resta comunque utilizzabile."""
+    try:
+        standings = fetch_secondary_league_data(league)
+        teams = sorted(standings["Squad"].unique().tolist())
+        if len(teams) >= 2:
+            return tuple(teams)
+    except SecondaryLeagueDataError:
+        pass
+    return tuple(LEAGUES.get(league, []))
+
+
+def secondary_league_averages(standings: pd.DataFrame) -> tuple[float, float]:
+    """Media gol fatti/subiti per squadra a partita nell'INTERO campionato
+    scrapato (non la costante fissa LEAGUE_AVERAGE_GOALS_PER_TEAM, che è
+    calibrata sulle massime serie): usata per normalizzare Alpha/Beta in modo
+    specifico per Serie B/Segunda División, la cui media gol differisce da
+    quella delle prime divisioni."""
+    total_matches = float(standings["MP"].sum())
+    if total_matches <= 0:
+        return LEAGUE_AVERAGE_GOALS_PER_TEAM, LEAGUE_AVERAGE_GOALS_PER_TEAM
+    avg_gf = float(standings["GF"].sum()) / total_matches
+    avg_ga = float(standings["GA"].sum()) / total_matches
+    # In una classifica chiusa GF totali == GA totali per costruzione: le
+    # teniamo comunque distinte per chiarezza/robustezza a dati parziali.
+    return clamp(avg_gf, 0.4, 3.5), clamp(avg_ga, 0.4, 3.5)
+
+
+def fetch_secondary_team_stats(league: str, team: str) -> LiveTeamStats:
+    """Statistiche 'live' di una squadra di Serie B/Segunda División,
+    ricavate dalla classifica scrapata da FBref. Non essendoci uno split
+    casa/trasferta nella tabella-classifica aggregata, i gol fatti/subiti
+    vengono ripartiti in proporzione uguale fra le due componenti (home/away)
+    — un'approssimazione dichiarata, che NON altera il totale usato per
+    calcolare Alpha/Beta. Le partite REALI giocate (MP) alimentano comunque
+    la Modalità Inizio Stagione (Dynamic Decay) come per Football-Data.org."""
+    standings = fetch_secondary_league_data(league)
+    row = standings[standings["Squad"].str.casefold() == team.casefold()]
+    if row.empty:
+        # Fuzzy fallback: alcuni nomi possono differire leggermente (accenti,
+        # abbreviazioni) fra la lista squadre e la tabella classifica.
+        normalized_target = _normalize_team_name(team)
+        row = standings[
+            standings["Squad"].apply(
+                lambda name: normalized_target in _normalize_team_name(str(name))
+                or _normalize_team_name(str(name)) in normalized_target
+            )
+        ]
+    if row.empty:
+        raise SecondaryLeagueDataError(f"{team} non trovata nella classifica FBref di {league}.")
+
+    record = row.iloc[0]
+    matches = float(record["MP"])
+    goals_for = float(record["GF"])
+    goals_against = float(record["GA"])
+    code = SECONDARY_LEAGUES[league]["code"]
+    baseline = MICRO_EVENT_BASELINES[code]
+    scoring_factor = clamp(0.88 + (goals_for / matches) * 0.08, 0.88, 1.12) if matches else 1.0
+
+    return LiveTeamStats(
+        team_id=-1,
+        team_name=str(record["Squad"]),
+        matches=matches,
+        home_matches=matches / 2,
+        away_matches=matches / 2,
+        goals_for=goals_for,
+        goals_against=goals_against,
+        home_goals_for=goals_for / 2,
+        home_goals_against=goals_against / 2,
+        away_goals_for=goals_for / 2,
+        away_goals_against=goals_against / 2,
+        total_shots=baseline["shots"] * scoring_factor * matches,
+        shots_on_target=baseline["shots_on_target"] * scoring_factor * matches,
+        corners=baseline["corners"] * matches,
+        cards=baseline["cards"] * matches,
+        fouls=baseline["fouls"] * matches,
+        recent_form=(),  # Non disponibile dalla sola tabella classifica: Form Factor neutro.
+        form_factor=1.0,
+        current_season_matches=int(matches),
+    )
+
+
+SECONDARY_TIER_RATING_MIN = 1280.0
+"""Rating minimo (ultima in classifica) per il profilo dinamico delle
+squadre di Serie B/Segunda División — stesso estremo inferiore usato da
+TEAM_TIER_PROFILES (Tier 5) per restare su una scala comparabile."""
+
+SECONDARY_TIER_RATING_MAX = 1650.0
+"""Rating massimo (capolista) per il profilo dinamico: leggermente sotto il
+Tier 1 delle massime serie (1750), perché una capolista di Serie B/Segunda
+resta comunque un gradino sotto ai top club europei."""
+
+
+def secondary_team_dynamic_profile(league: str, team: str, standings: pd.DataFrame) -> dict[str, float]:
+    """Profilo Attacco/Difesa/Rating calcolato IN MODO DINAMICO dalla
+    classifica reale — nessun Tier fisso condiviso fra squadre diverse:
+
+    * Alpha (Attacco) = (Gol Fatti / Partite Giocate) / (Media Gol del Campionato)
+    * Beta  (Difesa)  = (Gol Subiti / Partite Giocate) / (Media Gol Subiti del Campionato)
+    * Rating = interpolazione lineare fra SECONDARY_TIER_RATING_MIN e
+      SECONDARY_TIER_RATING_MAX in base al percentile di Punti/Partita (ppg)
+      della squadra rispetto a max/min della classifica corrente — così la
+      capolista e la retrocessa hanno rating ben distinti, la Modalità Inizio
+      Stagione ha comunque un punto di ancoraggio anche con pochissime
+      partite giocate.
+
+    Usato sia come 'stats profile' (Alpha/Beta) sia come 'prior' per il
+    Dynamic Decay ad inizio stagione (al posto di TEAM_TIER_PROFILES)."""
+    avg_gf, avg_ga = secondary_league_averages(standings)
+    row = standings[standings["Squad"].str.casefold() == team.casefold()]
+    if row.empty:
+        normalized_target = _normalize_team_name(team)
+        row = standings[
+            standings["Squad"].apply(
+                lambda name: normalized_target in _normalize_team_name(str(name))
+                or _normalize_team_name(str(name)) in normalized_target
+            )
+        ]
+    if row.empty:
+        raise SecondaryLeagueDataError(f"{team} non trovata nella classifica FBref di {league}.")
+    record = row.iloc[0]
+    matches = float(record["MP"])
+
+    alpha = clamp((float(record["GF"]) / matches) / avg_gf, 0.3, 3.0) if matches else 1.0
+    beta = clamp((float(record["GA"]) / matches) / avg_ga, 0.3, 3.0) if matches else 1.0
+
+    if "Pts" in standings.columns and standings["Pts"].notna().any():
+        ppg_series = standings["Pts"].astype(float) / standings["MP"].astype(float).replace(0, np.nan)
+    else:
+        # Nessuna colonna Pts affidabile: ricostruiamo i punti da W/D (3-1-0).
+        wins = standings.get("W", pd.Series(0, index=standings.index)).astype(float)
+        draws = standings.get("D", pd.Series(0, index=standings.index)).astype(float)
+        ppg_series = (wins * 3 + draws) / standings["MP"].astype(float).replace(0, np.nan)
+    ppg_series = ppg_series.dropna()
+    team_ppg = float(ppg_series.loc[row.index[0]]) if row.index[0] in ppg_series.index else float(ppg_series.mean())
+    ppg_min, ppg_max = float(ppg_series.min()), float(ppg_series.max())
+    if ppg_max - ppg_min > 1e-6:
+        percentile = clamp((team_ppg - ppg_min) / (ppg_max - ppg_min), 0.0, 1.0)
+    else:
+        percentile = 0.5
+    rating = SECONDARY_TIER_RATING_MIN + (SECONDARY_TIER_RATING_MAX - SECONDARY_TIER_RATING_MIN) * percentile
+
+    return {"rating": rating, "attack": alpha, "defense": beta}
+
+
+def secondary_competition_season_status(league: str) -> str:
+    """Versione di competition_season_status() per i campionati scrapati da
+    FBref: indica quante squadre sono state caricate e da quale fonte."""
+    try:
+        standings = fetch_secondary_league_data(league)
+        return f"{len(standings)} squadre · dati live da FBref (scraping automatico)"
+    except SecondaryLeagueDataError:
+        return "lista di riserva (scraping FBref non disponibile al momento)"
+
+
 def build_match_model(
     league: str,
     home: str,
@@ -1165,8 +1464,14 @@ def build_match_model(
     fatigue_home: dict[str, object] | None = None,
     fatigue_away: dict[str, object] | None = None,
 ) -> MatchModel:
-    home_stats = fetch_team_live_stats(league, home)
-    away_stats = fetch_team_live_stats(league, away)
+    secondary = is_secondary_league(league)
+    if secondary:
+        standings = fetch_secondary_league_data(league)
+        home_stats = fetch_secondary_team_stats(league, home)
+        away_stats = fetch_secondary_team_stats(league, away)
+    else:
+        home_stats = fetch_team_live_stats(league, home)
+        away_stats = fetch_team_live_stats(league, away)
 
     # --- 0. Slider manuali "Fattore Mercato" e "Impatto Infortuni/Titolari
     # Assenti", calcolati subito perché si applicano direttamente su
@@ -1242,13 +1547,27 @@ def build_match_model(
     #   N >= 5 → 100% statistiche reali (Peso_Fascia=0)
     early_season = is_early_season_match(home_stats, away_stats)
 
-    home_tier = team_tier_profile(home)
-    away_tier = team_tier_profile(away)
+    if secondary:
+        # --- RATING DINAMICO (NO TIER FISSI) ---------------------------------
+        # Per Serie B/Segunda División il 'prior' di inizio stagione non è un
+        # Tier fisso condiviso da più squadre, ma un profilo Attacco/Difesa/
+        # Rating calcolato dalla classifica reale scrapata (Alpha/Beta), vedi
+        # secondary_team_dynamic_profile. La media gol di riferimento per
+        # normalizzare le statistiche osservate è quella REALE del campionato
+        # scrapato, non la costante fissa delle massime serie.
+        home_tier = secondary_team_dynamic_profile(league, home, standings)
+        away_tier = secondary_team_dynamic_profile(league, away, standings)
+        league_avg_goals, _league_avg_goals_against = secondary_league_averages(standings)
+    else:
+        home_tier = team_tier_profile(home)
+        away_tier = team_tier_profile(away)
+        league_avg_goals = LEAGUE_AVERAGE_GOALS_PER_TEAM
+
     home_tier_weight, home_stats_weight = dynamic_decay_weights(home_stats.current_season_matches)
     away_tier_weight, away_stats_weight = dynamic_decay_weights(away_stats.current_season_matches)
 
     def _stats_multiplier(value_per_match: float) -> float:
-        return clamp(value_per_match / LEAGUE_AVERAGE_GOALS_PER_TEAM, 0.3, 3.0)
+        return clamp(value_per_match / league_avg_goals, 0.3, 3.0)
 
     def _stats_rating(attack_mult: float, defense_mult: float) -> float:
         return BASE_RATING + (RATING_SCALE / 2) * (attack_mult - 1.0) - (RATING_SCALE / 2) * (defense_mult - 1.0)
@@ -1292,12 +1611,12 @@ def build_match_model(
     # casa × Difesa_ospite × fattore campo; λ_trasferta speculare, senza
     # fattore campo).
     home_lambda = clamp(
-        LEAGUE_AVERAGE_GOALS_PER_TEAM * attacco_finale_home * difesa_finale_away * HOME_ADVANTAGE_GOAL_MULTIPLIER,
+        league_avg_goals * attacco_finale_home * difesa_finale_away * HOME_ADVANTAGE_GOAL_MULTIPLIER,
         0.05,
         5.5,
     )
     away_lambda = clamp(
-        LEAGUE_AVERAGE_GOALS_PER_TEAM * attacco_finale_away * difesa_finale_home,
+        league_avg_goals * attacco_finale_away * difesa_finale_home,
         0.05,
         5.0,
     )
@@ -1307,10 +1626,10 @@ def build_match_model(
     # --- 5. Tiri totali/in porta: stessa Transizione Dinamica (baseline di
     # Fascia derivata dall'Attacco di Tier, mescolata alle statistiche reali),
     # poi slider manuali e infine il gap di rating (smorzato). -----------------
-    competition_code = FOOTBALL_DATA_COMPETITIONS[league]
+    competition_code = SECONDARY_LEAGUES[league]["code"] if secondary else FOOTBALL_DATA_COMPETITIONS[league]
     micro_baseline = MICRO_EVENT_BASELINES[competition_code]
-    shots_per_goal = micro_baseline["shots"] / LEAGUE_AVERAGE_GOALS_PER_TEAM
-    sot_per_goal = micro_baseline["shots_on_target"] / LEAGUE_AVERAGE_GOALS_PER_TEAM
+    shots_per_goal = micro_baseline["shots"] / league_avg_goals
+    sot_per_goal = micro_baseline["shots_on_target"] / league_avg_goals
 
     home_shots_tier_baseline = home_tier["attack"] * shots_per_goal
     away_shots_tier_baseline = away_tier["attack"] * shots_per_goal
@@ -1354,15 +1673,21 @@ def build_match_model(
     # Monte Carlo, cosicché ogni vista dell'app racconti lo stesso match.
     home_win_prob, draw_prob, away_win_prob = match_outcome_probabilities(home_lambda, away_lambda)
 
-    home_tier_number = lookup_team_tier(home)
-    away_tier_number = lookup_team_tier(away)
+    if secondary:
+        home_label = f"Rating dinamico FBref (Alpha {home_tier['attack']:.2f}/Beta {home_tier['defense']:.2f})"
+        away_label = f"Rating dinamico FBref (Alpha {away_tier['attack']:.2f}/Beta {away_tier['defense']:.2f})"
+    else:
+        home_label = TEAM_TIER_LABELS[lookup_team_tier(home)]
+        away_label = TEAM_TIER_LABELS[lookup_team_tier(away)]
     engine_note = (
-        f"{TEAM_TIER_LABELS[home_tier_number]} ({home}, rating {rating_finale_home:.0f}) "
-        f"vs {TEAM_TIER_LABELS[away_tier_number]} ({away}, rating {rating_finale_away:.0f}) · "
+        f"{home_label} ({home}, rating {rating_finale_home:.0f}) "
+        f"vs {away_label} ({away}, rating {rating_finale_away:.0f}) · "
         f"Peso Fascia/Stats: {home}={home_tier_weight:.0%}/{home_stats_weight:.0%}, "
         f"{away}={away_tier_weight:.0%}/{away_stats_weight:.0%} · "
         f"correzione Dixon-Coles ρ={DIXON_COLES_RHO:+.2f}"
     )
+    if secondary:
+        engine_note += " · fonte dati: FBref (scraping automatico, classifica stagione corrente)"
     if home_stats.recent_form:
         engine_note += f" · forma {home}: {''.join(home_stats.recent_form)}"
     if away_stats.recent_form:
@@ -2464,7 +2789,8 @@ def try_build_match_model(
             fatigue_away=fatigue_away,
         )
     except FootballDataError as error:
-        return None, f"Dati Football-Data.org non disponibili: {error}"
+        source = "FBref" if is_secondary_league(league) else "Football-Data.org"
+        return None, f"Dati {source} non disponibili: {error}"
     return model, ""
 
 
@@ -2891,35 +3217,47 @@ def render_bankroll_tab() -> None:
     st.line_chart(timeline.set_index("Giocata"))
 
 
+ALL_LEAGUE_OPTIONS: list[str] = list(FOOTBALL_DATA_COMPETITIONS) + list(SECONDARY_LEAGUES)
+"""Elenco completo dei campionati selezionabili in UI: i campionati
+principali (Football-Data.org) seguiti dai campionati secondari coperti via
+scraping automatico FBref (Serie B, Segunda División)."""
+
+
 def render_dashboard(sidebar_values: dict[str, float]) -> None:
     st.markdown(
         "### Impostazioni partita\n"
-        "Squadre, calendario e risultati vengono recuperati direttamente da "
-        "Football-Data.org. Non sono quotazioni di un bookmaker."
+        "Squadre, calendario e risultati dei campionati principali vengono "
+        "recuperati da Football-Data.org; Serie B e Segunda División sono "
+        "caricate automaticamente e gratuitamente da FBref. Non sono "
+        "quotazioni di un bookmaker."
     )
 
     col_league, col_home, col_away = st.columns(3)
     with col_league:
         league = st.selectbox(
             "Campionato",
-            options=list(FOOTBALL_DATA_COMPETITIONS),
+            options=ALL_LEAGUE_OPTIONS,
             key="league_select",
         )
 
-    try:
-        team_rows = fetch_league_teams(league)
-    except FootballDataError as error:
-        st.error(f"Football-Data.org non disponibile: {error}")
-        team_rows = ()
+    secondary = is_secondary_league(league)
+    data_source_label = "FBref (scraping automatico)" if secondary else "Football-Data.org"
 
-    teams = [name for _, name in team_rows]
+    try:
+        if secondary:
+            teams = list(fetch_secondary_league_teams(league))
+        else:
+            teams = [name for _, name in fetch_league_teams(league)]
+    except FootballDataError as error:
+        st.error(f"{data_source_label} non disponibile: {error}")
+        teams = []
 
     if len(teams) < 2:
         with col_home:
             st.selectbox("Squadra di casa", options=teams, disabled=True)
         with col_away:
             st.selectbox("Squadra ospite", options=teams, disabled=True)
-        st.warning("Football-Data.org non ha restituito due squadre disponibili.")
+        st.warning(f"{data_source_label} non ha restituito due squadre disponibili.")
         return
 
     # Se il campionato è cambiato, riporta le selezioni squadra ai valori di default.
@@ -2933,33 +3271,54 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
     with col_away:
         away = st.selectbox("Squadra ospite", options=teams, key="away_select")
 
-    try:
-        status_text = (
-            f"Football-Data.org: {len(teams)} squadre caricate · "
-            f"{competition_season_status(league)}. "
-            "Micro-eventi stimati su baseline di campionato."
+    if secondary:
+        st.info(
+            f"{data_source_label}: {len(teams)} squadre caricate · "
+            f"{secondary_competition_season_status(league)}. "
+            "Attacco/Difesa calcolati dinamicamente dalla classifica reale "
+            "(nessun Tier fisso). Micro-eventi stimati su baseline di categoria."
         )
-        st.info(status_text)
-    except FootballDataError as error:
-        st.warning(f"Stato stagione non disponibile: {error}")
+    else:
+        try:
+            status_text = (
+                f"Football-Data.org: {len(teams)} squadre caricate · "
+                f"{competition_season_status(league)}. "
+                "Micro-eventi stimati su baseline di campionato."
+            )
+            st.info(status_text)
+        except FootballDataError as error:
+            st.warning(f"Stato stagione non disponibile: {error}")
 
-    try:
-        calendar = calendar_frame(league)
-    except FootballDataError as error:
-        st.error(f"Calendario Football-Data.org non disponibile: {error}")
-        calendar = pd.DataFrame(columns=["Data", "Stato", "Casa", "Trasferta"])
+    if secondary:
+        with st.expander("📅 Calendario stagione corrente", expanded=False):
+            st.caption(
+                "Il calendario partite non è incluso nello scraping automatico "
+                "della classifica: sono disponibili solo le squadre e le "
+                "statistiche aggregate (gol fatti/subiti, partite giocate)."
+            )
+    else:
+        try:
+            calendar = calendar_frame(league)
+        except FootballDataError as error:
+            st.error(f"Calendario Football-Data.org non disponibile: {error}")
+            calendar = pd.DataFrame(columns=["Data", "Stato", "Casa", "Trasferta"])
 
-    with st.expander("📅 Calendario stagione 2026/27", expanded=False):
-        st.dataframe(calendar, use_container_width=True, hide_index=True)
+        with st.expander("📅 Calendario stagione 2026/27", expanded=False):
+            st.dataframe(calendar, use_container_width=True, hide_index=True)
 
     if home == away:
         st.info("Seleziona due squadre diverse per avviare l'analisi.")
         return
 
-    try:
-        crests = fetch_team_crests(league)
-    except FootballDataError:
+    if secondary:
+        # FBref non espone gli stemmi ufficiali via scraping semplice: la
+        # dashboard resta pienamente funzionante, solo senza i loghi club.
         crests = {}
+    else:
+        try:
+            crests = fetch_team_crests(league)
+        except FootballDataError:
+            crests = {}
 
     st.markdown("---")
     render_team_header(league, home, away, crests)
