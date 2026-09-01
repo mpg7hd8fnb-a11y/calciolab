@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import math
 import os
@@ -42,28 +43,10 @@ LEAGUES: dict[str, list[str]] = {
         "Udinese",
         "Venezia",
     ],
-    "Italia · Serie B": [
-        "Avellino",
-        "Bari",
-        "Catanzaro",
-        "Cesena",
-        "Empoli",
-        "Frosinone",
-        "Juve Stabia",
-        "Mantova",
-        "Modena",
-        "Monza",
-        "Padova",
-        "Palermo",
-        "Pescara",
-        "Reggiana",
-        "Sampdoria",
-        "Spezia",
-        "Südtirol",
-        "Venezia",
-        "Vicenza",
-        "Virtus Entella",
-    ],
+    # NB: "Italia · Serie B" non ha più una lista fissa qui: le squadre sono
+    # estratte in tempo reale dallo scraping WorldFootball.net (vedi
+    # SECONDARY_LEAGUES / fetch_secondary_league_teams più sotto), così il
+    # menu mostra sempre la stagione corrente e non elenchi datati.
     "Inghilterra · Premier League": [
         "Arsenal",
         "Aston Villa",
@@ -134,30 +117,9 @@ LEAGUES: dict[str, list[str]] = {
         "Valencia",
         "Villarreal",
     ],
-    "Spagna · Segunda División": [
-        "Albacete",
-        "Almería",
-        "Burgos",
-        "Cádiz",
-        "Castellón",
-        "Córdoba",
-        "Deportivo La Coruña",
-        "Eibar",
-        "Eldense",
-        "FC Andorra",
-        "Granada",
-        "Huesca",
-        "Leganés",
-        "Las Palmas",
-        "Málaga",
-        "Mirandés",
-        "Racing Santander",
-        "Real Zaragoza",
-        "Sporting Gijón",
-        "Tenerife",
-        "Valladolid",
-        "Levante",
-    ],
+    # NB: "Spagna · Segunda División" non ha più una lista fissa qui, per lo
+    # stesso motivo di "Italia · Serie B" sopra: squadre estratte in tempo
+    # reale da WorldFootball.net.
     "Germania · Bundesliga": [
         "Augsburg",
         "Bayer Leverkusen",
@@ -355,9 +317,9 @@ MICRO_EVENT_BASELINES: dict[str, dict[str, float]] = {
     "DED": {"shots": 13.2, "shots_on_target": 4.6, "corners": 5.2, "cards": 1.9, "fouls": 11.0},
     "PPL": {"shots": 11.5, "shots_on_target": 3.8, "corners": 4.5, "cards": 2.6, "fouls": 13.5},
     "CL": {"shots": 12.6, "shots_on_target": 4.4, "corners": 4.9, "cards": 1.7, "fouls": 10.5},
-    # Campionati "secondari" (scraping FBref, vedi SECONDARY_LEAGUES più sotto):
-    # baseline trasparenti stimate su medie storiche di categoria, sulla stessa
-    # falsariga delle massime serie qui sopra.
+    # Campionati "secondari" (scraping WorldFootball.net, vedi SECONDARY_LEAGUES
+    # più sotto): baseline trasparenti stimate su medie storiche di categoria,
+    # sulla stessa falsariga delle massime serie qui sopra.
     "SB": {"shots": 11.6, "shots_on_target": 3.8, "corners": 4.4, "cards": 2.5, "fouls": 13.2},
     "SD": {"shots": 11.4, "shots_on_target": 3.7, "corners": 4.3, "cards": 2.7, "fouls": 13.6},
 }
@@ -368,38 +330,31 @@ MICRO_EVENT_BASELINES: dict[str, dict[str, float]] = {
 # ==============================================================================
 # Football-Data.org (piano gratuito) non copre la Serie B italiana né la
 # Segunda División spagnola. Per questi due campionati i dati della stagione
-# corrente (classifica, gol fatti/subiti, partite giocate) vengono estratti
-# automaticamente da FBref tramite web scraping (pandas.read_html), SENZA
-# alcuna chiave API. Questa fonte alimenta un ramo di calcolo dedicato in
-# build_match_model che NON usa il DIZIONARIO FASCE DI FORZA fisso (vedi
-# fetch_secondary_team_profile), ma calcola Attacco/Difesa dinamicamente
-# dalla classifica reale, squadra per squadra.
-SECONDARY_LEAGUES: dict[str, dict[str, str]] = {
+# CORRENTE (classifica, gol fatti/subiti, partite giocate) vengono estratti
+# automaticamente da WorldFootball.net tramite web scraping (pandas.read_html),
+# SENZA alcuna chiave API. FBref è stato scartato come fonte perché blocca la
+# maggior parte delle richieste automatiche (403/Cloudflare); WorldFootball.net
+# non applica questa protezione. Questa fonte alimenta un ramo di calcolo
+# dedicato in build_match_model che NON usa il DIZIONARIO FASCE DI FORZA fisso
+# (vedi secondary_team_dynamic_profile), ma calcola Attacco/Difesa
+# dinamicamente dalla classifica reale, squadra per squadra — e NON usa
+# nessuna lista di squadre hardcodata: la lista visibile in UI è sempre
+# esattamente quella appena scaricata dalla pagina web.
+SECONDARY_LEAGUES: dict[str, dict[str, object]] = {
     "Italia · Serie B": {
         "code": "SB",
-        "fbref_url": "https://fbref.com/en/comps/18/Serie-B-Stats",
-        "table_id_hint": "overall",
+        "worldfootball_slugs": ["ita-serie-b"],
     },
     "Spagna · Segunda División": {
         "code": "SD",
-        "fbref_url": "https://fbref.com/en/comps/17/Segunda-Division-Stats",
-        "table_id_hint": "overall",
+        "worldfootball_slugs": ["esp-segunda-division", "esp-liga-adelante"],
     },
 }
-"""Mappatura campionato -> {codice interno, URL FBref della pagina
-'Stats' del campionato, frammento id della tabella classifica}. Aggiungere un
-nuovo campionato scrapato richiede solo una nuova voce qui + un'eventuale
-riga in MICRO_EVENT_BASELINES."""
-
-SECONDARY_LEAGUE_SCRAPE_HEADERS = {
-    # Alcuni siti (incluso FBref) restituiscono una risposta ridotta o un
-    # blocco anti-bot senza uno User-Agent "da browser".
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-}
+"""Mappatura campionato -> {codice interno, elenco di slug WorldFootball.net
+candidati (il primo è quello attuale; eventuali alias storici, es. per
+rebranding della competizione, sono tentati in ordine come fallback)}.
+Aggiungere un nuovo campionato scrapato richiede solo una nuova voce qui +
+un'eventuale riga in MICRO_EVENT_BASELINES."""
 
 
 PROMOTED_TEAMS = {
@@ -1200,114 +1155,235 @@ def compute_form_factor(
 
 
 # ==============================================================================
-# SCRAPING SERIE B / SEGUNDA DIVISIÓN (FBref) — 100% AUTOMATICO E GRATUITO
+# SCRAPING SERIE B / SEGUNDA DIVISIÓN (WORLDFOOTBALL.NET) — 100% AUTOMATICO E
+# GRATUITO, STAGIONE CORRENTE
 # ==============================================================================
 # Estensione puramente additiva: NON tocca in alcun modo il percorso dati
 # Football-Data.org (fetch_team_live_stats/build_match_model per i campionati
-# principali restano identici). Per Serie B e Segunda División la classifica
-# reale della stagione corrente viene scaricata da FBref e usata per calcolare
-# Alpha (Attacco) e Beta (Difesa) DINAMICI squadra per squadra — mai un Tier
-# fisso uguale per tutte le squadre.
+# principali restano identici). FBref blocca la maggior parte delle richieste
+# automatiche (403/Cloudflare), quindi per Serie B e Segunda División la
+# classifica reale della stagione corrente viene scaricata da
+# worldfootball.net (nessuna protezione anti-bot, nessuna chiave API) e usata
+# per calcolare Alpha (Attacco) e Beta (Difesa) DINAMICI squadra per
+# squadra — mai un Tier fisso uguale per tutte le squadre, e MAI una lista di
+# squadre hardcodata: se lo scraping fallisce, l'errore (con il codice HTTP
+# esatto, se disponibile) viene propagato all'interfaccia invece di mostrare
+# squadre di stagioni passate.
 class SecondaryLeagueDataError(FootballDataError):
-    """Errore nello scraping FBref per un campionato secondario (Serie B,
-    Segunda División). Eredita da FootballDataError così i punti dell'app che
-    già gestiscono 'except FootballDataError' continuano a funzionare senza
-    modifiche."""
+    """Errore nello scraping WorldFootball.net per un campionato secondario
+    (Serie B, Segunda División). Eredita da FootballDataError così i punti
+    dell'app che già gestiscono 'except FootballDataError' continuano a
+    funzionare senza modifiche."""
 
 
 def is_secondary_league(league: str) -> bool:
-    """True se il campionato è coperto tramite scraping FBref (Serie B,
-    Segunda División) invece che da Football-Data.org."""
+    """True se il campionato è coperto tramite scraping WorldFootball.net
+    (Serie B, Segunda División) invece che da Football-Data.org."""
     return league in SECONDARY_LEAGUES
 
 
-def _extract_all_tables_html(page_html: str) -> list[str]:
-    """FBref nasconde alcune tabelle dentro commenti HTML (<!-- ... -->) per
-    scoraggiare lo scraping ingenuo. Restituisce sia le tabelle visibili sia
-    quelle commentate, come frammenti HTML pronti per pandas.read_html."""
-    import re
+def _worldfootball_standings_urls(league: str, season_start: int) -> list[str]:
+    """Costruisce l'URL (o gli URL candidati, se un campionato ha avuto più
+    di uno slug nel tempo, es. rebranding) della pagina classifica di
+    WorldFootball.net per la stagione CORRENTE, calcolata dinamicamente da
+    current_season_start() — nessuna stagione hardcodata."""
+    config = SECONDARY_LEAGUES[league]
+    season_slug = f"{season_start}-{season_start + 1}"
+    return [f"https://www.worldfootball.net/table/{slug}-{season_slug}/" for slug in config["worldfootball_slugs"]]
 
-    commented_blocks = re.findall(r"<!--(.*?)-->", page_html, flags=re.DOTALL)
-    return [page_html] + [block for block in commented_blocks if "<table" in block]
+
+def _is_rank_sequence(series: pd.Series) -> bool:
+    """True se la colonna è la classica colonna '#' di posizione in
+    classifica (1, 2, 3, ... N): va esclusa dal riconoscimento automatico di
+    'Partite Giocate' e 'Punti', che sono anch'esse colonne numeriche."""
+    values = pd.to_numeric(series, errors="coerce")
+    if values.isna().any():
+        return False
+    return values.astype(int).tolist() == list(range(1, len(values) + 1))
 
 
-def _read_standings_table(page_html: str) -> pd.DataFrame:
-    """Cerca, fra tutte le tabelle della pagina FBref (comprese quelle nei
-    commenti HTML), la tabella-classifica con le colonne minime necessarie
-    (Squad, MP, GF, GA) e la normalizza."""
-    import io
+def _looks_like_goals_column(series: pd.Series) -> bool:
+    """True se la colonna contiene valori nel formato 'GolFatti:GolSubiti'
+    (es. '34:18'), il formato standard con cui WorldFootball.net presenta i
+    gol in un'unica cella della tabella classifica."""
+    sample = series.dropna().astype(str).str.strip()
+    if sample.empty:
+        return False
+    return bool(sample.str.match(r"^\d+\s*:\s*\d+$").all())
 
-    required_columns = {"Squad", "MP", "GF", "GA"}
-    for html_fragment in _extract_all_tables_html(page_html):
-        try:
-            tables = pd.read_html(io.StringIO(html_fragment))
-        except ValueError:
+
+def _parse_worldfootball_standings(raw_table: pd.DataFrame) -> pd.DataFrame:
+    """Riconosce ED ESTRAE in modo strutturale (senza fare affidamento su
+    nomi di colonna specifici, che possono variare per lingua/layout) la
+    tabella-classifica da una delle tabelle HTML della pagina WorldFootball:
+    - la colonna 'Gol Fatti:Gol Subiti' (formato 'NN:NN');
+    - la colonna Squadra (stringhe pressoché tutte diverse fra loro);
+    - la colonna Partite Giocate (prima colonna numerica PRIMA dei gol,
+      esclusa l'eventuale colonna di posizione/rank '#');
+    - la colonna Punti (ultima colonna numerica DOPO i gol);
+    - se presenti abbastanza colonne numeriche prima dei gol, anche
+      Vittorie/Pareggi/Sconfitte.
+    Solleva SecondaryLeagueDataError se la struttura non è riconoscibile,
+    così il chiamante può provare la tabella successiva della pagina."""
+    table = raw_table.copy()
+    if isinstance(table.columns, pd.MultiIndex):
+        table.columns = [str(col[-1]) for col in table.columns]
+    table.columns = [str(col) for col in table.columns]
+    table = table.dropna(how="all").reset_index(drop=True)
+    if table.empty:
+        raise SecondaryLeagueDataError("Tabella vuota.")
+
+    goals_col = next((col for col in table.columns if _looks_like_goals_column(table[col])), None)
+    if goals_col is None:
+        raise SecondaryLeagueDataError("Colonna Gol Fatti:Gol Subiti non trovata.")
+
+    goal_split = table[goals_col].astype(str).str.extract(r"(\d+)\s*:\s*(\d+)")
+    goals_for = pd.to_numeric(goal_split[0], errors="coerce")
+    goals_against = pd.to_numeric(goal_split[1], errors="coerce")
+
+    ordered_columns = list(table.columns)
+    goals_index = ordered_columns.index(goals_col)
+
+    rank_columns = {col for col in ordered_columns if col != goals_col and _is_rank_sequence(table[col])}
+
+    numeric_columns = []
+    for col in ordered_columns:
+        if col == goals_col or col in rank_columns:
             continue
-        for table in tables:
-            # FBref usa spesso intestazioni multi-livello: le appiattiamo
-            # tenendo solo l'ultimo livello (il nome colonna "reale").
-            if isinstance(table.columns, pd.MultiIndex):
-                table = table.copy()
-                table.columns = [str(col[-1]) for col in table.columns]
-            columns = set(str(col) for col in table.columns)
-            if required_columns.issubset(columns):
-                return table
-    raise SecondaryLeagueDataError(
-        "Impossibile individuare la tabella classifica su FBref (struttura pagina cambiata?)."
+        numeric_series = pd.to_numeric(table[col], errors="coerce")
+        if numeric_series.notna().mean() > 0.9:
+            numeric_columns.append(col)
+
+    numeric_before = [col for col in numeric_columns if ordered_columns.index(col) < goals_index]
+    numeric_after = [col for col in numeric_columns if ordered_columns.index(col) > goals_index]
+    if not numeric_before or not numeric_after:
+        raise SecondaryLeagueDataError("Colonne 'Partite Giocate'/'Punti' non riconosciute.")
+
+    matches_col = numeric_before[0]
+    points_col = numeric_after[-1]
+
+    team_col = None
+    for col in ordered_columns:
+        if col == goals_col or col in numeric_columns or col in rank_columns:
+            continue
+        values = table[col].astype(str).str.strip()
+        non_empty = values[values.str.len() > 0]
+        if len(non_empty) >= max(4, int(len(table) * 0.8)) and non_empty.nunique() >= max(
+            4, int(len(table) * 0.8)
+        ):
+            team_col = col
+            break
+    if team_col is None:
+        raise SecondaryLeagueDataError("Colonna Squadra non riconosciuta.")
+
+    standings = pd.DataFrame(
+        {
+            "Squad": table[team_col].astype(str).str.strip(),
+            "MP": pd.to_numeric(table[matches_col], errors="coerce"),
+            "GF": goals_for,
+            "GA": goals_against,
+            "Pts": pd.to_numeric(table[points_col], errors="coerce"),
+        }
     )
+
+    remaining_numeric = [col for col in numeric_before if col != matches_col]
+    if len(remaining_numeric) >= 3:
+        standings["W"] = pd.to_numeric(table[remaining_numeric[0]], errors="coerce")
+        standings["D"] = pd.to_numeric(table[remaining_numeric[1]], errors="coerce")
+        standings["L"] = pd.to_numeric(table[remaining_numeric[2]], errors="coerce")
+
+    standings = standings.dropna(subset=["Squad", "MP", "GF", "GA"])
+    standings = standings[(standings["MP"] > 0) & (standings["Squad"].str.len() > 0)]
+    if len(standings) < 2:
+        raise SecondaryLeagueDataError("Meno di 2 squadre valide estratte dalla tabella.")
+    return standings.reset_index(drop=True)
+
+
+SECONDARY_LEAGUE_SCRAPE_HEADERS = {
+    # Header completi "da browser reale" per non essere bloccati come bot:
+    # WorldFootball.net non usa Cloudflare, ma uno User-Agent generico o
+    # assente può comunque ricevere una risposta ridotta/vuota.
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7,es-ES;q=0.6,es;q=0.5",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Referer": "https://www.worldfootball.net/",
+    "Cache-Control": "max-age=0",
+}
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_secondary_league_data(league: str) -> pd.DataFrame:
     """Scarica automaticamente e gratuitamente la classifica REALE della
-    stagione corrente per un campionato secondario (Serie B, Segunda
-    División) da FBref, con pandas.read_html. Ritorna un DataFrame con almeno
-    le colonne Squad, MP, W, D, L, GF, GA, Pts, indicizzato per squadra.
-    Cache 30 minuti (ttl=1800): il campionato non cambia classifica più volte
-    in mezz'ora, e riduce il carico sul sito sorgente."""
+    stagione CORRENTE (calcolata da current_season_start(), mai hardcodata)
+    per un campionato secondario (Serie B, Segunda División) da
+    WorldFootball.net, con pandas.read_html. Ritorna un DataFrame con almeno
+    le colonne Squad, MP, GF, GA, Pts (più W/D/L se disponibili). Se lo
+    scraping fallisce per QUALSIASI motivo (rete, HTTP diverso da 200,
+    struttura pagina cambiata), solleva SecondaryLeagueDataError con il
+    dettaglio esatto (incluso il codice HTTP, quando disponibile) — NESSUN
+    fallback silenzioso su liste di squadre vecchie. Cache 30 minuti
+    (ttl=1800): la classifica non cambia più volte in mezz'ora, e riduce il
+    carico sul sito sorgente."""
     config = SECONDARY_LEAGUES.get(league)
     if config is None:
         raise SecondaryLeagueDataError(f"{league} non è un campionato secondario configurato.")
 
-    try:
-        response = requests.get(
-            config["fbref_url"], headers=SECONDARY_LEAGUE_SCRAPE_HEADERS, timeout=25
-        )
-        response.raise_for_status()
-    except requests.RequestException as error:
-        raise SecondaryLeagueDataError(
-            f"Connessione a FBref non riuscita per {league}: {error}"
-        ) from error
+    season_start = current_season_start()
+    urls = _worldfootball_standings_urls(league, season_start)
 
-    table = _read_standings_table(response.text)
-    table = table.copy()
-    table = table[table["Squad"].notna()]
-    # Righe di intestazione ripetute a metà tabella (comuni su FBref) hanno
-    # 'Squad' uguale al testo dell'intestazione: le scartiamo confrontando MP.
-    for column in ("MP", "W", "D", "L", "GF", "GA", "Pts"):
-        if column in table.columns:
-            table[column] = pd.to_numeric(table[column], errors="coerce")
-    table = table.dropna(subset=["MP", "GF", "GA"])
-    table = table[table["MP"] > 0]
-    table["Squad"] = table["Squad"].astype(str).str.strip()
-    if table.empty:
-        raise SecondaryLeagueDataError(f"Classifica FBref vuota o non interpretabile per {league}.")
-    return table.reset_index(drop=True)
+    failure_reasons: list[str] = []
+    for url in urls:
+        try:
+            response = requests.get(url, headers=SECONDARY_LEAGUE_SCRAPE_HEADERS, timeout=25)
+        except requests.RequestException as error:
+            failure_reasons.append(f"{url} → connessione non riuscita ({error})")
+            continue
+
+        if response.status_code != 200:
+            failure_reasons.append(f"{url} → HTTP {response.status_code}")
+            continue
+
+        try:
+            raw_tables = pd.read_html(io.StringIO(response.text))
+        except ValueError as error:
+            failure_reasons.append(f"{url} → nessuna tabella HTML trovata ({error})")
+            continue
+
+        for raw_table in raw_tables:
+            try:
+                return _parse_worldfootball_standings(raw_table)
+            except SecondaryLeagueDataError:
+                continue
+        failure_reasons.append(f"{url} → HTTP 200 ma struttura tabella non riconosciuta")
+
+    detail = "; ".join(failure_reasons) if failure_reasons else "errore sconosciuto"
+    raise SecondaryLeagueDataError(
+        f"Scraping WorldFootball.net non riuscito per {league} "
+        f"(stagione {season_label(season_start)}): {detail}."
+    )
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
 def fetch_secondary_league_teams(league: str) -> tuple[str, ...]:
     """Elenco squadre (ordine alfabetico) del campionato secondario, letto
-    dalla classifica scrapata. Fallback sulla lista statica in LEAGUES se lo
-    scraping fallisce, così la UI resta comunque utilizzabile."""
-    try:
-        standings = fetch_secondary_league_data(league)
-        teams = sorted(standings["Squad"].unique().tolist())
-        if len(teams) >= 2:
-            return tuple(teams)
-    except SecondaryLeagueDataError:
-        pass
-    return tuple(LEAGUES.get(league, []))
+    ESCLUSIVAMENTE dalla classifica scrapata in tempo reale — nessuna lista
+    statica di riserva: se lo scraping fallisce, l'eccezione (con il motivo/
+    codice HTTP esatto) si propaga al chiamante, che deve mostrarla
+    all'utente invece di popolare squadre di stagioni passate."""
+    standings = fetch_secondary_league_data(league)
+    teams = sorted(standings["Squad"].unique().tolist())
+    if len(teams) < 2:
+        raise SecondaryLeagueDataError(f"Classifica WorldFootball.net incompleta per {league}.")
+    return tuple(teams)
 
 
 def secondary_league_averages(standings: pd.DataFrame) -> tuple[float, float]:
@@ -1328,7 +1404,7 @@ def secondary_league_averages(standings: pd.DataFrame) -> tuple[float, float]:
 
 def fetch_secondary_team_stats(league: str, team: str) -> LiveTeamStats:
     """Statistiche 'live' di una squadra di Serie B/Segunda División,
-    ricavate dalla classifica scrapata da FBref. Non essendoci uno split
+    ricavate dalla classifica scrapata da WorldFootball.net. Non essendoci uno split
     casa/trasferta nella tabella-classifica aggregata, i gol fatti/subiti
     vengono ripartiti in proporzione uguale fra le due componenti (home/away)
     — un'approssimazione dichiarata, che NON altera il totale usato per
@@ -1347,7 +1423,7 @@ def fetch_secondary_team_stats(league: str, team: str) -> LiveTeamStats:
             )
         ]
     if row.empty:
-        raise SecondaryLeagueDataError(f"{team} non trovata nella classifica FBref di {league}.")
+        raise SecondaryLeagueDataError(f"{team} non trovata nella classifica WorldFootball.net di {league}.")
 
     record = row.iloc[0]
     matches = float(record["MP"])
@@ -1417,7 +1493,7 @@ def secondary_team_dynamic_profile(league: str, team: str, standings: pd.DataFra
             )
         ]
     if row.empty:
-        raise SecondaryLeagueDataError(f"{team} non trovata nella classifica FBref di {league}.")
+        raise SecondaryLeagueDataError(f"{team} non trovata nella classifica WorldFootball.net di {league}.")
     record = row.iloc[0]
     matches = float(record["MP"])
 
@@ -1445,12 +1521,12 @@ def secondary_team_dynamic_profile(league: str, team: str, standings: pd.DataFra
 
 def secondary_competition_season_status(league: str) -> str:
     """Versione di competition_season_status() per i campionati scrapati da
-    FBref: indica quante squadre sono state caricate e da quale fonte."""
+    WorldFootball.net: indica quante squadre sono state caricate e da quale fonte."""
     try:
         standings = fetch_secondary_league_data(league)
-        return f"{len(standings)} squadre · dati live da FBref (scraping automatico)"
+        return f"{len(standings)} squadre · dati live da WorldFootball.net (scraping automatico)"
     except SecondaryLeagueDataError:
-        return "lista di riserva (scraping FBref non disponibile al momento)"
+        return "lista di riserva (scraping WorldFootball.net non disponibile al momento)"
 
 
 def build_match_model(
@@ -1674,8 +1750,8 @@ def build_match_model(
     home_win_prob, draw_prob, away_win_prob = match_outcome_probabilities(home_lambda, away_lambda)
 
     if secondary:
-        home_label = f"Rating dinamico FBref (Alpha {home_tier['attack']:.2f}/Beta {home_tier['defense']:.2f})"
-        away_label = f"Rating dinamico FBref (Alpha {away_tier['attack']:.2f}/Beta {away_tier['defense']:.2f})"
+        home_label = f"Rating dinamico WorldFootball.net (Alpha {home_tier['attack']:.2f}/Beta {home_tier['defense']:.2f})"
+        away_label = f"Rating dinamico WorldFootball.net (Alpha {away_tier['attack']:.2f}/Beta {away_tier['defense']:.2f})"
     else:
         home_label = TEAM_TIER_LABELS[lookup_team_tier(home)]
         away_label = TEAM_TIER_LABELS[lookup_team_tier(away)]
@@ -1687,7 +1763,7 @@ def build_match_model(
         f"correzione Dixon-Coles ρ={DIXON_COLES_RHO:+.2f}"
     )
     if secondary:
-        engine_note += " · fonte dati: FBref (scraping automatico, classifica stagione corrente)"
+        engine_note += " · fonte dati: WorldFootball.net (scraping automatico, classifica stagione corrente)"
     if home_stats.recent_form:
         engine_note += f" · forma {home}: {''.join(home_stats.recent_form)}"
     if away_stats.recent_form:
@@ -2789,7 +2865,7 @@ def try_build_match_model(
             fatigue_away=fatigue_away,
         )
     except FootballDataError as error:
-        source = "FBref" if is_secondary_league(league) else "Football-Data.org"
+        source = "WorldFootball.net" if is_secondary_league(league) else "Football-Data.org"
         return None, f"Dati {source} non disponibili: {error}"
     return model, ""
 
@@ -3220,7 +3296,7 @@ def render_bankroll_tab() -> None:
 ALL_LEAGUE_OPTIONS: list[str] = list(FOOTBALL_DATA_COMPETITIONS) + list(SECONDARY_LEAGUES)
 """Elenco completo dei campionati selezionabili in UI: i campionati
 principali (Football-Data.org) seguiti dai campionati secondari coperti via
-scraping automatico FBref (Serie B, Segunda División)."""
+scraping automatico WorldFootball.net (Serie B, Segunda División)."""
 
 
 def render_dashboard(sidebar_values: dict[str, float]) -> None:
@@ -3228,7 +3304,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
         "### Impostazioni partita\n"
         "Squadre, calendario e risultati dei campionati principali vengono "
         "recuperati da Football-Data.org; Serie B e Segunda División sono "
-        "caricate automaticamente e gratuitamente da FBref. Non sono "
+        "caricate automaticamente e gratuitamente da WorldFootball.net. Non sono "
         "quotazioni di un bookmaker."
     )
 
@@ -3241,7 +3317,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
         )
 
     secondary = is_secondary_league(league)
-    data_source_label = "FBref (scraping automatico)" if secondary else "Football-Data.org"
+    data_source_label = "WorldFootball.net (scraping automatico)" if secondary else "Football-Data.org"
 
     try:
         if secondary:
@@ -3311,7 +3387,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
         return
 
     if secondary:
-        # FBref non espone gli stemmi ufficiali via scraping semplice: la
+        # WorldFootball.net non espone gli stemmi ufficiali via scraping semplice: la
         # dashboard resta pienamente funzionante, solo senza i loghi club.
         crests = {}
     else:
