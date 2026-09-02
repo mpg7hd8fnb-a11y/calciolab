@@ -1197,28 +1197,21 @@ API_FOOTBALL_REQUEST_HEADERS_EXTRA = {
 
 
 def _get_api_football_key() -> str | None:
-    """Legge la API Key di API-Football (api-sports.io) da variabile
-    d'ambiente API_FOOTBALL_KEY oppure dai secrets di Streamlit
-    (st.secrets['API_FOOTBALL_KEY']).
+    """API Key di API-Football (api-sports.io), su richiesta esplicita
+    dell'utente scritta direttamente qui nel codice invece di essere letta
+    da variabile d'ambiente/st.secrets.
 
-    NOTA DI SICUREZZA: la chiave NON è scritta in chiaro qui nel codice
-    sorgente. Una API Key hardcodata in un file .py finisce inevitabilmente
-    in ogni copia/commit/screenshot del progetto (e in questo caso anche in
-    una risposta di chat), il che la rende di fatto pubblica. Va invece
-    configurata come secret — esattamente come già si fa per
-    FOOTBALL_DATA_API_KEY poco più sopra in questo file:
-
-    - in locale: variabile d'ambiente `API_FOOTBALL_KEY=<la-tua-chiave>`
-    - su Streamlit Community Cloud: sezione "Secrets" dell'app, aggiungendo
-      la riga `API_FOOTBALL_KEY = "<la-tua-chiave>"`
+    ATTENZIONE (promemoria, non bloccante): una chiave hardcodata in un file
+    .py resta visibile a chiunque abbia accesso al codice sorgente — incluso
+    chiunque riceva/veda questo file, un eventuale repository Git (anche
+    privato, se mai reso pubblico o clonato), o uno screenshot. Se in futuro
+    si volesse ripristinare la lettura da secret, basta reintrodurre:
+        api_key = os.environ.get("API_FOOTBALL_KEY")
+        if api_key: return api_key
+        try: return st.secrets.get("API_FOOTBALL_KEY")
+        except Exception: return None
     """
-    api_key = os.environ.get("API_FOOTBALL_KEY")
-    if api_key:
-        return api_key
-    try:
-        return st.secrets.get("API_FOOTBALL_KEY")
-    except Exception:
-        return None
+    return "991d4e3231c7296625c36ad666105f93"
 
 
 def _parse_api_football_standings(payload: dict[str, object], league: str) -> pd.DataFrame:
