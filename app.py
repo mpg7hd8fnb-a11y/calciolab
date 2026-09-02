@@ -1529,6 +1529,228 @@ def goal_market_probabilities(model: MatchModel, max_goals: int = 12) -> dict[st
 
 
 # ==============================================================================
+# FASE 4: DASHBOARD GRAFICI & MICRO-EVENTI (Plotly)
+# ==============================================================================
+# Estensione puramente additiva e solo di VISUALIZZAZIONE: non introduce
+# nessun nuovo calcolo statistico. Riusa esattamente la stessa matrice di
+# Poisson bivariata + correzione Dixon-Coles già impiegata da
+# match_outcome_probabilities / goal_market_probabilities / exact_score_
+# probabilities, così i grafici raccontano sempre lo stesso match delle altre
+# schede (Pronostici, Statistiche Gol & Mercati, Monte Carlo).
+def goal_distribution_probabilities(model: MatchModel, max_goals: int = 10) -> dict[str, object]:
+    """Distribuzione di probabilità dei gol TOTALI di partita (0, 1, 2, 3, 4,
+    5+) e matrice congiunta Casa/Trasferta (Poisson bivariata + correzione
+    Dixon-Coles), usata sia dal grafico a barre 'Distribuzione Gol Totali'
+    sia dalla Heatmap dei risultati esatti e dai Multigol."""
+    home_lambda = model.home_lambda
+    away_lambda = model.away_lambda
+    home_pmf = [poisson.pmf(i, home_lambda) for i in range(max_goals + 1)]
+    away_pmf = [poisson.pmf(j, away_lambda) for j in range(max_goals + 1)]
+
+    joint = [[0.0] * (max_goals + 1) for _ in range(max_goals + 1)]
+    total = 0.0
+    for i in range(max_goals + 1):
+        for j in range(max_goals + 1):
+            probability = home_pmf[i] * away_pmf[j] * dixon_coles_tau(i, j, home_lambda, away_lambda)
+            joint[i][j] = probability
+            total += probability
+    if total <= 0:
+        total = 1.0
+
+    total_goals_probability: dict[int, float] = {n: 0.0 for n in range(5)}
+    five_plus_probability = 0.0
+    for i in range(max_goals + 1):
+        for j in range(max_goals + 1):
+            total_goals = i + j
+            probability = joint[i][j] / total
+            if total_goals <= 4:
+                total_goals_probability[total_goals] += probability
+            else:
+                five_plus_probability += probability
+
+    return {
+        "joint": joint,
+        "total": total,
+        "totals": total_goals_probability,
+        "five_plus": clamp(five_plus_probability, 0.0, 1.0),
+    }
+
+
+def multigol_probabilities(goal_distribution: dict[str, object]) -> dict[str, float]:
+    """Probabilità dei mercati Multigol (range di gol TOTALI di partita:
+    1-2, 2-3, 3-4, 2-4), derivate dalla stessa matrice congiunta Poisson +
+    Dixon-Coles già calcolata da goal_distribution_probabilities — nessun
+    nuovo calcolo statistico introdotto."""
+    joint = goal_distribution["joint"]
+    total = goal_distribution["total"]
+    max_goals = len(joint) - 1
+
+    def _range_probability(low: int, high: int) -> float:
+        probability = 0.0
+        for i in range(max_goals + 1):
+            for j in range(max_goals + 1):
+                total_goals = i + j
+                if low <= total_goals <= high:
+                    probability += joint[i][j]
+        return clamp(probability / total, 0.0, 1.0)
+
+    return {
+        "Multigol 1-2": _range_probability(1, 2),
+        "Multigol 2-3": _range_probability(2, 3),
+        "Multigol 3-4": _range_probability(3, 4),
+        "Multigol 2-4": _range_probability(2, 4),
+    }
+
+
+def exact_score_matrix(goal_distribution: dict[str, object], grid_size: int = 5) -> pd.DataFrame:
+    """Matrice grid_size x grid_size (default: 0-4 gol per squadra) delle
+    probabilità dei risultati esatti (Poisson bivariata + Dixon-Coles), pronta
+    per la Heatmap: righe = gol Trasferta, colonne = gol Casa (si legge come
+    un tradizionale tabellone risultati)."""
+    joint = goal_distribution["joint"]
+    total = goal_distribution["total"]
+    rows = []
+    for away_goals in range(grid_size):
+        row = [joint[home_goals][away_goals] / total for home_goals in range(grid_size)]
+        rows.append(row)
+    return pd.DataFrame(
+        rows,
+        index=[f"{g} Trasferta" for g in range(grid_size)],
+        columns=[f"{g} Casa" for g in range(grid_size)],
+    )
+
+
+def render_charts_dashboard_tab(model: MatchModel, home: str, away: str) -> None:
+    """📊 Dashboard Grafici & Micro-Eventi: colpo d'occhio visivo immediato
+    sulla distribuzione dei gol, sul mercato Goal/No Goal, sulla mappa dei
+    risultati esatti e sui Multigol — tutti alimentati dalla stessa matrice
+    Poisson bivariata + correzione Dixon-Coles già usata dalle schede
+    Pronostici, Statistiche Gol & Mercati e Simulatore Monte Carlo."""
+    st.markdown(
+        "### 📊 Dashboard Grafici & Micro-Eventi\n"
+        "Colpo d'occhio immediato sulle probabilità di gol, calcolate dallo "
+        "stesso motore (Poisson bivariata + correzione Dixon-Coles) usato "
+        "nelle altre schede: nessun nuovo calcolo, solo grafici aggiuntivi."
+    )
+
+    goal_distribution = goal_distribution_probabilities(model)
+    goal_markets = goal_market_probabilities(model)
+
+    chart_col_1, chart_col_2 = st.columns(2)
+
+    with chart_col_1:
+        st.markdown("##### ⚽ Distribuzione Gol Totali (partita)")
+        totals = goal_distribution["totals"]
+        labels = ["0 gol", "1 gol", "2 gol", "3 gol", "4 gol", "5+ gol"]
+        values = [
+            totals[0], totals[1], totals[2], totals[3], totals[4], goal_distribution["five_plus"],
+        ]
+        totals_frame = pd.DataFrame({"Gol totali": labels, "Probabilità": values})
+        totals_chart = px.bar(
+            totals_frame,
+            x="Gol totali",
+            y="Probabilità",
+            text="Probabilità",
+            color="Probabilità",
+            color_continuous_scale=["#1e3a5f", "#22d3ee"],
+        )
+        totals_chart.update_traces(texttemplate="%{text:.1%}", textposition="outside")
+        totals_chart.update_layout(
+            showlegend=False,
+            yaxis_tickformat=".0%",
+            margin={"l": 10, "r": 10, "t": 20, "b": 10},
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font_color="#e2e8f0",
+        )
+        st.plotly_chart(totals_chart, use_container_width=True)
+        st.caption("Le barre coprono Under/Over 0.5-4.5 gol: base per valutare qualunque linea Under/Over.")
+
+    with chart_col_2:
+        st.markdown("##### 🥅 Mercato Goal / No Goal")
+        gg_frame = pd.DataFrame(
+            {
+                "Esito": ["Goal (GG)", "No Goal (NG)"],
+                "Probabilità": [goal_markets["goal_goal"], goal_markets["no_goal"]],
+            }
+        )
+        gg_chart = px.pie(
+            gg_frame,
+            names="Esito",
+            values="Probabilità",
+            hole=0.55,
+            color="Esito",
+            color_discrete_map={"Goal (GG)": "#16a34a", "No Goal (NG)": "#7f1d1d"},
+        )
+        gg_chart.update_traces(texttemplate="%{percent}", textinfo="label+percent")
+        gg_chart.update_layout(
+            margin={"l": 10, "r": 10, "t": 20, "b": 10},
+            paper_bgcolor="rgba(0,0,0,0)",
+            font_color="#e2e8f0",
+            showlegend=False,
+        )
+        st.plotly_chart(gg_chart, use_container_width=True)
+        st.caption("Goal (GG) = entrambe le squadre segnano · No Goal (NG) = almeno una non segna.")
+
+    st.markdown("##### 🗺️ Mappa dei Risultati Esatti (0-4 gol per squadra)")
+    st.caption(
+        "Matrice di probabilità (Poisson bivariata + correzione Dixon-Coles): "
+        "più il colore è intenso, più il risultato esatto è probabile."
+    )
+    score_matrix = exact_score_matrix(goal_distribution, grid_size=5)
+    heatmap_chart = px.imshow(
+        score_matrix,
+        text_auto=".1%",
+        color_continuous_scale="Viridis",
+        aspect="auto",
+        labels={"color": "Probabilità"},
+    )
+    heatmap_chart.update_layout(
+        margin={"l": 10, "r": 10, "t": 20, "b": 10},
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font_color="#e2e8f0",
+        coloraxis_showscale=True,
+    )
+    heatmap_chart.update_xaxes(side="bottom")
+    st.plotly_chart(heatmap_chart, use_container_width=True)
+
+    st.markdown("##### 🎯 Distribuzione Multigol")
+    multigol = multigol_probabilities(goal_distribution)
+    multigol_frame = pd.DataFrame(
+        {"Mercato": list(multigol.keys()), "Probabilità": list(multigol.values())}
+    )
+    multigol_chart = px.bar(
+        multigol_frame,
+        x="Mercato",
+        y="Probabilità",
+        text="Probabilità",
+        color="Probabilità",
+        color_continuous_scale=["#3f1d5e", "#a855f7"],
+    )
+    multigol_chart.update_traces(texttemplate="%{text:.1%}", textposition="outside")
+    multigol_chart.update_layout(
+        showlegend=False,
+        yaxis_tickformat=".0%",
+        margin={"l": 10, "r": 10, "t": 20, "b": 10},
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font_color="#e2e8f0",
+    )
+    st.plotly_chart(multigol_chart, use_container_width=True)
+    st.caption(
+        "Multigol X-Y = probabilità che il totale gol della partita sia compreso "
+        "nell'intervallo indicato (estremi inclusi)."
+    )
+
+    st.caption(
+        f"{home} vs {away} · xG combinato atteso {model.home_lambda + model.away_lambda:.2f} gol. "
+        "Grafici Plotly generati dalla stessa matrice Poisson/Dixon-Coles delle altre schede, "
+        "coerenti con la simulazione Monte Carlo."
+    )
+
+
+# ==============================================================================
 # FASE 1: VALUE BETTING & UX — Kelly Criterion + Heatmap dei Mercati
 # ==============================================================================
 # Estensione puramente additiva: non modifica Power Rating, TEAM_TIERS,
@@ -3036,10 +3258,11 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
     note = escape(model.engine_note) if model.engine_note else "Global Power Rating calcolato."
     st.caption(note)
 
-    tab_poisson, tab_goal_markets, tab_value_betting, tab_montecarlo = st.tabs(
+    tab_poisson, tab_goal_markets, tab_charts_dashboard, tab_value_betting, tab_montecarlo = st.tabs(
         [
             "Analisi Quote & Probabilità (Poisson)",
             "📊 Statistiche Gol & Mercati",
+            "📊 Dashboard Grafici & Micro-Eventi",
             "💰 Value Betting & Heatmap",
             "Simulatore Monte Carlo (10.000 Partite)",
         ]
@@ -3122,6 +3345,9 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
         with ng_col:
             st.metric("No Goal (NG)", f"{markets['no_goal']:.1%}")
             st.progress(min(max(markets["no_goal"], 0.0), 1.0))
+
+    with tab_charts_dashboard:
+        render_charts_dashboard_tab(model, home, away)
 
     with tab_value_betting:
         render_value_betting_tab(model, home, away, league, sidebar_values.get("odds_api_key", ""))
