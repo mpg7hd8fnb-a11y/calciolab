@@ -44,7 +44,7 @@ LEAGUES: dict[str, list[str]] = {
         "Venezia",
     ],
     # NB: "Italia · Serie B" non ha più una lista fissa qui: le squadre sono
-    # estratte in tempo reale dallo scraping WorldFootball.net (vedi
+    # estratte in tempo reale dallo scraping Wikipedia (vedi
     # SECONDARY_LEAGUES / fetch_secondary_league_teams più sotto), così il
     # menu mostra sempre la stagione corrente e non elenchi datati.
     "Inghilterra · Premier League": [
@@ -119,7 +119,7 @@ LEAGUES: dict[str, list[str]] = {
     ],
     # NB: "Spagna · Segunda División" non ha più una lista fissa qui, per lo
     # stesso motivo di "Italia · Serie B" sopra: squadre estratte in tempo
-    # reale da WorldFootball.net.
+    # reale da Wikipedia.
     "Germania · Bundesliga": [
         "Augsburg",
         "Bayer Leverkusen",
@@ -317,7 +317,7 @@ MICRO_EVENT_BASELINES: dict[str, dict[str, float]] = {
     "DED": {"shots": 13.2, "shots_on_target": 4.6, "corners": 5.2, "cards": 1.9, "fouls": 11.0},
     "PPL": {"shots": 11.5, "shots_on_target": 3.8, "corners": 4.5, "cards": 2.6, "fouls": 13.5},
     "CL": {"shots": 12.6, "shots_on_target": 4.4, "corners": 4.9, "cards": 1.7, "fouls": 10.5},
-    # Campionati "secondari" (dati via WorldFootball.net, vedi SECONDARY_LEAGUES
+    # Campionati "secondari" (dati via Wikipedia, vedi SECONDARY_LEAGUES
     # più sotto): baseline trasparenti stimate su medie storiche di categoria,
     # sulla stessa falsariga delle massime serie qui sopra.
     "SB": {"shots": 11.6, "shots_on_target": 3.8, "corners": 4.4, "cards": 2.5, "fouls": 13.2},
@@ -326,34 +326,48 @@ MICRO_EVENT_BASELINES: dict[str, dict[str, float]] = {
 
 
 # ==============================================================================
-# CAMPIONATI SECONDARI (SCRAPING WORLDFOOTBALL.NET) — Serie B & Segunda
+# CAMPIONATI SECONDARI (DATI DA WIKIPEDIA) — Serie B & Segunda División
 # ==============================================================================
 # Football-Data.org (piano gratuito) non copre la Serie B italiana né la
-# Segunda División spagnola. API-Football è stato scartato perché il piano
-# gratuito non ha accesso alla stagione corrente di queste leghe ("Free plans
-# do not have access to this season"). Si torna quindi allo scraping da
-# WorldFootball.net, con uno User-Agent completo "da browser reale" per
-# evitare il blocco HTTP 403. Questa fonte alimenta un ramo di calcolo
-# dedicato in build_match_model che NON usa il DIZIONARIO FASCE DI FORZA
-# fisso (vedi secondary_team_dynamic_profile), ma calcola Attacco/Difesa
-# dinamicamente dalla classifica reale, squadra per squadra — e NON usa
-# nessuna lista di squadre hardcodata: la lista visibile in UI è sempre
-# esattamente quella appena scaricata dalla pagina web.
+# Segunda División spagnola. Cronologia dei tentativi precedenti: FBref e
+# WorldFootball.net bloccano ormai le richieste dagli IP degli hosting cloud
+# con HTTP 403; API-Football (piano gratuito) non copre la stagione corrente
+# di queste leghe. Si usa quindi l'API ufficiale di Wikipedia (MediaWiki
+# Action API), che non applica blocchi anti-bot sugli IP cloud. Questa fonte
+# alimenta un ramo di calcolo dedicato in build_match_model che NON usa il
+# DIZIONARIO FASCE DI FORZA fisso (vedi secondary_team_dynamic_profile), ma
+# calcola Attacco/Difesa dinamicamente dalla classifica reale, squadra per
+# squadra — e NON usa nessuna lista di squadre hardcodata: la lista visibile
+# in UI è sempre esattamente quella appena estratta dalla voce Wikipedia
+# della stagione in corso (risolta dinamicamente via ricerca, mai un URL con
+# l'anno hardcodato).
 SECONDARY_LEAGUES: dict[str, dict[str, object]] = {
     "Italia · Serie B": {
         "code": "SB",
-        "worldfootball_slugs": ["ita-serie-b"],
+        "wiki_domain": "it.wikipedia.org",
+        "wiki_search_queries": ["Serie B {y1}-{y2}"],
+        "wiki_title_guesses": ["Serie B {y1}-{y2}"],
     },
     "Spagna · Segunda División": {
         "code": "SD",
-        "worldfootball_slugs": ["esp-segunda-division", "esp-liga-adelante"],
+        "wiki_domain": "es.wikipedia.org",
+        "wiki_search_queries": [
+            "Segunda División de España {y1}-{y2s}",
+            "Primera División RFEF {y1}-{y2s}",
+        ],
+        "wiki_title_guesses": [
+            "Segunda División (España) {y1}-{y2s}",
+            "Segunda División 2025-26",
+        ],
     },
 }
-"""Mappatura campionato -> {codice interno, elenco di slug WorldFootball.net
-candidati (il primo è quello attuale; eventuali alias storici, es. per
-rebranding della competizione, sono tentati in ordine come fallback)}.
-Aggiungere un nuovo campionato scrapato richiede solo una nuova voce qui +
-un'eventuale riga in MICRO_EVENT_BASELINES."""
+"""Mappatura campionato -> {codice interno, dominio Wikipedia, query di
+ricerca candidate (risolte dinamicamente in un titolo pagina esatto tramite
+_wikipedia_search_page_title), titoli 'indovinati' come ultima rete di
+sicurezza se la ricerca non trovasse nulla}. La stagione (y1/y2/y2s) è
+sempre sostituita a runtime da current_season_start(), mai hardcodata.
+Aggiungere un nuovo campionato richiede solo una nuova voce qui + un'
+eventuale riga in MICRO_EVENT_BASELINES."""
 
 
 PROMOTED_TEAMS = {
@@ -1154,240 +1168,306 @@ def compute_form_factor(
 
 
 # ==============================================================================
-# SCRAPING SERIE B / SEGUNDA DIVISIÓN (WORLDFOOTBALL.NET) — STAGIONE CORRENTE
+# SERIE B / SEGUNDA DIVISIÓN — DATI VIA WIKIPEDIA (API MEDIAWIKI), STAGIONE
+# CORRENTE RISOLTA DINAMICAMENTE
 # ==============================================================================
 # Estensione puramente additiva: NON tocca in alcun modo il percorso dati
 # Football-Data.org (fetch_team_live_stats/build_match_model per i campionati
-# principali restano identici). API-Football è stato scartato perché il piano
-# gratuito non dà accesso alla stagione corrente di Serie B/Segunda División
-# ("Free plans do not have access to this season"). Si torna quindi allo
-# scraping di WorldFootball.net, con uno User-Agent completo "da browser
-# reale" per evitare il blocco HTTP 403 osservato con gli header di default
-# di requests. La classifica viene usata per calcolare Alpha (Attacco) e Beta
-# (Difesa) DINAMICI squadra per squadra — mai un Tier fisso uguale per tutte
-# le squadre, e MAI una lista di squadre hardcodata: se lo scraping fallisce,
-# l'errore (con il codice HTTP esatto, se disponibile) viene propagato
-# all'interfaccia invece di mostrare squadre di stagioni passate.
+# principali restano identici). Cronologia dei tentativi precedenti, per
+# trasparenza: FBref e WorldFootball.net bloccano ormai sistematicamente le
+# richieste dagli IP degli hosting cloud (incluso Streamlit Community Cloud)
+# con HTTP 403, indipendentemente dagli header; API-Football (piano
+# gratuito) non copre la stagione corrente di queste due leghe. 'The Odds
+# API', suggerita come alternativa, è stata valutata ma scartata: è
+# un'aggregatrice di quote di scommessa, non espone classifiche/tabelle di
+# campionato, quindi non è utilizzabile per questo scopo.
+#
+# La fonte usata ora è l'API ufficiale di Wikipedia (MediaWiki Action API,
+# endpoint '/w/api.php'), che risponde in JSON, non applica blocchi
+# anti-bot stile Cloudflare sugli IP degli hosting cloud ed è pensata
+# esplicitamente per l'accesso programmatico. La pagina della stagione
+# corrente NON è indovinata da uno slug URL fisso (che si romperebbe a ogni
+# cambio stagione): viene invece cercata dinamicamente con l'endpoint di
+# ricerca di Wikipedia (action=query&list=search), così l'app aggancia
+# sempre la stagione realmente pubblicata, mai un anno non ancora
+# strutturato. La classifica trovata alimenta un ramo di calcolo dedicato in
+# build_match_model che NON usa il DIZIONARIO FASCE DI FORZA fisso (vedi
+# secondary_team_dynamic_profile), ma calcola Attacco/Difesa dinamicamente
+# dalla classifica reale, squadra per squadra — e NON usa nessuna lista di
+# squadre hardcodata: la lista visibile in UI è sempre esattamente quella
+# appena estratta dalla pagina Wikipedia della stagione in corso.
 class SecondaryLeagueDataError(FootballDataError):
-    """Errore nello scraping WorldFootball.net per un campionato secondario
+    """Errore nel recupero dati da Wikipedia per un campionato secondario
     (Serie B, Segunda División). Eredita da FootballDataError così i punti
     dell'app che già gestiscono 'except FootballDataError' continuano a
     funzionare senza modifiche."""
 
 
 def is_secondary_league(league: str) -> bool:
-    """True se il campionato è coperto tramite scraping WorldFootball.net
-    (Serie B, Segunda División) invece che da Football-Data.org."""
+    """True se il campionato è coperto tramite Wikipedia (Serie B, Segunda
+    División) invece che da Football-Data.org."""
     return league in SECONDARY_LEAGUES
 
 
-WORLDFOOTBALL_REQUEST_HEADERS = {
-    # User-Agent completo "da browser reale": senza questo header (o con uno
-    # generico/assente) WorldFootball.net risponde con HTTP 403.
+WIKIPEDIA_API_HEADERS = {
+    # Le API di Wikipedia non applicano blocchi anti-bot sugli IP degli
+    # hosting cloud, ma la policy di Wikimedia chiede comunque uno
+    # User-Agent identificativo (non uno "spacciato per browser") per le
+    # chiamate automatiche: https://meta.wikimedia.org/wiki/User-Agent_policy
     "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "CalcioLabStreamlitApp/1.0 (analisi statistica campionati calcio; "
+        "contatto: gestore-app-streamlit; +https://streamlit.io)"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7,es-ES;q=0.6,es;q=0.5",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Referer": "https://www.worldfootball.net/",
-    "Cache-Control": "max-age=0",
+    "Accept": "application/json",
 }
 
 
-def _worldfootball_standings_urls(league: str, season_start: int) -> list[str]:
-    """Costruisce l'URL (o gli URL candidati, se un campionato ha avuto più
-    di uno slug nel tempo, es. rebranding) della pagina classifica di
-    WorldFootball.net per la stagione CORRENTE, calcolata dinamicamente da
-    current_season_start() — nessuna stagione hardcodata."""
-    config = SECONDARY_LEAGUES[league]
-    season_slug = f"{season_start}-{season_start + 1}"
-    return [f"https://www.worldfootball.net/table/{slug}-{season_slug}/" for slug in config["worldfootball_slugs"]]
+def _wikipedia_search_page_title(domain: str, query: str) -> str | None:
+    """Cerca su Wikipedia (endpoint di ricerca ufficiale) la pagina più
+    pertinente per `query` e ne ritorna il titolo esatto, così non serve
+    indovinare a mano il formato URL/slug della stagione corrente. Ritorna
+    None se la ricerca non produce risultati o la chiamata fallisce (il
+    chiamante prova allora il titolo successivo/il fallback)."""
+    try:
+        response = requests.get(
+            f"https://{domain}/w/api.php",
+            headers=WIKIPEDIA_API_HEADERS,
+            params={
+                "action": "query",
+                "list": "search",
+                "srsearch": query,
+                "srlimit": 3,
+                "format": "json",
+            },
+            timeout=15,
+        )
+    except requests.RequestException:
+        return None
+    if response.status_code != 200:
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    results = payload.get("query", {}).get("search") or []
+    if not results:
+        return None
+    title = results[0].get("title")
+    return str(title) if title else None
 
 
-def _is_rank_sequence(series: pd.Series) -> bool:
-    """True se la colonna è la classica colonna '#' di posizione in
-    classifica (1, 2, 3, ... N): va esclusa dal riconoscimento automatico di
-    'Partite Giocate' e 'Punti', che sono anch'esse colonne numeriche."""
-    values = pd.to_numeric(series, errors="coerce")
-    if values.isna().any():
-        return False
-    return values.astype(int).tolist() == list(range(1, len(values) + 1))
+def _fetch_wikipedia_page_html(domain: str, title: str) -> str | None:
+    """Scarica l'HTML già renderizzato (sezione tabelle incluse) di una
+    pagina Wikipedia tramite l'Action API (action=parse), la stessa usata
+    dai tool ufficiali Wikimedia. Ritorna None se la pagina non esiste o la
+    chiamata fallisce, senza sollevare eccezioni (il chiamante prova il
+    titolo candidato successivo)."""
+    try:
+        response = requests.get(
+            f"https://{domain}/w/api.php",
+            headers=WIKIPEDIA_API_HEADERS,
+            params={
+                "action": "parse",
+                "page": title,
+                "prop": "text",
+                "formatversion": "2",
+                "format": "json",
+            },
+            timeout=20,
+        )
+    except requests.RequestException:
+        return None
+    if response.status_code != 200:
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    if "error" in payload:
+        return None
+    return payload.get("parse", {}).get("text")
 
 
-def _looks_like_goals_column(series: pd.Series) -> bool:
-    """True se la colonna contiene valori nel formato 'GolFatti:GolSubiti'
-    (es. '34:18'), il formato standard con cui WorldFootball.net presenta i
-    gol in un'unica cella della tabella classifica."""
-    sample = series.dropna().astype(str).str.strip()
-    if sample.empty:
-        return False
-    return bool(sample.str.match(r"^\d+\s*:\s*\d+$").all())
+_FOOTNOTE_PATTERN = r"\[.*?\]"
+_TRAILING_NOTE_PATTERN = r"\s*\([A-Za-zÀ-ÿ]{1,3}\)\s*$"
 
 
-def _parse_worldfootball_standings(raw_table: pd.DataFrame) -> pd.DataFrame:
-    """Riconosce ED ESTRAE in modo strutturale (senza fare affidamento su
-    nomi di colonna specifici, che possono variare per lingua/layout) la
-    tabella-classifica da una delle tabelle HTML della pagina WorldFootball:
-    - la colonna 'Gol Fatti:Gol Subiti' (formato 'NN:NN');
-    - la colonna Squadra (stringhe pressoché tutte diverse fra loro);
-    - la colonna Partite Giocate (prima colonna numerica PRIMA dei gol,
-      esclusa l'eventuale colonna di posizione/rank '#');
-    - la colonna Punti (ultima colonna numerica DOPO i gol);
-    - se presenti abbastanza colonne numeriche prima dei gol, anche
-      Vittorie/Pareggi/Sconfitte.
-    Solleva SecondaryLeagueDataError se la struttura non è riconoscibile,
-    così il chiamante può provare la tabella successiva della pagina."""
+def _clean_team_name(raw_name: str) -> str:
+    """Ripulisce un nome squadra estratto da Wikipedia da note a piè di
+    pagina ('Bari[1]'), marcatori promozione/retrocessione fra parentesi
+    corte ('Sampdoria (R)') e spazi/non-breaking-space superflui, SENZA
+    toccare nomi legittimi che contengono parentesi lunghe (rari, ma
+    preservati per sicurezza: il pattern rimuove solo parentesi di 1-3
+    caratteri alla fine della stringa)."""
+    import re
+
+    name = re.sub(_FOOTNOTE_PATTERN, "", raw_name)
+    name = re.sub(_TRAILING_NOTE_PATTERN, "", name)
+    name = name.replace("\xa0", " ").strip()
+    name = re.sub(r"\s+", " ", name)
+    return name
+
+
+def _normalize_header_token(column: object) -> str:
+    """Normalizza un'intestazione di colonna per il confronto con gli alias
+    multilingua (IT/ES) qui sotto: minuscolo, senza accenti, senza note a
+    piè di pagina, solo caratteri alfanumerici."""
+    import re
+    import unicodedata
+
+    text = re.sub(_FOOTNOTE_PATTERN, "", str(column))
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return re.sub(r"[^a-zA-Z0-9]", "", text).lower()
+
+
+# Alias di colonna (IT/ES) per le tabelle di classifica su Wikipedia: le
+# intestazioni sono abbreviate e cambiano leggermente da un'edizione
+# all'altra, quindi il riconoscimento è per INSIEME di alias normalizzati,
+# non per un singolo nome fisso di colonna.
+_WIKI_TEAM_ALIASES = {"squadra", "equipo", "team", "club", "societa"}
+_WIKI_MATCHES_ALIASES = {"pg", "g", "gg", "mp", "pj", "j", "partite", "partidos", "partitegiocate"}
+_WIKI_GOALS_FOR_ALIASES = {"gf", "rf", "retifatte", "golesafavor"}
+_WIKI_GOALS_AGAINST_ALIASES = {"gs", "gc", "ga", "retisubite", "golesencontra"}
+_WIKI_POINTS_ALIASES = {"pt", "pts", "punti", "puntos"}
+
+
+def _parse_wikipedia_standings(raw_table: pd.DataFrame) -> pd.DataFrame:
+    """Riconosce ED ESTRAE la tabella-classifica fra tutte le tabelle di una
+    pagina Wikipedia, tramite corrispondenza fra le intestazioni di colonna
+    (normalizzate) e gli alias IT/ES qui sopra — non per posizione fissa,
+    così è tollerante a colonne extra (es. 'Diff.', note, loghi). Solleva
+    SecondaryLeagueDataError se non tutte le colonne essenziali (Squadra,
+    Partite Giocate, Gol Fatti, Gol Subiti, Punti) vengono trovate, così il
+    chiamante prova la tabella successiva della pagina."""
     table = raw_table.copy()
     if isinstance(table.columns, pd.MultiIndex):
         table.columns = [str(col[-1]) for col in table.columns]
-    table.columns = [str(col) for col in table.columns]
     table = table.dropna(how="all").reset_index(drop=True)
     if table.empty:
         raise SecondaryLeagueDataError("Tabella vuota.")
 
-    goals_col = next((col for col in table.columns if _looks_like_goals_column(table[col])), None)
-    if goals_col is None:
-        raise SecondaryLeagueDataError("Colonna Gol Fatti:Gol Subiti non trovata.")
+    role_columns: dict[str, object] = {}
+    for column in table.columns:
+        token = _normalize_header_token(column)
+        if "team" not in role_columns and token in _WIKI_TEAM_ALIASES:
+            role_columns["team"] = column
+        elif "mp" not in role_columns and token in _WIKI_MATCHES_ALIASES:
+            role_columns["mp"] = column
+        elif "gf" not in role_columns and token in _WIKI_GOALS_FOR_ALIASES:
+            role_columns["gf"] = column
+        elif "ga" not in role_columns and token in _WIKI_GOALS_AGAINST_ALIASES:
+            role_columns["ga"] = column
+        elif "pts" not in role_columns and token in _WIKI_POINTS_ALIASES:
+            role_columns["pts"] = column
 
-    goal_split = table[goals_col].astype(str).str.extract(r"(\d+)\s*:\s*(\d+)")
-    goals_for = pd.to_numeric(goal_split[0], errors="coerce")
-    goals_against = pd.to_numeric(goal_split[1], errors="coerce")
-
-    ordered_columns = list(table.columns)
-    goals_index = ordered_columns.index(goals_col)
-
-    rank_columns = {col for col in ordered_columns if col != goals_col and _is_rank_sequence(table[col])}
-
-    numeric_columns = []
-    for col in ordered_columns:
-        if col == goals_col or col in rank_columns:
-            continue
-        numeric_series = pd.to_numeric(table[col], errors="coerce")
-        if numeric_series.notna().mean() > 0.9:
-            numeric_columns.append(col)
-
-    numeric_before = [col for col in numeric_columns if ordered_columns.index(col) < goals_index]
-    numeric_after = [col for col in numeric_columns if ordered_columns.index(col) > goals_index]
-    if not numeric_before or not numeric_after:
-        raise SecondaryLeagueDataError("Colonne 'Partite Giocate'/'Punti' non riconosciute.")
-
-    matches_col = numeric_before[0]
-    points_col = numeric_after[-1]
-
-    team_col = None
-    for col in ordered_columns:
-        if col == goals_col or col in numeric_columns or col in rank_columns:
-            continue
-        values = table[col].astype(str).str.strip()
-        non_empty = values[values.str.len() > 0]
-        if len(non_empty) >= max(4, int(len(table) * 0.8)) and non_empty.nunique() >= max(
-            4, int(len(table) * 0.8)
-        ):
-            team_col = col
-            break
-    if team_col is None:
-        raise SecondaryLeagueDataError("Colonna Squadra non riconosciuta.")
+    required = ("team", "mp", "gf", "ga", "pts")
+    missing = [role for role in required if role not in role_columns]
+    if missing:
+        raise SecondaryLeagueDataError(f"Colonne mancanti nella tabella ({', '.join(missing)}).")
 
     standings = pd.DataFrame(
         {
-            "Squad": table[team_col].astype(str).str.strip(),
-            "MP": pd.to_numeric(table[matches_col], errors="coerce"),
-            "GF": goals_for,
-            "GA": goals_against,
-            "Pts": pd.to_numeric(table[points_col], errors="coerce"),
+            "Squad": table[role_columns["team"]].astype(str).map(_clean_team_name),
+            "MP": pd.to_numeric(table[role_columns["mp"]], errors="coerce"),
+            "GF": pd.to_numeric(table[role_columns["gf"]], errors="coerce"),
+            "GA": pd.to_numeric(table[role_columns["ga"]], errors="coerce"),
+            "Pts": pd.to_numeric(table[role_columns["pts"]], errors="coerce"),
         }
     )
-
-    remaining_numeric = [col for col in numeric_before if col != matches_col]
-    if len(remaining_numeric) >= 3:
-        standings["W"] = pd.to_numeric(table[remaining_numeric[0]], errors="coerce")
-        standings["D"] = pd.to_numeric(table[remaining_numeric[1]], errors="coerce")
-        standings["L"] = pd.to_numeric(table[remaining_numeric[2]], errors="coerce")
-
-    standings = standings.dropna(subset=["Squad", "MP", "GF", "GA"])
+    standings = standings.dropna(subset=["MP", "GF", "GA", "Pts"])
     standings = standings[(standings["MP"] > 0) & (standings["Squad"].str.len() > 0)]
+    standings = standings.drop_duplicates(subset=["Squad"])
     if len(standings) < 2:
         raise SecondaryLeagueDataError("Meno di 2 squadre valide estratte dalla tabella.")
     return standings.reset_index(drop=True)
 
 
+def _wikipedia_page_candidates(league: str, season_start: int) -> list[str]:
+    """Costruisce l'elenco di titoli-pagina Wikipedia da tentare, in
+    ordine: prima quelli trovati dinamicamente via ricerca (adattivi a
+    qualunque convenzione di naming corrente), poi alcuni titoli
+    'indovinati' come ultima rete di sicurezza se la ricerca non
+    restituisse nulla di pertinente. La stagione è sempre calcolata da
+    current_season_start(), mai hardcodata."""
+    config = SECONDARY_LEAGUES[league]
+    year_full = season_start + 1
+    year_short = str(year_full)[-2:]
+
+    candidates: list[str] = []
+    for template in config["wiki_search_queries"]:
+        query = template.format(y1=season_start, y2=year_full, y2s=year_short)
+        found = _wikipedia_search_page_title(config["wiki_domain"], query)
+        if found and found not in candidates:
+            candidates.append(found)
+    for template in config["wiki_title_guesses"]:
+        guess = template.format(y1=season_start, y2=year_full, y2s=year_short)
+        if guess not in candidates:
+            candidates.append(guess)
+    return candidates
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_secondary_league_data(league: str) -> pd.DataFrame:
-    """Scarica automaticamente e gratuitamente la classifica REALE della
-    stagione CORRENTE (calcolata da current_season_start(), mai hardcodata)
-    per un campionato secondario (Serie B, Segunda División) da
-    WorldFootball.net, con requests + pandas.read_html:
-
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                                  'AppleWebKit/537.36 (KHTML, like Gecko) '
-                                  'Chrome/120.0.0.0 Safari/537.36'}
-        response = requests.get(url, headers=headers, timeout=25)
-        tables = pd.read_html(StringIO(response.text))
-
-    Ritorna un DataFrame con le colonne Squad, MP, GF, GA, Pts (più W/D/L se
-    disponibili). Se lo scraping fallisce per QUALSIASI motivo (rete, HTTP
-    diverso da 200, struttura pagina cambiata), solleva
-    SecondaryLeagueDataError con il dettaglio esatto (incluso il codice HTTP,
-    quando disponibile) — NESSUN fallback silenzioso su liste di squadre
-    vecchie. Cache 30 minuti (ttl=1800): la classifica non cambia più volte
-    in mezz'ora, e riduce il carico sul sito sorgente."""
+    """Recupera automaticamente la classifica REALE della stagione CORRENTE
+    (la pagina è risolta dinamicamente via ricerca Wikipedia, la stagione
+    da current_season_start() — mai un URL con l'anno hardcodato) per un
+    campionato secondario (Serie B, Segunda División), leggendo la tabella
+    di classifica dalla relativa voce di Wikipedia tramite l'Action API
+    ufficiale (nessuno scraping di pagine HTML dirette, nessun blocco
+    anti-bot). Ritorna un DataFrame con le colonne Squad, MP, GF, GA, Pts,
+    con i nomi squadra ripuliti da note a piè di pagina. Se il recupero
+    fallisce per QUALSIASI motivo (pagina non trovata, tabella non
+    riconosciuta, rete), solleva SecondaryLeagueDataError con il dettaglio
+    esatto — NESSUN fallback silenzioso su liste di squadre vecchie. Cache
+    30 minuti (ttl=1800)."""
     config = SECONDARY_LEAGUES.get(league)
     if config is None:
         raise SecondaryLeagueDataError(f"{league} non è un campionato secondario configurato.")
 
     season_start = current_season_start()
-    urls = _worldfootball_standings_urls(league, season_start)
+    candidates = _wikipedia_page_candidates(league, season_start)
+    if not candidates:
+        raise SecondaryLeagueDataError(
+            f"Nessuna pagina Wikipedia candidata trovata per {league} "
+            f"(stagione {season_label(season_start)})."
+        )
 
     failure_reasons: list[str] = []
-    for url in urls:
-        try:
-            response = requests.get(url, headers=WORLDFOOTBALL_REQUEST_HEADERS, timeout=25)
-        except requests.RequestException as error:
-            failure_reasons.append(f"{url} → connessione non riuscita ({error})")
+    for title in candidates:
+        html = _fetch_wikipedia_page_html(config["wiki_domain"], title)
+        if html is None:
+            failure_reasons.append(f"'{title}' → pagina non trovata o errore di rete")
             continue
-
-        if response.status_code != 200:
-            failure_reasons.append(f"{url} → HTTP {response.status_code}")
-            continue
-
         try:
-            raw_tables = pd.read_html(StringIO(response.text))
+            raw_tables = pd.read_html(StringIO(html))
         except ValueError as error:
-            failure_reasons.append(f"{url} → nessuna tabella HTML trovata ({error})")
+            failure_reasons.append(f"'{title}' → nessuna tabella HTML trovata ({error})")
             continue
-
         for raw_table in raw_tables:
             try:
-                return _parse_worldfootball_standings(raw_table)
+                return _parse_wikipedia_standings(raw_table)
             except SecondaryLeagueDataError:
                 continue
-        failure_reasons.append(f"{url} → HTTP 200 ma struttura tabella non riconosciuta")
+        failure_reasons.append(f"'{title}' → pagina trovata ma nessuna tabella classifica riconosciuta")
 
     detail = "; ".join(failure_reasons) if failure_reasons else "errore sconosciuto"
     raise SecondaryLeagueDataError(
-        f"Scraping WorldFootball.net non riuscito per {league} "
+        f"Recupero classifica da Wikipedia non riuscito per {league} "
         f"(stagione {season_label(season_start)}): {detail}."
     )
 
 
 def fetch_secondary_league_teams(league: str) -> tuple[str, ...]:
     """Elenco squadre (ordine alfabetico) del campionato secondario, letto
-    ESCLUSIVAMENTE dalla classifica scrapata in tempo reale — nessuna lista
-    statica di riserva: se lo scraping fallisce, l'eccezione (con il motivo/
-    codice HTTP esatto) si propaga al chiamante, che deve mostrarla
-    all'utente invece di popolare squadre di stagioni passate."""
+    ESCLUSIVAMENTE dalla classifica Wikipedia in tempo reale — nessuna lista
+    statica di riserva: se il recupero fallisce, l'eccezione (con il motivo
+    esatto) si propaga al chiamante, che deve mostrarla all'utente invece di
+    popolare squadre di stagioni passate."""
     standings = fetch_secondary_league_data(league)
     teams = sorted(standings["Squad"].unique().tolist())
     if len(teams) < 2:
-        raise SecondaryLeagueDataError(f"Classifica WorldFootball.net incompleta per {league}.")
+        raise SecondaryLeagueDataError(f"Classifica Wikipedia incompleta per {league}.")
     return tuple(teams)
 
 
@@ -1409,7 +1489,7 @@ def secondary_league_averages(standings: pd.DataFrame) -> tuple[float, float]:
 
 def fetch_secondary_team_stats(league: str, team: str) -> LiveTeamStats:
     """Statistiche 'live' di una squadra di Serie B/Segunda División,
-    ricavate dalla classifica scrapata da WorldFootball.net. Non essendoci uno split
+    ricavate dalla classifica scrapata da Wikipedia. Non essendoci uno split
     casa/trasferta nella tabella-classifica aggregata, i gol fatti/subiti
     vengono ripartiti in proporzione uguale fra le due componenti (home/away)
     — un'approssimazione dichiarata, che NON altera il totale usato per
@@ -1428,7 +1508,7 @@ def fetch_secondary_team_stats(league: str, team: str) -> LiveTeamStats:
             )
         ]
     if row.empty:
-        raise SecondaryLeagueDataError(f"{team} non trovata nella classifica WorldFootball.net di {league}.")
+        raise SecondaryLeagueDataError(f"{team} non trovata nella classifica Wikipedia di {league}.")
 
     record = row.iloc[0]
     matches = float(record["MP"])
@@ -1498,7 +1578,7 @@ def secondary_team_dynamic_profile(league: str, team: str, standings: pd.DataFra
             )
         ]
     if row.empty:
-        raise SecondaryLeagueDataError(f"{team} non trovata nella classifica WorldFootball.net di {league}.")
+        raise SecondaryLeagueDataError(f"{team} non trovata nella classifica Wikipedia di {league}.")
     record = row.iloc[0]
     matches = float(record["MP"])
 
@@ -1526,12 +1606,12 @@ def secondary_team_dynamic_profile(league: str, team: str, standings: pd.DataFra
 
 def secondary_competition_season_status(league: str) -> str:
     """Versione di competition_season_status() per i campionati coperti da
-    WorldFootball.net: indica quante squadre sono state caricate e da quale fonte."""
+    Wikipedia: indica quante squadre sono state caricate e da quale fonte."""
     try:
         standings = fetch_secondary_league_data(league)
-        return f"{len(standings)} squadre · dati live da WorldFootball.net"
+        return f"{len(standings)} squadre · dati live da Wikipedia"
     except SecondaryLeagueDataError:
-        return "dati non disponibili al momento (WorldFootball.net)"
+        return "dati non disponibili al momento (Wikipedia)"
 
 
 def build_match_model(
@@ -1755,8 +1835,8 @@ def build_match_model(
     home_win_prob, draw_prob, away_win_prob = match_outcome_probabilities(home_lambda, away_lambda)
 
     if secondary:
-        home_label = f"Rating dinamico WorldFootball.net (Alpha {home_tier['attack']:.2f}/Beta {home_tier['defense']:.2f})"
-        away_label = f"Rating dinamico WorldFootball.net (Alpha {away_tier['attack']:.2f}/Beta {away_tier['defense']:.2f})"
+        home_label = f"Rating dinamico Wikipedia (Alpha {home_tier['attack']:.2f}/Beta {home_tier['defense']:.2f})"
+        away_label = f"Rating dinamico Wikipedia (Alpha {away_tier['attack']:.2f}/Beta {away_tier['defense']:.2f})"
     else:
         home_label = TEAM_TIER_LABELS[lookup_team_tier(home)]
         away_label = TEAM_TIER_LABELS[lookup_team_tier(away)]
@@ -1768,7 +1848,7 @@ def build_match_model(
         f"correzione Dixon-Coles ρ={DIXON_COLES_RHO:+.2f}"
     )
     if secondary:
-        engine_note += " · fonte dati: WorldFootball.net (classifica stagione corrente, in tempo reale)"
+        engine_note += " · fonte dati: Wikipedia (classifica stagione corrente, in tempo reale)"
     if home_stats.recent_form:
         engine_note += f" · forma {home}: {''.join(home_stats.recent_form)}"
     if away_stats.recent_form:
@@ -2870,7 +2950,7 @@ def try_build_match_model(
             fatigue_away=fatigue_away,
         )
     except FootballDataError as error:
-        source = "WorldFootball.net" if is_secondary_league(league) else "Football-Data.org"
+        source = "Wikipedia" if is_secondary_league(league) else "Football-Data.org"
         return None, f"Dati {source} non disponibili: {error}"
     return model, ""
 
@@ -3301,7 +3381,7 @@ def render_bankroll_tab() -> None:
 ALL_LEAGUE_OPTIONS: list[str] = list(FOOTBALL_DATA_COMPETITIONS) + list(SECONDARY_LEAGUES)
 """Elenco completo dei campionati selezionabili in UI: i campionati
 principali (Football-Data.org) seguiti dai campionati secondari coperti via
-WorldFootball.net (Serie B, Segunda División)."""
+Wikipedia (Serie B, Segunda División)."""
 
 
 def render_dashboard(sidebar_values: dict[str, float]) -> None:
@@ -3309,7 +3389,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
         "### Impostazioni partita\n"
         "Squadre, calendario e risultati dei campionati principali vengono "
         "recuperati da Football-Data.org; Serie B e Segunda División sono "
-        "caricate automaticamente in tempo reale da WorldFootball.net. Non sono "
+        "caricate automaticamente in tempo reale da Wikipedia. Non sono "
         "quotazioni di un bookmaker."
     )
 
@@ -3322,7 +3402,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
         )
 
     secondary = is_secondary_league(league)
-    data_source_label = "WorldFootball.net" if secondary else "Football-Data.org"
+    data_source_label = "Wikipedia" if secondary else "Football-Data.org"
 
     try:
         if secondary:
@@ -3392,7 +3472,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
         return
 
     if secondary:
-        # WorldFootball.net non espone gli stemmi ufficiali via scraping semplice: la
+        # Wikipedia non espone gli stemmi ufficiali via scraping semplice: la
         # dashboard resta pienamente funzionante, solo senza i loghi club.
         crests = {}
     else:
