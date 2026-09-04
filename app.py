@@ -1751,6 +1751,171 @@ def render_charts_dashboard_tab(model: MatchModel, home: str, away: str) -> None
 
 
 # ==============================================================================
+# FASE 5: ANALIZZATORE MULTI ESITO & VALUE BET (gruppi di risultati esatti)
+# ==============================================================================
+# Estensione puramente additiva: riusa la stessa matrice di risultati esatti
+# (Poisson bivariata + correzione Dixon-Coles) già calcolata da
+# exact_score_probabilities, oltre alle funzioni già esistenti fair_odds,
+# expected_value_percent e kelly_stake_percent (Fase 1) — nessun nuovo
+# calcolo statistico introdotto, solo un nuovo modo di aggregare/consultare
+# le probabilità già prodotte dal motore.
+MULTI_ESITO_GROUPS: dict[str, list[str]] = {
+    "Gruppo A · Casa a zero (1-0, 2-0, 3-0)": ["1-0", "2-0", "3-0"],
+    "Gruppo B · Casa con gol subito (2-1, 3-1, 4-1)": ["2-1", "3-1", "4-1"],
+    "Gruppo C · Ospite a zero (0-1, 0-2, 0-3)": ["0-1", "0-2", "0-3"],
+    "Gruppo D · Pareggi principali (0-0, 1-1, 2-2)": ["0-0", "1-1", "2-2"],
+    "Gruppo E · Over/GOL Combo (2-1, 1-2, 2-2, 3-1, 1-3)": ["2-1", "1-2", "2-2", "3-1", "1-3"],
+}
+"""Gruppi Multi Esito predefiniti: combinazioni popolari di risultati esatti
+su cui i bookmaker offrono spesso una quota unica ('multi gol/esito
+combinato'). Ogni voce elenca i punteggi 'Casa-Trasferta' inclusi nel gruppo."""
+
+MULTI_ESITO_CUSTOM_LABEL = "🎯 Multi Esito Personalizzato"
+"""Voce speciale nel selettore che attiva il multiselect per la selezione
+manuale dei risultati esatti (vedi render_multi_esito_tab)."""
+
+
+def exact_score_probability_map(model: MatchModel, max_goals: int = 6) -> dict[str, float]:
+    """Converte l'elenco (già ordinato) restituito da
+    exact_score_probabilities in un dizionario {'H-A': probabilità}, per un
+    lookup diretto dei punteggi che compongono un gruppo Multi Esito. Stessa
+    matrice di Poisson bivariata + correzione Dixon-Coles usata in tutte le
+    altre schede (Pronostici, Dashboard Grafici, Monte Carlo)."""
+    return {
+        score: probability
+        for score, probability in exact_score_probabilities(model.home_lambda, model.away_lambda, max_goals=max_goals)
+    }
+
+
+def cumulative_group_probability(score_map: dict[str, float], scores: Sequence[str]) -> float:
+    """Somma le probabilità dei risultati esatti indicati (P_totale del
+    gruppo Multi Esito), ignorando eventuali punteggi non presenti nella
+    mappa (fuori dal range max_goals) invece di sollevare un errore."""
+    return clamp(sum(score_map.get(score, 0.0) for score in scores), 0.0, 1.0)
+
+
+def multi_esito_score_grid_options(max_goals: int = 5) -> list[str]:
+    """Elenco ordinato di punteggi 'H-A' (0 a max_goals per squadra) da
+    proporre nel multiselect 'Multi Esito Personalizzato' — una griglia
+    ragionevole per l'uso pratico, coerente con quella della Heatmap dei
+    Risultati Esatti nella Dashboard Grafici."""
+    return [f"{home_goals}-{away_goals}" for home_goals in range(max_goals + 1) for away_goals in range(max_goals + 1)]
+
+
+def render_multi_esito_tab(model: MatchModel, home: str, away: str) -> None:
+    """🎯 Analizzatore Multi Esito & Value Bet: probabilità cumulata per
+    gruppi di risultati esatti (predefiniti o personalizzati), Quota Reale
+    Equa, confronto con la quota bookmaker inserita ed Expected Value, con
+    stake Kelly consigliato in caso di Value Bet. Riusa esclusivamente le
+    probabilità già calcolate dal motore Poisson + Dixon-Coles."""
+    st.markdown(
+        "### 🎯 Analizzatore Multi Esito & Value Bet\n"
+        "Somma la probabilità di più risultati esatti (Poisson bivariata + "
+        "correzione Dixon-Coles) in un unico 'Multi Esito', per confrontarla "
+        "con la quota reale offerta dal bookmaker su quello stesso mercato "
+        "combinato."
+    )
+
+    score_map = exact_score_probability_map(model, max_goals=6)
+
+    group_options = list(MULTI_ESITO_GROUPS) + [MULTI_ESITO_CUSTOM_LABEL]
+    selected_group = st.selectbox(
+        "Seleziona un Gruppo Multi Esito",
+        options=group_options,
+        key="multi_esito_group",
+    )
+
+    if selected_group == MULTI_ESITO_CUSTOM_LABEL:
+        available_scores = multi_esito_score_grid_options(max_goals=5)
+        selected_scores = st.multiselect(
+            "Multi Esito Personalizzato — scegli i risultati esatti da combinare",
+            options=available_scores,
+            default=["1-0", "2-0"],
+            key="multi_esito_custom_scores",
+        )
+    else:
+        selected_scores = MULTI_ESITO_GROUPS[selected_group]
+        st.caption("Risultati inclusi nel gruppo: " + ", ".join(selected_scores))
+
+    if not selected_scores:
+        st.info("Seleziona almeno un risultato esatto per calcolare la probabilità cumulata.")
+        return
+
+    p_totale = cumulative_group_probability(score_map, selected_scores)
+    quota_reale = fair_odds(p_totale)
+
+    bookmaker_odds = st.number_input(
+        "Quota Bookmaker per questo Multi Esito",
+        min_value=1.01,
+        max_value=200.0,
+        value=2.20,
+        step=0.01,
+        key="multi_esito_bookmaker_odds",
+        help="Inserisci la quota reale offerta dal bookmaker sulla combinazione di risultati selezionata.",
+    )
+
+    ev_percent = expected_value_percent(p_totale, bookmaker_odds)
+    stake_percent = kelly_stake_percent(p_totale, bookmaker_odds)
+
+    metric_col_1, metric_col_2, metric_col_3, metric_col_4 = st.columns(4)
+    with metric_col_1:
+        st.metric("Probabilità Cumulata", f"{p_totale:.1%}")
+    with metric_col_2:
+        st.metric("Quota Reale Equa", f"{quota_reale:.2f}")
+    with metric_col_3:
+        st.metric("Quota Bookmaker", f"{bookmaker_odds:.2f}")
+    with metric_col_4:
+        st.metric("Valore Atteso (EV)", f"{ev_percent:+.1f}%" if ev_percent is not None else "n/d")
+
+    if ev_percent is not None and ev_percent > 0 and stake_percent is not None:
+        st.markdown(
+            '<div style="background:linear-gradient(135deg,#16a34a,#4ade80);color:#052e16;'
+            'border-radius:16px;padding:18px 22px;margin-top:10px;'
+            'box-shadow:0 6px 20px rgba(22,163,74,.35)">'
+            '<div style="font-size:1.05rem;font-weight:800;letter-spacing:.02em">'
+            '✅ VALUE BET TROVATA!</div>'
+            f'<div style="margin-top:8px;font-weight:600;font-size:.95rem">'
+            f'Probabilità algoritmo {p_totale:.1%} contro quota bookmaker {bookmaker_odds:.2f} '
+            f'(quota equa {quota_reale:.2f}) · EV {ev_percent:+.1f}% · '
+            f'<u>Stake consigliato (Quarter Kelly): {stake_percent:.1f}%</u> del bankroll'
+            '</div></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        ev_text = f"{ev_percent:+.1f}%" if ev_percent is not None else "n/d"
+        st.markdown(
+            '<div style="background:#3f1113;color:#fecaca;border-radius:16px;'
+            'padding:18px 22px;margin-top:10px;border:1px solid #7f1d1d">'
+            '<div style="font-size:1.05rem;font-weight:800;letter-spacing:.02em">'
+            '⛔ NESSUN VALORE (Sottoquota)</div>'
+            f'<div style="margin-top:8px;font-weight:600;font-size:.95rem">'
+            f'La quota bookmaker inserita ({bookmaker_odds:.2f}) non copre la probabilità '
+            f'stimata dal modello ({p_totale:.1%}, quota equa {quota_reale:.2f}) · EV {ev_text}'
+            '</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    with st.expander("📋 Dettaglio probabilità dei singoli risultati nel gruppo"):
+        detail_frame = pd.DataFrame(
+            [
+                {
+                    "Risultato": score,
+                    "Probabilità": f"{score_map.get(score, 0.0):.1%}",
+                    "Fair odds": f"{fair_odds(score_map.get(score, 0.0)):.2f}",
+                }
+                for score in selected_scores
+            ]
+        )
+        st.dataframe(detail_frame, use_container_width=True, hide_index=True)
+
+    st.caption(
+        f"{home} vs {away} · Fractional Kelly Stake = ((Probabilità × Quota) - 1) / (Quota - 1) × 100, "
+        f"scalato al {KELLY_FRACTION:.0%} (Quarter Kelly), coerente con il Calcolatore Kelly della "
+        "scheda Value Betting & Heatmap."
+    )
+
+
+# ==============================================================================
 # FASE 1: VALUE BETTING & UX — Kelly Criterion + Heatmap dei Mercati
 # ==============================================================================
 # Estensione puramente additiva: non modifica Power Rating, TEAM_TIERS,
@@ -3258,11 +3423,19 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
     note = escape(model.engine_note) if model.engine_note else "Global Power Rating calcolato."
     st.caption(note)
 
-    tab_poisson, tab_goal_markets, tab_charts_dashboard, tab_value_betting, tab_montecarlo = st.tabs(
+    (
+        tab_poisson,
+        tab_goal_markets,
+        tab_charts_dashboard,
+        tab_multi_esito,
+        tab_value_betting,
+        tab_montecarlo,
+    ) = st.tabs(
         [
             "Analisi Quote & Probabilità (Poisson)",
             "📊 Statistiche Gol & Mercati",
             "📊 Dashboard Grafici & Micro-Eventi",
+            "🎯 Analizzatore Multi Esito & Value Bet",
             "💰 Value Betting & Heatmap",
             "Simulatore Monte Carlo (10.000 Partite)",
         ]
@@ -3348,6 +3521,9 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
 
     with tab_charts_dashboard:
         render_charts_dashboard_tab(model, home, away)
+
+    with tab_multi_esito:
+        render_multi_esito_tab(model, home, away)
 
     with tab_value_betting:
         render_value_betting_tab(model, home, away, league, sidebar_values.get("odds_api_key", ""))
