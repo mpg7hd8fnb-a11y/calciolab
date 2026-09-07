@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import math
 import os
+import random
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from html import escape
@@ -1916,6 +1918,314 @@ def render_multi_esito_tab(model: MatchModel, home: str, away: str) -> None:
 
 
 # ==============================================================================
+# FASE 6: SIMULATORE LIVE MATCH MINUTO PER MINUTO (Stile FC/FIFA)
+# ==============================================================================
+# Modulo puramente di intrattenimento/visualizzazione, indipendente dal
+# motore analitico: NON sostituisce né modifica in alcun modo le probabilità
+# Poisson + Dixon-Coles usate dalle altre schede (Pronostici, Dashboard
+# Grafici, Multi Esito, Value Betting, Monte Carlo), che restano l'unica
+# fonte di riferimento per pronostici e value bet. Qui si genera solo UNA
+# singola partita 'giocata' minuto per minuto, con esito diverso ad ogni
+# simulazione, calibrata sugli stessi gol attesi (alpha) e cartellini attesi
+# (beta) già calcolati dal motore per quel match.
+LIVE_SHOTS_PER_GOAL_RATIO = 8.0
+"""Tiri totali stimati per ogni gol atteso (alpha), usato come fallback se
+non viene passata una lambda tiri esplicita al motore live."""
+
+LIVE_SOT_PER_GOAL_RATIO = 3.0
+"""Tiri in porta stimati per ogni gol atteso (alpha), fallback analogo a
+LIVE_SHOTS_PER_GOAL_RATIO per i tiri in porta."""
+
+LIVE_CORNER_BASE_LAMBDA = 5.0
+"""Corner attesi di fallback per singola squadra (se non derivati dal
+MatchModel), usati per calibrare la probabilità di corner per minuto."""
+
+LIVE_CARD_YELLOW_TO_RED_RATIO = 0.06
+"""Quota di ammonizioni che, nel motore live, degenera in un'espulsione
+diretta (evento raro ma realistico)."""
+
+LIVE_MATCH_ANIMATION_DELAY_SECONDS = 0.02
+"""Pausa (in secondi) fra un minuto simulato e il successivo durante
+l'animazione 'Cronaca Diretta', per dare l'effetto di partita che scorre."""
+
+
+def simulate_single_match(
+    home_team: str,
+    away_team: str,
+    alpha_home: float,
+    beta_home: float,
+    alpha_away: float,
+    beta_away: float,
+    home_shots_lambda: float | None = None,
+    away_shots_lambda: float | None = None,
+    home_sot_lambda: float | None = None,
+    away_sot_lambda: float | None = None,
+    corners_lambda: float | None = None,
+) -> dict[str, object]:
+    """Simula UNA singola partita minuto per minuto (1'-90'), in stile
+    'match engine' arcade: `alpha_home`/`alpha_away` sono i gol attesi (xG)
+    di ciascuna squadra per l'intera partita (intensità offensiva), mentre
+    `beta_home`/`beta_away` sono i cartellini attesi (intensità
+    disciplinare/aggressività). Ad ogni minuto viene tirata a sorte la
+    generazione di tiri, tiri in porta/gol, corner e cartellini, con
+    probabilità Bernoulliane calibrate su questi parametri (approssimazione
+    per diradamento di un processo di Poisson). Restituisce la cronaca
+    completa degli eventi e il tabellino statistico finale. Ogni chiamata
+    produce un esito diverso (nessun seed fisso) — è un modulo illustrativo,
+    non una fonte di probabilità: quelle restano il motore Poisson/Dixon-
+    Coles usato dalle altre schede."""
+    home_shots_lambda = home_shots_lambda if home_shots_lambda and home_shots_lambda > 0 else alpha_home * LIVE_SHOTS_PER_GOAL_RATIO
+    away_shots_lambda = away_shots_lambda if away_shots_lambda and away_shots_lambda > 0 else alpha_away * LIVE_SHOTS_PER_GOAL_RATIO
+    home_sot_lambda = home_sot_lambda if home_sot_lambda and home_sot_lambda > 0 else alpha_home * LIVE_SOT_PER_GOAL_RATIO
+    away_sot_lambda = away_sot_lambda if away_sot_lambda and away_sot_lambda > 0 else alpha_away * LIVE_SOT_PER_GOAL_RATIO
+    corners_lambda = corners_lambda if corners_lambda and corners_lambda > 0 else LIVE_CORNER_BASE_LAMBDA * 2
+
+    # I tiri in porta non possono superare i tiri totali della stessa squadra.
+    home_sot_lambda = min(home_sot_lambda, home_shots_lambda) if home_shots_lambda > 0 else 0.0
+    away_sot_lambda = min(away_sot_lambda, away_shots_lambda) if away_shots_lambda > 0 else 0.0
+
+    # Tasso di conversione per tiro in porta (probabilità che un tiro in
+    # porta diventi gol), derivato in modo che il numero atteso di gol sulla
+    # simulazione converga verso alpha_home/alpha_away.
+    home_conversion = clamp(alpha_home / home_sot_lambda, 0.03, 0.6) if home_sot_lambda > 0 else 0.0
+    away_conversion = clamp(alpha_away / away_sot_lambda, 0.03, 0.6) if away_sot_lambda > 0 else 0.0
+
+    per_minute_home_shot = clamp(home_shots_lambda / 90, 0.0, 0.9)
+    per_minute_away_shot = clamp(away_shots_lambda / 90, 0.0, 0.9)
+    per_minute_corner = clamp(corners_lambda / 90, 0.0, 0.9)
+    per_minute_card_home = clamp(beta_home / 90, 0.0, 0.5)
+    per_minute_card_away = clamp(beta_away / 90, 0.0, 0.5)
+
+    dominance_home = clamp(alpha_home / max(alpha_home + alpha_away, 0.01), 0.15, 0.85)
+
+    events: list[dict[str, object]] = []
+    stats = {
+        "home_goals": 0, "away_goals": 0,
+        "home_shots": 0, "away_shots": 0,
+        "home_sot": 0, "away_sot": 0,
+        "home_corners": 0, "away_corners": 0,
+        "home_yellow": 0, "away_yellow": 0,
+        "home_red": 0, "away_red": 0,
+    }
+
+    for minute in range(1, 91):
+        if random.random() < per_minute_home_shot:
+            stats["home_shots"] += 1
+            if random.random() < clamp(home_sot_lambda / home_shots_lambda, 0.0, 1.0):
+                stats["home_sot"] += 1
+                if random.random() < home_conversion:
+                    stats["home_goals"] += 1
+                    events.append({
+                        "minute": minute, "team": "home", "type": "goal",
+                        "text": f"{minute}' ⚽ GOL! {home_team} segna! ({stats['home_goals']}-{stats['away_goals']})",
+                    })
+                else:
+                    events.append({
+                        "minute": minute, "team": "home", "type": "shot_on_target",
+                        "text": f"{minute}' 🎯 Tiro in porta di {home_team}, para il portiere!",
+                    })
+            else:
+                events.append({
+                    "minute": minute, "team": "home", "type": "shot_off_target",
+                    "text": f"{minute}' 📤 Tiro fuori di {home_team}.",
+                })
+
+        if random.random() < per_minute_away_shot:
+            stats["away_shots"] += 1
+            if random.random() < clamp(away_sot_lambda / away_shots_lambda, 0.0, 1.0):
+                stats["away_sot"] += 1
+                if random.random() < away_conversion:
+                    stats["away_goals"] += 1
+                    events.append({
+                        "minute": minute, "team": "away", "type": "goal",
+                        "text": f"{minute}' ⚽ GOL! {away_team} segna! ({stats['home_goals']}-{stats['away_goals']})",
+                    })
+                else:
+                    events.append({
+                        "minute": minute, "team": "away", "type": "shot_on_target",
+                        "text": f"{minute}' 🎯 Tiro in porta di {away_team}, respinto!",
+                    })
+            else:
+                events.append({
+                    "minute": minute, "team": "away", "type": "shot_off_target",
+                    "text": f"{minute}' 📤 Tiro fuori di {away_team}.",
+                })
+
+        if random.random() < per_minute_corner:
+            if random.random() < dominance_home:
+                stats["home_corners"] += 1
+                events.append({
+                    "minute": minute, "team": "home", "type": "corner",
+                    "text": f"{minute}' 🚩 Calcio d'angolo per {home_team}.",
+                })
+            else:
+                stats["away_corners"] += 1
+                events.append({
+                    "minute": minute, "team": "away", "type": "corner",
+                    "text": f"{minute}' 🚩 Calcio d'angolo per {away_team}.",
+                })
+
+        if random.random() < per_minute_card_home:
+            if random.random() < LIVE_CARD_YELLOW_TO_RED_RATIO:
+                stats["home_red"] += 1
+                events.append({
+                    "minute": minute, "team": "home", "type": "red",
+                    "text": f"{minute}' 🟥 ESPULSIONE! Rosso diretto per {home_team}!",
+                })
+            else:
+                stats["home_yellow"] += 1
+                events.append({
+                    "minute": minute, "team": "home", "type": "yellow",
+                    "text": f"{minute}' 🟨 Ammonizione per {home_team}.",
+                })
+
+        if random.random() < per_minute_card_away:
+            if random.random() < LIVE_CARD_YELLOW_TO_RED_RATIO:
+                stats["away_red"] += 1
+                events.append({
+                    "minute": minute, "team": "away", "type": "red",
+                    "text": f"{minute}' 🟥 ESPULSIONE! Rosso diretto per {away_team}!",
+                })
+            else:
+                stats["away_yellow"] += 1
+                events.append({
+                    "minute": minute, "team": "away", "type": "yellow",
+                    "text": f"{minute}' 🟨 Ammonizione per {away_team}.",
+                })
+
+    possesso_home = round(clamp(50 + (dominance_home - 0.5) * 60, 25, 75))
+    possesso_away = 100 - possesso_home
+
+    return {
+        "events": events,
+        "stats": stats,
+        "possesso_home": possesso_home,
+        "possesso_away": possesso_away,
+        "final_score": f"{stats['home_goals']} - {stats['away_goals']}",
+    }
+
+
+def run_live_match_from_model(model: MatchModel, home: str, away: str) -> dict[str, object]:
+    """Prepara i parametri (alpha/beta + lambda di tiri/corner) dal
+    MatchModel già calcolato dal motore Dixon-Coles e lancia
+    simulate_single_match. I tiri totali per squadra vengono ripartiti dal
+    totale di coppia (`shots_total_lambda`) nella stessa proporzione dei tiri
+    in porta per squadra (già disponibili separatamente sul MatchModel),
+    così la simulazione resta coerente con le medie del match analizzato."""
+    sot_sum = model.home_shots_on_target_lambda + model.away_shots_on_target_lambda
+    home_share = model.home_shots_on_target_lambda / sot_sum if sot_sum > 0 else 0.5
+    home_shots_lambda = model.shots_total_lambda * home_share
+    away_shots_lambda = model.shots_total_lambda * (1 - home_share)
+
+    return simulate_single_match(
+        home_team=home,
+        away_team=away,
+        alpha_home=model.home_lambda,
+        beta_home=model.home_cards_lambda,
+        alpha_away=model.away_lambda,
+        beta_away=model.away_cards_lambda,
+        home_shots_lambda=home_shots_lambda,
+        away_shots_lambda=away_shots_lambda,
+        home_sot_lambda=model.home_shots_on_target_lambda,
+        away_sot_lambda=model.away_shots_on_target_lambda,
+        corners_lambda=model.corners_total_lambda,
+    )
+
+
+def render_live_match_tab(model: MatchModel, home: str, away: str) -> None:
+    """🎮 Simulatore Live Match (Stile FC/FIFA): pulsante 'Avvia Simulazione
+    Partita' che genera e anima minuto per minuto UNA singola partita
+    (cronaca diretta + tabellino finale), con possibilità di rigiocarla
+    all'infinito tramite 'Simula di Nuovo'. Modulo di intrattenimento
+    indipendente dal motore analitico: le probabilità di riferimento
+    restano quelle Poisson/Dixon-Coles delle altre schede."""
+    st.markdown(
+        "### 🎮 Simulatore Live Match (Stile FC/FIFA)\n"
+        "Guarda una singola partita 'giocarsi' minuto per minuto, con cronaca "
+        "diretta ed esito diverso ogni volta. I gol e i cartellini attesi "
+        "sono calibrati sullo stesso Global Power Rating del match — ma "
+        "questa è una simulazione illustrativa di UNA partita, non "
+        "sostituisce i pronostici Poisson/Dixon-Coles/Monte Carlo delle "
+        "altre schede."
+    )
+
+    if st.session_state.get("live_match_teams") != (home, away):
+        # Cambio di squadre selezionate: la simulazione precedente non è più
+        # pertinente, va ripulita per evitare di mostrare un tabellino di un
+        # match diverso da quello attualmente analizzato.
+        st.session_state.pop("live_match_result", None)
+        st.session_state.pop("live_match_chronicle", None)
+        st.session_state["live_match_teams"] = (home, away)
+
+    has_previous_result = "live_match_result" in st.session_state
+    button_label = "🔄 Simula di Nuovo" if has_previous_result else "▶️ Avvia Simulazione Partita"
+    run_clicked = st.button(button_label, type="primary", key="live_match_run_button")
+
+    if run_clicked:
+        result = run_live_match_from_model(model, home, away)
+        events_by_minute: dict[int, list[dict[str, object]]] = {}
+        for event in result["events"]:
+            events_by_minute.setdefault(int(event["minute"]), []).append(event)
+
+        progress_bar = st.progress(0, text="Calcio d'inizio! 0'")
+        ticker = st.empty()
+        chronicle: list[str] = []
+        for minute in range(1, 91):
+            for event in events_by_minute.get(minute, []):
+                chronicle.append(str(event["text"]))
+            progress_bar.progress(minute / 90, text=f"⏱️ Minuto {minute}'")
+            ticker.markdown(
+                "#### 📻 Cronaca Diretta\n" + "\n\n".join(f"- {line}" for line in chronicle[-8:])
+                if chronicle
+                else "#### 📻 Cronaca Diretta\n_In attesa del primo episodio da segnalare..._"
+            )
+            time.sleep(LIVE_MATCH_ANIMATION_DELAY_SECONDS)
+        progress_bar.progress(1.0, text="🏁 Triplice fischio! 90'+")
+
+        st.session_state["live_match_result"] = result
+        st.session_state["live_match_chronicle"] = chronicle
+
+    if "live_match_result" not in st.session_state:
+        st.info("Premi '▶️ Avvia Simulazione Partita' per far scendere in campo le due squadre.")
+        return
+
+    result = st.session_state["live_match_result"]
+    stats = result["stats"]
+
+    st.markdown("---")
+    st.markdown(f"## 🏆 Tabellino Finale — {home} {result['final_score']} {away}")
+
+    comparison_rows = [
+        ("Tiri Totali", stats["home_shots"], stats["away_shots"]),
+        ("Tiri in Porta", stats["home_sot"], stats["away_sot"]),
+        ("Calci d'Angolo", stats["home_corners"], stats["away_corners"]),
+        ("Cartellini Gialli", stats["home_yellow"], stats["away_yellow"]),
+        ("Cartellini Rossi", stats["home_red"], stats["away_red"]),
+        ("Possesso Palla (%)", result["possesso_home"], result["possesso_away"]),
+    ]
+    comparison_frame = pd.DataFrame(
+        [
+            {home: home_value, "Statistica": label, away: away_value}
+            for label, home_value, away_value in comparison_rows
+        ]
+    )[[home, "Statistica", away]]
+    st.dataframe(comparison_frame, use_container_width=True, hide_index=True)
+
+    with st.expander("📜 Cronaca completa (90 minuti)", expanded=False):
+        full_chronicle = st.session_state.get("live_match_chronicle", [])
+        if full_chronicle:
+            st.markdown("\n\n".join(f"- {line}" for line in full_chronicle))
+        else:
+            st.caption("Nessun evento rilevante generato in questa simulazione.")
+
+    st.caption(
+        "Simulazione illustrativa minuto-per-minuto: ad ogni avvio genera un esito diverso, "
+        "calibrato sui gol e cartellini attesi del match, ma NON è la fonte delle probabilità "
+        "usate nelle altre schede (Poisson/Dixon-Coles restano il riferimento analitico)."
+    )
+
+
+# ==============================================================================
 # FASE 1: VALUE BETTING & UX — Kelly Criterion + Heatmap dei Mercati
 # ==============================================================================
 # Estensione puramente additiva: non modifica Power Rating, TEAM_TIERS,
@@ -3430,6 +3740,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
         tab_multi_esito,
         tab_value_betting,
         tab_montecarlo,
+        tab_live_match,
     ) = st.tabs(
         [
             "Analisi Quote & Probabilità (Poisson)",
@@ -3438,6 +3749,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
             "🎯 Analizzatore Multi Esito & Value Bet",
             "💰 Value Betting & Heatmap",
             "Simulatore Monte Carlo (10.000 Partite)",
+            "🎮 Simulatore Live Match (Stile FC/FIFA)",
         ]
     )
 
@@ -3578,6 +3890,9 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
             st.markdown("**Frequenza dei micro-eventi chiave**")
             st.dataframe(event_frame, use_container_width=True, hide_index=True)
             st.success("Simulazione completata: 10.000 partite generate.")
+
+    with tab_live_match:
+        render_live_match_tab(model, home, away)
 
 
 DARK_THEME_CSS = """
