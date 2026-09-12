@@ -1944,9 +1944,11 @@ LIVE_CARD_YELLOW_TO_RED_RATIO = 0.06
 """Quota di ammonizioni che, nel motore live, degenera in un'espulsione
 diretta (evento raro ma realistico)."""
 
-LIVE_MATCH_ANIMATION_DELAY_SECONDS = 0.02
+LIVE_MATCH_ANIMATION_DELAY_SECONDS = 0.11
 """Pausa (in secondi) fra un minuto simulato e il successivo durante
-l'animazione 'Cronaca Diretta', per dare l'effetto di partita che scorre."""
+l'animazione 'Cronaca Diretta': 90 minuti × 0.11s ≈ 10 secondi reali totali,
+calibrati per una clip breve e ad alto impatto da registrare per i social
+(TikTok/Reels/Shorts) senza tempi morti."""
 
 
 def simulate_single_match(
@@ -2251,6 +2253,53 @@ def render_social_share_card(
         f'<div class="social-share-subtitle">{escape(subtitle)}</div>'
         f'<div class="social-share-rows">{rows_html}</div>'
         '<div class="social-share-footer">Generato con CalcioLab ⚽📊</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_top_result_highlight_card(score_label: str, probability: float, simulations_count: int) -> None:
+    """🏆 Card oro/verde fluo con il 'Risultato Più Probabile' emerso dalle
+    10.000 simulazioni Monte Carlo: pensata per catturare subito l'occhio in
+    cima alla scheda, prima delle tabelle di dettaglio."""
+    st.markdown(
+        '<div class="mc-highlight-card">'
+        '<div class="mc-highlight-label">🏆 Risultato Più Probabile · 10.000 Simulazioni</div>'
+        f'<div class="mc-highlight-score">{escape(score_label)}</div>'
+        f'<div class="mc-highlight-sub">Probabilità {probability:.1%} · {simulations_count:,} simulazioni su 10.000</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_three_way_probability_bar(
+    home_prob: float,
+    draw_prob: float,
+    away_prob: float,
+    home_label: str,
+    away_label: str,
+) -> None:
+    """Barra 1X2 a 3 colori (Casa verde/azzurro fluo · Pareggio oro ·
+    Ospite arancio/rosso), con le percentuali incise direttamente nel
+    segmento quando c'è spazio sufficiente, altrimenti solo in legenda."""
+    total = max(home_prob + draw_prob + away_prob, 1e-9)
+    home_pct = clamp(home_prob / total * 100, 0.0, 100.0)
+    draw_pct = clamp(draw_prob / total * 100, 0.0, 100.0)
+    away_pct = clamp(100.0 - home_pct - draw_pct, 0.0, 100.0)
+
+    def _segment_text(pct: float) -> str:
+        return f"{pct:.0f}%" if pct >= 8.0 else ""
+
+    st.markdown(
+        '<div class="three-way-bar-track">'
+        f'<div class="three-way-seg three-way-home" style="width:{home_pct:.1f}%">{_segment_text(home_pct)}</div>'
+        f'<div class="three-way-seg three-way-draw" style="width:{draw_pct:.1f}%">{_segment_text(draw_pct)}</div>'
+        f'<div class="three-way-seg three-way-away" style="width:{away_pct:.1f}%">{_segment_text(away_pct)}</div>'
+        '</div>'
+        '<div class="three-way-legend">'
+        f'<span>🏠 {escape(home_label)} {home_pct:.0f}%</span>'
+        f'<span>🤝 Pareggio {draw_pct:.0f}%</span>'
+        f'<span>✈️ {escape(away_label)} {away_pct:.0f}%</span>'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -4029,47 +4078,134 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
             "le frequenze qui sotto devono essere coerenti con il pronostico 1X2 "
             "mostrato nella scheda Poisson."
         )
-        run_clicked = st.button(
-            "Esegui 10.000 Simulazioni Monte Carlo",
-            type="primary",
-            key="simulate_button",
+
+        if st.session_state.get("montecarlo_teams") != (home, away):
+            # Cambio di squadre selezionate: la simulazione precedente non è
+            # più pertinente al match attualmente analizzato.
+            st.session_state.pop("montecarlo_result", None)
+            st.session_state["montecarlo_teams"] = (home, away)
+
+        montecarlo_button_label = (
+            "🔁 Rilancia 10.000 Simulazioni Monte Carlo"
+            if "montecarlo_result" in st.session_state
+            else "🎲 Esegui 10.000 Simulazioni Monte Carlo"
         )
+        run_clicked = st.button(montecarlo_button_label, type="primary", key="simulate_button")
+
         if run_clicked:
-            simulation = run_simulation(model)
+            with st.spinner("Simulazione di 10.000 partite in corso..."):
+                st.session_state["montecarlo_result"] = run_simulation(model)
+
+        if "montecarlo_result" not in st.session_state:
+            st.info("Premi il pulsante per lanciare 10.000 simulazioni Monte Carlo di questo match.")
+        else:
+            simulation = st.session_state["montecarlo_result"]
             score_frame: pd.DataFrame = simulation["scores"]
             outcome_frame: pd.DataFrame = simulation["outcomes"]
             event_frame: pd.DataFrame = simulation["events"]
+            raw = simulation["raw"]
 
-            st.markdown("**Pronostico 1X2 simulato (confronto con il calcolo analitico)**")
-            st.dataframe(outcome_frame, use_container_width=True, hide_index=True)
+            top_score_row = score_frame.iloc[0]
+            render_top_result_highlight_card(
+                score_label=str(top_score_row["Risultato esatto"]),
+                probability=float(top_score_row["Probabilità"]),
+                simulations_count=int(top_score_row["Simulazioni"]),
+            )
 
+            st.markdown("##### 🎯 Pronostico 1X2 simulato (Casa · Pareggio · Ospite)")
+            outcome_probabilities = {
+                str(row["Esito"]): float(row["Probabilità"]) for _, row in outcome_frame.iterrows()
+            }
+            render_three_way_probability_bar(
+                home_prob=outcome_probabilities.get("1 (vittoria casa)", 0.0),
+                draw_prob=outcome_probabilities.get("X (pareggio)", 0.0),
+                away_prob=outcome_probabilities.get("2 (vittoria trasferta)", 0.0),
+                home_label=home,
+                away_label=away,
+            )
+            st.caption("Frequenze osservate su 10.000 partite simulate, pesate con la correzione Dixon-Coles.")
+
+            st.markdown("---")
             col_scores, col_chart = st.columns(2)
             with col_scores:
                 st.markdown("**I 5 risultati esatti più frequenti (pesati Dixon-Coles)**")
                 st.dataframe(score_frame, use_container_width=True, hide_index=True)
+
+                st.markdown("**Frequenza dei micro-eventi chiave**")
+                st.dataframe(event_frame, use_container_width=True, hide_index=True)
             with col_chart:
-                chart = px.bar(
+                exact_score_chart = px.bar(
                     score_frame,
                     x="Risultato esatto",
                     y="Probabilità",
                     text="Probabilità",
                     labels={"Probabilità": "Probabilità", "Risultato esatto": "Risultato"},
                     color="Probabilità",
-                    color_continuous_scale=["#d9f99d", "#16a34a"],
+                    color_continuous_scale=["#161b22", "#00e5ff", "#00ff87"],
                 )
-                chart.update_traces(texttemplate="%{text:.1%}", textposition="outside")
-                chart.update_layout(
+                exact_score_chart.update_traces(texttemplate="%{text:.1%}", textposition="outside")
+                exact_score_chart.update_layout(
+                    title="Risultati Esatti Più Frequenti",
                     showlegend=False,
                     yaxis_tickformat=".0%",
-                    margin={"l": 10, "r": 10, "t": 20, "b": 10},
+                    margin={"l": 10, "r": 10, "t": 40, "b": 10},
                     paper_bgcolor="rgba(0,0,0,0)",
                     plot_bgcolor="rgba(0,0,0,0)",
-                    font_color="#e2e8f0",
+                    font_color="#e6edf3",
+                    title_font_color="#00ff87",
                 )
-                st.plotly_chart(chart, use_container_width=True)
+                st.plotly_chart(exact_score_chart, use_container_width=True)
 
-            st.markdown("**Frequenza dei micro-eventi chiave**")
-            st.dataframe(event_frame, use_container_width=True, hide_index=True)
+                total_goals_array = raw["home_goals"] + raw["away_goals"]
+                max_bucket = 7
+                bucket_labels = [str(n) for n in range(max_bucket)] + [f"{max_bucket}+"]
+                bucket_counts = [int((total_goals_array == n).sum()) for n in range(max_bucket)]
+                bucket_counts.append(int((total_goals_array >= max_bucket).sum()))
+                goals_distribution_frame = pd.DataFrame(
+                    {
+                        "Gol totali": bucket_labels,
+                        "Simulazioni": bucket_counts,
+                        "Probabilità": [count / len(total_goals_array) for count in bucket_counts],
+                    }
+                )
+                goals_chart = px.bar(
+                    goals_distribution_frame,
+                    x="Gol totali",
+                    y="Probabilità",
+                    text="Probabilità",
+                    color="Probabilità",
+                    color_continuous_scale=["#161b22", "#ff8a00", "#ffd60a"],
+                )
+                goals_chart.update_traces(texttemplate="%{text:.1%}", textposition="outside")
+                goals_chart.update_layout(
+                    title="Distribuzione Gol Totali (Monte Carlo)",
+                    showlegend=False,
+                    yaxis_tickformat=".0%",
+                    margin={"l": 10, "r": 10, "t": 40, "b": 10},
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font_color="#e6edf3",
+                    title_font_color="#ffd60a",
+                )
+                st.plotly_chart(goals_chart, use_container_width=True)
+
+            st.markdown("### 📱 Card per i Social")
+            top_event_row = event_frame.loc[event_frame["Probabilità"].idxmax()]
+            social_rows = [
+                ("🏆 Risultato più probabile", f"{top_score_row['Risultato esatto']} ({float(top_score_row['Probabilità']):.1%})"),
+                (f"🏠 Vittoria {home}", f"{outcome_probabilities.get('1 (vittoria casa)', 0.0):.0%}"),
+                ("🤝 Pareggio", f"{outcome_probabilities.get('X (pareggio)', 0.0):.0%}"),
+                (f"✈️ Vittoria {away}", f"{outcome_probabilities.get('2 (vittoria trasferta)', 0.0):.0%}"),
+                ("🔥 Micro-evento top", f"{top_event_row['Micro-evento simulato']} · {float(top_event_row['Probabilità']):.0%}"),
+            ]
+            render_social_share_card(
+                title=f"{home} vs {away}",
+                headline=str(top_score_row["Risultato esatto"]),
+                subtitle="Monte Carlo · 10.000 Partite Simulate · CalcioLab",
+                rows=social_rows,
+                accent="#ffd60a",
+            )
+
             st.success("Simulazione completata: 10.000 partite generate.")
 
     with tab_live_match:
@@ -4257,7 +4393,7 @@ td, th {
 }
 
 .scoreboard-score {
-    font-size: 3.1rem;
+    font-size: 3.6rem;
     font-weight: 900;
     letter-spacing: 0.04em;
     font-variant-numeric: tabular-nums;
@@ -4404,7 +4540,7 @@ td, th {
 }
 
 .social-share-headline {
-    font-size: 1.75rem;
+    font-size: 2rem;
     font-weight: 900;
     color: #ffffff;
     margin: 8px 0 4px 0;
@@ -4449,6 +4585,94 @@ td, th {
     text-align: right;
     letter-spacing: 0.05em;
     text-transform: uppercase;
+}
+
+/* --------------------------------------------------------------------
+   Monte Carlo · Card "Risultato Più Probabile" (oro/verde fluo)
+   -------------------------------------------------------------------- */
+.mc-highlight-card {
+    border-radius: 20px;
+    padding: 20px 24px;
+    background: linear-gradient(135deg, rgba(255, 214, 10, 0.14), rgba(0, 255, 135, 0.10));
+    border: 1px solid #ffd60a;
+    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45), 0 0 26px rgba(255, 214, 10, 0.18);
+    margin-bottom: 18px;
+    backdrop-filter: blur(10px);
+    text-align: center;
+}
+
+.mc-highlight-label {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: #ffd60a;
+    font-weight: 800;
+}
+
+.mc-highlight-score {
+    font-size: 3rem;
+    font-weight: 900;
+    letter-spacing: 0.03em;
+    background: linear-gradient(135deg, #ffd60a, var(--clab-accent));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    margin: 8px 0 4px 0;
+    font-variant-numeric: tabular-nums;
+}
+
+.mc-highlight-sub {
+    font-size: 0.9rem;
+    color: var(--clab-text);
+    font-weight: 600;
+}
+
+/* --------------------------------------------------------------------
+   Barra 1X2 a 3 colori (Casa · Pareggio · Ospite)
+   -------------------------------------------------------------------- */
+.three-way-bar-track {
+    display: flex;
+    width: 100%;
+    height: 38px;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+}
+
+.three-way-seg {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 0.88rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.three-way-home {
+    background: linear-gradient(135deg, var(--clab-accent-2), var(--clab-accent));
+    color: #04140d;
+}
+
+.three-way-draw {
+    background: linear-gradient(135deg, #ffd60a, #ffb703);
+    color: #241a00;
+}
+
+.three-way-away {
+    background: linear-gradient(135deg, #ff8a00, #ff2e63);
+    color: #ffffff;
+}
+
+.three-way-legend {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 8px;
+    font-size: 0.76rem;
+    color: var(--clab-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
 }
 </style>
 """
