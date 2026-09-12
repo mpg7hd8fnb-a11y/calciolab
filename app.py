@@ -2132,6 +2132,130 @@ def run_live_match_from_model(model: MatchModel, home: str, away: str) -> dict[s
     )
 
 
+# ==============================================================================
+# COMPONENTI UI "DARK GAMING / BROADCAST" (restyling estetico riutilizzabile)
+# ==============================================================================
+# Funzioni di sola presentazione (HTML/CSS via st.markdown): non calcolano
+# nulla di nuovo, si limitano a visualizzare in modo più coinvolgente dati
+# già prodotti dal motore (MatchModel, simulate_single_match). Pensate per
+# essere riutilizzate sia nel Simulatore Live sia nella Dashboard di analisi.
+def _stat_bar_percentages(home_value: float, away_value: float) -> tuple[float, float]:
+    """Converte due valori grezzi in una coppia di percentuali (somma 100)
+    per la larghezza delle due metà della barra di confronto, con un minimo
+    visibile del 6% anche quando un lato è a zero."""
+    total = home_value + away_value
+    if total <= 0:
+        return 50.0, 50.0
+    home_pct = clamp(home_value / total * 100, 6.0, 94.0)
+    return home_pct, 100.0 - home_pct
+
+
+def render_stat_bar(
+    label: str,
+    home_value: float,
+    away_value: float,
+    home_display: str | None = None,
+    away_display: str | None = None,
+) -> None:
+    """Barra di confronto visivo (Visual Stat Bar) fra Casa e Trasferta per
+    una singola statistica (tiri, corner, possesso...): la metà più lunga e
+    più colorata (verde/azzurro per la Casa, arancione/rosso per la
+    Trasferta) è quella della squadra dominante su quella metrica."""
+    home_display = home_display if home_display is not None else f"{home_value:g}"
+    away_display = away_display if away_display is not None else f"{away_value:g}"
+    home_pct, away_pct = _stat_bar_percentages(float(home_value), float(away_value))
+    st.markdown(
+        '<div class="stat-bar-row">'
+        f'<div class="stat-bar-values"><span>{escape(str(home_display))}</span>'
+        f'<span>{escape(str(away_display))}</span></div>'
+        '<div class="stat-bar-track">'
+        f'<div class="stat-bar-home" style="width:{home_pct:.1f}%"></div>'
+        f'<div class="stat-bar-away" style="width:{away_pct:.1f}%"></div>'
+        '</div>'
+        f'<div class="stat-bar-label">{escape(label)}</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def broadcast_scoreboard_html(home: str, away: str, home_goals: int, away_goals: int, minute_label: str) -> str:
+    """Markup HTML del tabellone stile Match TV/Broadcast: nomi squadra in
+    grande, punteggio centrale ad alto impatto e badge minuto animato
+    ('LED'). Restituisce la stringa HTML così da poter essere riutilizzata
+    sia per un rendering statico (st.markdown) sia per l'aggiornamento
+    live di un placeholder durante l'animazione minuto-per-minuto."""
+    return (
+        '<div class="scoreboard-wrap">'
+        f'<div class="scoreboard-team"><div class="scoreboard-team-name">{escape(home)}</div>'
+        '<div class="scoreboard-team-tag">🏠 CASA</div></div>'
+        '<div class="scoreboard-center">'
+        f'<div class="scoreboard-score">{home_goals} - {away_goals}</div>'
+        f'<div class="scoreboard-minute-badge">⏱ {escape(minute_label)}</div>'
+        '</div>'
+        f'<div class="scoreboard-team"><div class="scoreboard-team-name">{escape(away)}</div>'
+        '<div class="scoreboard-team-tag">✈️ TRASFERTA</div></div>'
+        '</div>'
+    )
+
+
+def render_broadcast_scoreboard(home: str, away: str, home_goals: int, away_goals: int, minute_label: str) -> None:
+    """Renderizza il tabellone Match TV/Broadcast (vedi broadcast_scoreboard_html)."""
+    st.markdown(broadcast_scoreboard_html(home, away, home_goals, away_goals, minute_label), unsafe_allow_html=True)
+
+
+def chronicle_feed_html(lines: Sequence[str], reverse: bool = False) -> str:
+    """Markup HTML del feed di Cronaca stile Social/Ticker: box con
+    scorrimento verticale pulito (scrollbar personalizzata) ed evidenziazione
+    cromatica automatica di gol/cartellini in base alle emoji già presenti
+    nel testo dell'evento (⚽ GOL, 🟨 GIALLO, 🟥 ROSSO)."""
+    ordered = list(reversed(lines)) if reverse else list(lines)
+    if not ordered:
+        items_html = '<div class="chronicle-item">In attesa del primo episodio da segnalare...</div>'
+    else:
+        rendered_items = []
+        for line in ordered:
+            css_class = "chronicle-item"
+            if "⚽" in line:
+                css_class += " goal"
+            elif "🟥" in line:
+                css_class += " red"
+            elif "🟨" in line:
+                css_class += " yellow"
+            rendered_items.append(f'<div class="{css_class}">{escape(line)}</div>')
+        items_html = "".join(rendered_items)
+    return f'<div class="chronicle-feed">{items_html}</div>'
+
+
+def render_social_share_card(
+    title: str,
+    headline: str,
+    subtitle: str,
+    rows: Sequence[tuple[str, str]],
+    accent: str = "#00ff87",
+) -> None:
+    """📱 Box 'Scheda Social Share': card compatta e ad alto impatto visivo,
+    pensata per essere fotografata/catturata in uno screenshot da condividere
+    sui social — riassume risultato/pronostico, statistiche principali e un
+    footer con il nome dell'app. Contenuto puramente derivato da dati già
+    calcolati altrove (MatchModel o simulate_single_match)."""
+    rows_html = "".join(
+        f'<div class="social-share-row"><span class="social-share-row-label">{escape(label)}</span>'
+        f'<span class="social-share-row-value">{escape(value)}</span></div>'
+        for label, value in rows
+    )
+    st.markdown(
+        f'<div class="social-share-card" style="--social-accent:{escape(accent)}">'
+        f'<div class="social-share-title">📱 Card per i Social</div>'
+        f'<div class="social-share-title" style="opacity:.7;margin-top:2px">{escape(title)}</div>'
+        f'<div class="social-share-headline">{escape(headline)}</div>'
+        f'<div class="social-share-subtitle">{escape(subtitle)}</div>'
+        f'<div class="social-share-rows">{rows_html}</div>'
+        '<div class="social-share-footer">Generato con CalcioLab ⚽📊</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def render_live_match_tab(model: MatchModel, home: str, away: str) -> None:
     """🎮 Simulatore Live Match (Stile FC/FIFA): pulsante 'Avvia Simulazione
     Partita' che genera e anima minuto per minuto UNA singola partita
@@ -2167,20 +2291,38 @@ def render_live_match_tab(model: MatchModel, home: str, away: str) -> None:
         for event in result["events"]:
             events_by_minute.setdefault(int(event["minute"]), []).append(event)
 
+        scoreboard_placeholder = st.empty()
+        scoreboard_placeholder.markdown(
+            broadcast_scoreboard_html(home, away, 0, 0, "0' LIVE"), unsafe_allow_html=True
+        )
         progress_bar = st.progress(0, text="Calcio d'inizio! 0'")
+        st.markdown("#### 📻 Cronaca Diretta")
         ticker = st.empty()
+        ticker.markdown(chronicle_feed_html([]), unsafe_allow_html=True)
+
         chronicle: list[str] = []
+        live_home_goals = 0
+        live_away_goals = 0
         for minute in range(1, 91):
             for event in events_by_minute.get(minute, []):
                 chronicle.append(str(event["text"]))
-            progress_bar.progress(minute / 90, text=f"⏱️ Minuto {minute}'")
-            ticker.markdown(
-                "#### 📻 Cronaca Diretta\n" + "\n\n".join(f"- {line}" for line in chronicle[-8:])
-                if chronicle
-                else "#### 📻 Cronaca Diretta\n_In attesa del primo episodio da segnalare..._"
+                if event["type"] == "goal":
+                    if event["team"] == "home":
+                        live_home_goals += 1
+                    else:
+                        live_away_goals += 1
+            scoreboard_placeholder.markdown(
+                broadcast_scoreboard_html(home, away, live_home_goals, live_away_goals, f"{minute}' LIVE"),
+                unsafe_allow_html=True,
             )
+            progress_bar.progress(minute / 90, text=f"⏱️ Minuto {minute}'")
+            ticker.markdown(chronicle_feed_html(chronicle[-8:]), unsafe_allow_html=True)
             time.sleep(LIVE_MATCH_ANIMATION_DELAY_SECONDS)
         progress_bar.progress(1.0, text="🏁 Triplice fischio! 90'+")
+        scoreboard_placeholder.markdown(
+            broadcast_scoreboard_html(home, away, live_home_goals, live_away_goals, "FT 90'+"),
+            unsafe_allow_html=True,
+        )
 
         st.session_state["live_match_result"] = result
         st.session_state["live_match_chronicle"] = chronicle
@@ -2193,30 +2335,45 @@ def render_live_match_tab(model: MatchModel, home: str, away: str) -> None:
     stats = result["stats"]
 
     st.markdown("---")
-    st.markdown(f"## 🏆 Tabellino Finale — {home} {result['final_score']} {away}")
+    st.markdown("## 🏆 Tabellino Finale")
+    render_broadcast_scoreboard(home, away, stats["home_goals"], stats["away_goals"], "FT 90'+")
 
-    comparison_rows = [
-        ("Tiri Totali", stats["home_shots"], stats["away_shots"]),
-        ("Tiri in Porta", stats["home_sot"], stats["away_sot"]),
-        ("Calci d'Angolo", stats["home_corners"], stats["away_corners"]),
-        ("Cartellini Gialli", stats["home_yellow"], stats["away_yellow"]),
-        ("Cartellini Rossi", stats["home_red"], stats["away_red"]),
-        ("Possesso Palla (%)", result["possesso_home"], result["possesso_away"]),
-    ]
-    comparison_frame = pd.DataFrame(
-        [
-            {home: home_value, "Statistica": label, away: away_value}
-            for label, home_value, away_value in comparison_rows
-        ]
-    )[[home, "Statistica", away]]
-    st.dataframe(comparison_frame, use_container_width=True, hide_index=True)
+    st.markdown("#### 📊 Confronto Statistiche")
+    render_stat_bar("Tiri Totali", stats["home_shots"], stats["away_shots"])
+    render_stat_bar("Tiri in Porta", stats["home_sot"], stats["away_sot"])
+    render_stat_bar("Calci d'Angolo", stats["home_corners"], stats["away_corners"])
+    render_stat_bar("Cartellini Gialli", stats["home_yellow"], stats["away_yellow"])
+    render_stat_bar("Cartellini Rossi", stats["home_red"], stats["away_red"])
+    render_stat_bar(
+        "Possesso Palla",
+        result["possesso_home"],
+        result["possesso_away"],
+        f"{result['possesso_home']}%",
+        f"{result['possesso_away']}%",
+    )
 
     with st.expander("📜 Cronaca completa (90 minuti)", expanded=False):
         full_chronicle = st.session_state.get("live_match_chronicle", [])
-        if full_chronicle:
-            st.markdown("\n\n".join(f"- {line}" for line in full_chronicle))
-        else:
-            st.caption("Nessun evento rilevante generato in questa simulazione.")
+        st.markdown(chronicle_feed_html(full_chronicle, reverse=True), unsafe_allow_html=True)
+
+    st.markdown("### 📱 Card per i Social")
+    social_rows = [
+        ("⚽ Marcatori", f"{stats['home_goals']} - {stats['away_goals']}"),
+        ("🎯 Tiri in porta", f"{stats['home_sot']} - {stats['away_sot']}"),
+        ("🚩 Corner", f"{stats['home_corners']} - {stats['away_corners']}"),
+        (
+            "🟨🟥 Cartellini",
+            f"{stats['home_yellow'] + stats['home_red']} - {stats['away_yellow'] + stats['away_red']}",
+        ),
+        ("👟 Possesso palla", f"{result['possesso_home']}% - {result['possesso_away']}%"),
+    ]
+    render_social_share_card(
+        title=f"{home} vs {away}",
+        headline=result["final_score"],
+        subtitle="Simulazione Live Match · CalcioLab",
+        rows=social_rows,
+        accent="#00ff87",
+    )
 
     st.caption(
         "Simulazione illustrativa minuto-per-minuto: ad ogni avvio genera un esito diverso, "
@@ -3733,6 +3890,30 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
     note = escape(model.engine_note) if model.engine_note else "Global Power Rating calcolato."
     st.caption(note)
 
+    if model.home_win_prob >= model.away_win_prob and model.home_win_prob >= model.draw_prob:
+        pronostico_headline = f"🏆 Favorita: {home} ({model.home_win_prob:.0%})"
+        pronostico_accent = "#00ff87"
+    elif model.away_win_prob > model.home_win_prob and model.away_win_prob >= model.draw_prob:
+        pronostico_headline = f"🏆 Favorita: {away} ({model.away_win_prob:.0%})"
+        pronostico_accent = "#00e5ff"
+    else:
+        pronostico_headline = f"🤝 Equilibrio: Pareggio {model.draw_prob:.0%}"
+        pronostico_accent = "#00e5ff"
+
+    render_social_share_card(
+        title=f"{home} vs {away}",
+        headline=pronostico_headline,
+        subtitle="Pronostico CalcioLab · Poisson + Correzione Dixon-Coles",
+        rows=[
+            (f"🏠 Vittoria {home}", f"{model.home_win_prob:.0%}"),
+            ("🤝 Pareggio", f"{model.draw_prob:.0%}"),
+            (f"✈️ Vittoria {away}", f"{model.away_win_prob:.0%}"),
+            ("⚽ xG Combinato Atteso", f"{model.home_lambda + model.away_lambda:.2f}"),
+            ("📈 Global Power Rating", f"{model.home_rating:.0f} - {model.away_rating:.0f}"),
+        ],
+        accent=pronostico_accent,
+    )
+
     (
         tab_poisson,
         tab_goal_markets,
@@ -3897,13 +4078,21 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
 
 DARK_THEME_CSS = """
 <style>
+/* ==========================================================================
+   CalcioLab · Dark Gaming Theme (stile EA Sports FC / TV Broadcast)
+   Restyling puramente estetico (CSS + wrapper HTML via st.markdown): non
+   tocca alcuna logica di calcolo (Dixon-Coles, Monte Carlo, Kelly, Multi
+   Esito, Simulatore Live) — solo la presentazione visiva dei componenti.
+   ========================================================================== */
 :root {
-    --clab-bg: #0f1420;
-    --clab-card: #171e2e;
-    --clab-border: #2a3348;
-    --clab-accent: #22d3ee;
-    --clab-text: #e2e8f0;
-    --clab-muted: #94a3b8;
+    --clab-bg: #0e1117;
+    --clab-bg-2: #161b22;
+    --clab-card: rgba(22, 27, 34, 0.72);
+    --clab-border: rgba(0, 255, 135, 0.22);
+    --clab-accent: #00ff87;
+    --clab-accent-2: #00e5ff;
+    --clab-text: #e6edf3;
+    --clab-muted: #8b949e;
 }
 
 html, body, [class*="css"] {
@@ -3911,24 +4100,34 @@ html, body, [class*="css"] {
 }
 
 .stApp {
-    background: radial-gradient(circle at top left, #131a2b 0%, var(--clab-bg) 55%);
+    background:
+        radial-gradient(circle at 8% 0%, rgba(0, 255, 135, 0.06) 0%, transparent 45%),
+        radial-gradient(circle at 92% 12%, rgba(0, 229, 255, 0.06) 0%, transparent 45%),
+        linear-gradient(180deg, var(--clab-bg-2) 0%, var(--clab-bg) 60%);
     color: var(--clab-text);
 }
 
 section[data-testid="stSidebar"] {
-    background: #0b0f19;
+    background: #0a0d12;
     border-right: 1px solid var(--clab-border);
+}
+
+h1, h2, h3, h4, h5 {
+    font-family: "Inter", "Segoe UI", -apple-system, sans-serif;
+    letter-spacing: 0.01em;
 }
 
 .league-tag {
     display: inline-block;
     padding: 4px 14px;
     border-radius: 999px;
-    background: rgba(34, 211, 238, 0.12);
-    color: var(--clab-accent);
+    background: rgba(0, 229, 255, 0.12);
+    border: 1px solid rgba(0, 229, 255, 0.35);
+    color: var(--clab-accent-2);
     font-size: 0.8rem;
-    font-weight: 600;
-    letter-spacing: 0.02em;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
     margin-bottom: 10px;
 }
 
@@ -3941,37 +4140,48 @@ section[data-testid="stSidebar"] {
 
 .vs-badge {
     text-align: center;
-    font-weight: 800;
+    font-weight: 900;
     font-size: 1.1rem;
-    color: var(--clab-muted);
+    color: var(--clab-bg);
     margin-top: 34px;
-    border: 1px solid var(--clab-border);
     border-radius: 999px;
     padding: 6px 0;
-    background: var(--clab-card);
+    background: linear-gradient(135deg, var(--clab-accent), var(--clab-accent-2));
+    box-shadow: 0 0 18px rgba(0, 255, 135, 0.35);
 }
 
+/* Card "vetro" (glassmorphism) riutilizzata dalle metric-card esistenti */
 .metric-card {
-    background: linear-gradient(160deg, var(--clab-card) 0%, #131a2b 100%);
+    background: linear-gradient(160deg, var(--clab-card) 0%, rgba(14, 17, 23, 0.85) 100%);
     border: 1px solid var(--clab-border);
     border-radius: 16px;
     padding: 16px 14px;
     margin-bottom: 14px;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+    backdrop-filter: blur(10px);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.metric-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 26px rgba(0, 255, 135, 0.12);
 }
 
 .metric-card-label {
     font-size: 0.78rem;
     color: var(--clab-muted);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.05em;
     margin-bottom: 6px;
 }
 
 .metric-card-value {
-    font-size: 1.5rem;
+    font-size: 1.55rem;
     font-weight: 800;
-    color: var(--clab-accent);
+    background: linear-gradient(135deg, var(--clab-accent), var(--clab-accent-2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
 }
 
 div[data-testid="stMetric"] {
@@ -3979,7 +4189,8 @@ div[data-testid="stMetric"] {
     border: 1px solid var(--clab-border);
     border-radius: 16px;
     padding: 14px 10px;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+    backdrop-filter: blur(10px);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
 }
 
 table {
@@ -3988,7 +4199,7 @@ table {
 }
 
 thead tr {
-    background: #1c2438;
+    background: #1c2333;
     color: var(--clab-text);
 }
 
@@ -3998,6 +4209,246 @@ tbody tr {
 
 td, th {
     padding: 8px 10px !important;
+}
+
+/* --------------------------------------------------------------------
+   Tabellone stile Match TV / Broadcast (Simulatore Live)
+   -------------------------------------------------------------------- */
+.scoreboard-wrap {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    background: linear-gradient(135deg, rgba(0, 255, 135, 0.08), rgba(0, 229, 255, 0.08));
+    border: 1px solid var(--clab-accent);
+    border-radius: 20px;
+    padding: 22px 18px;
+    margin: 14px 0 22px 0;
+    backdrop-filter: blur(12px);
+    box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5), 0 0 24px rgba(0, 255, 135, 0.08);
+}
+
+.scoreboard-team {
+    flex: 1;
+    text-align: center;
+    min-width: 0;
+}
+
+.scoreboard-team-name {
+    font-size: 1.25rem;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--clab-text);
+    overflow-wrap: break-word;
+}
+
+.scoreboard-team-tag {
+    font-size: 0.68rem;
+    color: var(--clab-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    margin-top: 2px;
+}
+
+.scoreboard-center {
+    text-align: center;
+    padding: 0 12px;
+}
+
+.scoreboard-score {
+    font-size: 3.1rem;
+    font-weight: 900;
+    letter-spacing: 0.04em;
+    font-variant-numeric: tabular-nums;
+    background: linear-gradient(135deg, var(--clab-accent), var(--clab-accent-2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    line-height: 1;
+}
+
+.scoreboard-minute-badge {
+    display: inline-block;
+    margin-top: 10px;
+    padding: 4px 16px;
+    border-radius: 999px;
+    background: #000;
+    border: 1px solid var(--clab-accent);
+    color: var(--clab-accent);
+    font-weight: 800;
+    font-family: "Courier New", monospace;
+    letter-spacing: 0.06em;
+    font-size: 0.8rem;
+    animation: clab-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes clab-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(0, 255, 135, 0.45); }
+    50% { box-shadow: 0 0 0 7px rgba(0, 255, 135, 0); }
+}
+
+/* --------------------------------------------------------------------
+   Barre di confronto visivo (Visual Stat Bars)
+   -------------------------------------------------------------------- */
+.stat-bar-row {
+    margin-bottom: 16px;
+}
+
+.stat-bar-values {
+    display: flex;
+    justify-content: space-between;
+    font-weight: 800;
+    font-size: 0.92rem;
+    margin-bottom: 5px;
+    color: var(--clab-text);
+    font-variant-numeric: tabular-nums;
+}
+
+.stat-bar-track {
+    display: flex;
+    width: 100%;
+    height: 10px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: #1c2333;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.stat-bar-home {
+    background: linear-gradient(90deg, var(--clab-accent-2), var(--clab-accent));
+    height: 100%;
+}
+
+.stat-bar-away {
+    background: linear-gradient(90deg, #ff8a00, #ff2e63);
+    height: 100%;
+}
+
+.stat-bar-label {
+    text-align: center;
+    font-size: 0.72rem;
+    color: var(--clab-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-top: 4px;
+}
+
+/* --------------------------------------------------------------------
+   Feed di Cronaca stile Social / Ticker
+   -------------------------------------------------------------------- */
+.chronicle-feed {
+    max-height: 300px;
+    overflow-y: auto;
+    background: rgba(13, 17, 23, 0.75);
+    border: 1px solid rgba(0, 229, 255, 0.28);
+    border-radius: 14px;
+    padding: 6px 16px;
+    backdrop-filter: blur(8px);
+}
+
+.chronicle-feed::-webkit-scrollbar {
+    width: 6px;
+}
+
+.chronicle-feed::-webkit-scrollbar-thumb {
+    background: rgba(0, 229, 255, 0.35);
+    border-radius: 6px;
+}
+
+.chronicle-item {
+    padding: 7px 0;
+    border-bottom: 1px dashed rgba(255, 255, 255, 0.07);
+    font-size: 0.9rem;
+    color: var(--clab-text);
+}
+
+.chronicle-item:last-child {
+    border-bottom: none;
+}
+
+.chronicle-item.goal {
+    color: var(--clab-accent);
+    font-weight: 800;
+}
+
+.chronicle-item.red {
+    color: #ff4d4f;
+    font-weight: 800;
+}
+
+.chronicle-item.yellow {
+    color: #ffd60a;
+    font-weight: 700;
+}
+
+/* --------------------------------------------------------------------
+   Box "Scheda Social Share"
+   -------------------------------------------------------------------- */
+.social-share-card {
+    border-radius: 20px;
+    padding: 22px 24px;
+    background: linear-gradient(160deg, rgba(22, 27, 34, 0.92), rgba(14, 17, 23, 0.96));
+    border: 1px solid var(--social-accent, var(--clab-accent));
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+    margin-top: 18px;
+    backdrop-filter: blur(10px);
+}
+
+.social-share-title {
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--social-accent, var(--clab-accent));
+    font-weight: 800;
+}
+
+.social-share-headline {
+    font-size: 1.75rem;
+    font-weight: 900;
+    color: #ffffff;
+    margin: 8px 0 4px 0;
+}
+
+.social-share-subtitle {
+    font-size: 0.85rem;
+    color: var(--clab-muted);
+    margin-bottom: 14px;
+}
+
+.social-share-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.social-share-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 0.88rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    padding-bottom: 6px;
+}
+
+.social-share-row-label {
+    color: var(--clab-muted);
+}
+
+.social-share-row-value {
+    color: var(--clab-text);
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+
+.social-share-footer {
+    margin-top: 14px;
+    font-size: 0.68rem;
+    color: #484f58;
+    text-align: right;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
 }
 </style>
 """
