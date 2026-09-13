@@ -3335,6 +3335,39 @@ def compute_kelly_rows_from_session(model: MatchModel, home: str, away: str) -> 
     ]
 
 
+def render_match_banner_compact(league: str, home: str, away: str, crests: dict[str, str]) -> None:
+    """🦇 Compact Gotham-style Match Banner: a self-contained obsidian card
+    with the league name and the Home vs Away team names/crests. Meant to
+    be dropped at the top of a tab (e.g. Monte Carlo Simulator) so the
+    match context stays visible even if a screen recording starts mid-page
+    or is cropped to a single tab, without depending on the shared page
+    header higher up."""
+    home_crest = crests.get(home)
+    away_crest = crests.get(away)
+    home_crest_html = (
+        f'<img src="{escape(home_crest)}" class="mc-match-banner-crest" />'
+        if home_crest
+        else '<div class="mc-match-banner-crest-placeholder">🛡️</div>'
+    )
+    away_crest_html = (
+        f'<img src="{escape(away_crest)}" class="mc-match-banner-crest" />'
+        if away_crest
+        else '<div class="mc-match-banner-crest-placeholder">🛡️</div>'
+    )
+    st.markdown(
+        '<div class="mc-match-banner">'
+        f'<div class="mc-match-banner-league">{escape(league)}</div>'
+        '<div class="mc-match-banner-row">'
+        f'<div class="mc-match-banner-team">{home_crest_html}'
+        f'<div class="mc-match-banner-name">{escape(home)}</div></div>'
+        '<div class="mc-match-banner-vs">VS</div>'
+        f'<div class="mc-match-banner-team">{away_crest_html}'
+        f'<div class="mc-match-banner-name">{escape(away)}</div></div>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
 def render_monte_carlo_computing_hud(total_paths: int = 10_000, duration_seconds: float = 2.6) -> None:
     """⚙️ 'Computing' HUD shown while the 10,000 Monte Carlo paths run: a
     canvas-based digital-rain backdrop (Electric Blue glyphs) with an
@@ -4306,6 +4339,8 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
             "consistent with the 1X2 forecast shown in the Poisson tab."
         )
 
+        render_match_banner_compact(league, home, away, crests)
+
         if st.session_state.get("montecarlo_teams") != (home, away):
             # Selected teams changed: the previous simulation is no longer
             # relevant to the match currently being analyzed.
@@ -4787,6 +4822,79 @@ td, th {
     text-align: right;
     letter-spacing: 0.05em;
     text-transform: uppercase;
+}
+
+/* --------------------------------------------------------------------
+   Monte Carlo · Compact Match Banner (pre-simulation, screen-recording ready)
+   -------------------------------------------------------------------- */
+.mc-match-banner {
+    background: #050505;
+    border: 1px solid #00e5ff;
+    border-radius: 14px;
+    padding: 14px 18px;
+    margin: 10px 0 16px 0;
+    box-shadow: 0 0 24px rgba(0, 229, 255, 0.15);
+    backdrop-filter: blur(8px);
+}
+
+.mc-match-banner-league {
+    font-family: "Courier New", monospace;
+    font-size: 0.68rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: #00e5ff;
+    text-align: center;
+    margin-bottom: 10px;
+    opacity: 0.85;
+}
+
+.mc-match-banner-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+}
+
+.mc-match-banner-team {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.mc-match-banner-crest {
+    width: 40px;
+    height: 40px;
+    object-fit: contain;
+}
+
+.mc-match-banner-crest-placeholder {
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.4rem;
+    opacity: 0.6;
+}
+
+.mc-match-banner-name {
+    font-weight: 800;
+    font-size: 0.95rem;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    color: #e0e0e0;
+    text-align: center;
+    overflow-wrap: break-word;
+}
+
+.mc-match-banner-vs {
+    font-weight: 900;
+    font-size: 0.85rem;
+    color: #00e5ff;
+    text-shadow: 0 0 8px rgba(0, 229, 255, 0.6);
 }
 
 /* --------------------------------------------------------------------
