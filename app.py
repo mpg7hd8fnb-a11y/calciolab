@@ -15,14 +15,15 @@ import pandas as pd
 import plotly.express as px
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from scipy.stats import poisson
 
 
-APP_PASSWORD = "calcio2026"
+APP_PASSWORD = "wayne2026"
 
 
 LEAGUES: dict[str, list[str]] = {
-    "Italia · Serie A": [
+    "Italy · Serie A": [
         "Atalanta",
         "Bologna",
         "Cagliari",
@@ -44,7 +45,7 @@ LEAGUES: dict[str, list[str]] = {
         "Udinese",
         "Venezia",
     ],
-    "Italia · Serie B": [
+    "Italy · Serie B": [
         "Avellino",
         "Bari",
         "Catanzaro",
@@ -66,7 +67,7 @@ LEAGUES: dict[str, list[str]] = {
         "Vicenza",
         "Virtus Entella",
     ],
-    "Inghilterra · Premier League": [
+    "England · Premier League": [
         "Arsenal",
         "Aston Villa",
         "Bournemouth",
@@ -88,7 +89,7 @@ LEAGUES: dict[str, list[str]] = {
         "Sunderland",
         "Tottenham",
     ],
-    "Inghilterra · EFL Championship": [
+    "England · EFL Championship": [
         "Birmingham City",
         "Blackburn Rovers",
         "Bristol City",
@@ -114,7 +115,7 @@ LEAGUES: dict[str, list[str]] = {
         "Watford",
         "West Bromwich Albion",
     ],
-    "Spagna · La Liga": [
+    "Spain · La Liga": [
         "Alavés",
         "Athletic Bilbao",
         "Atlético Madrid",
@@ -136,7 +137,7 @@ LEAGUES: dict[str, list[str]] = {
         "Valencia",
         "Villarreal",
     ],
-    "Spagna · Segunda División": [
+    "Spain · Segunda División": [
         "Albacete",
         "Almería",
         "Burgos",
@@ -160,27 +161,27 @@ LEAGUES: dict[str, list[str]] = {
         "Valladolid",
         "Levante",
     ],
-    "Germania · Bundesliga": [
+    "Germany · Bundesliga": [
         "Augsburg",
         "Bayer Leverkusen",
-        "Bayern Monaco",
+        "Bayern Munich",
         "Borussia Dortmund",
         "Borussia Mönchengladbach",
         "Eintracht Francoforte",
         "Elversberg",
         "Friburgo",
         "Hoffenheim",
-        "Amburgo",
-        "Colonia",
+        "Hamburg",
+        "Cologne",
         "Mainz",
         "Paderborn",
         "RB Lipsia",
         "Schalke 04",
-        "Stoccarda",
+        "Stuttgart",
         "Union Berlino",
         "Werder Brema",
     ],
-    "Germania · 2. Bundesliga": [
+    "Germany · 2. Bundesliga": [
         "Arminia Bielefeld",
         "Bochum",
         "Braunschweig",
@@ -195,12 +196,12 @@ LEAGUES: dict[str, list[str]] = {
         "Kaiserslautern",
         "Karlsruhe",
         "Magdeburgo",
-        "Norimberga",
+        "Nuremberg",
         "Paderborn",
         "Preußen Münster",
         "Schalke 04",
     ],
-    "Francia · Ligue 1": [
+    "France · Ligue 1": [
         "Angers",
         "Auxerre",
         "Brest",
@@ -209,18 +210,18 @@ LEAGUES: dict[str, list[str]] = {
         "Lens",
         "Lille",
         "Lorient",
-        "Lione",
-        "Marsiglia",
+        "Lyon",
+        "Marseille",
         "Monaco",
-        "Nizza",
+        "Nice",
         "Paris FC",
         "PSG",
         "Rennes",
-        "Strasburgo",
-        "Tolosa",
+        "Strasbourg",
+        "Toulouse",
         "Troyes",
     ],
-    "Francia · Ligue 2": [
+    "France · Ligue 2": [
         "Amiens",
         "Annecy",
         "Bastia",
@@ -240,7 +241,7 @@ LEAGUES: dict[str, list[str]] = {
         "Saint-Étienne",
         "Troyes",
     ],
-    "Paesi Bassi · Eredivisie": [
+    "Netherlands · Eredivisie": [
         "ADO Den Haag",
         "Ajax",
         "AZ Alkmaar",
@@ -260,7 +261,7 @@ LEAGUES: dict[str, list[str]] = {
         "Utrecht",
         "Willem II",
     ],
-    "Portogallo · Primeira Liga": [
+    "Portugal · Primeira Liga": [
         "Académico de Viseu",
         "Alverca",
         "Arouca",
@@ -280,12 +281,12 @@ LEAGUES: dict[str, list[str]] = {
         "Sporting CP",
         "Vitória de Guimarães",
     ],
-    "Europa · UEFA Champions League": [
+    "Europe · UEFA Champions League": [
         "Arsenal",
         "Aston Villa",
         "Atlético Madrid",
         "Barcelona",
-        "Bayern Monaco",
+        "Bayern Munich",
         "Borussia Dortmund",
         "Chelsea",
         "Club Brugge",
@@ -310,36 +311,36 @@ LEAGUES: dict[str, list[str]] = {
         "Shakhtar Donetsk",
         "Slavia Praga",
         "Sporting CP",
-        "Stoccarda",
+        "Stuttgart",
         "Villarreal",
     ],
 }
 
 
 TOP_DIVISIONS = {
-    "Italia · Serie A",
-    "Inghilterra · Premier League",
-    "Spagna · La Liga",
-    "Germania · Bundesliga",
-    "Francia · Ligue 1",
-    "Paesi Bassi · Eredivisie",
-    "Portogallo · Primeira Liga",
+    "Italy · Serie A",
+    "England · Premier League",
+    "Spain · La Liga",
+    "Germany · Bundesliga",
+    "France · Ligue 1",
+    "Netherlands · Eredivisie",
+    "Portugal · Primeira Liga",
     # La Champions League riunisce club di nazioni diverse: va trattata come
     # massima serie a tutti gli effetti (il DIZIONARIO FASCE DI FORZA non
     # dipende comunque dalla lega selezionata, solo dal nome della squadra).
-    "Europa · UEFA Champions League",
+    "Europe · UEFA Champions League",
 }
 
 FOOTBALL_DATA_COMPETITIONS: dict[str, str] = {
-    "Italia · Serie A": "SA",
-    "Inghilterra · Premier League": "PL",
-    "Inghilterra · EFL Championship": "ELC",
-    "Spagna · La Liga": "PD",
-    "Germania · Bundesliga": "BL1",
-    "Francia · Ligue 1": "FL1",
-    "Paesi Bassi · Eredivisie": "DED",
-    "Portogallo · Primeira Liga": "PPL",
-    "Europa · UEFA Champions League": "CL",
+    "Italy · Serie A": "SA",
+    "England · Premier League": "PL",
+    "England · EFL Championship": "ELC",
+    "Spain · La Liga": "PD",
+    "Germany · Bundesliga": "BL1",
+    "France · Ligue 1": "FL1",
+    "Netherlands · Eredivisie": "DED",
+    "Portugal · Primeira Liga": "PPL",
+    "Europe · UEFA Champions League": "CL",
 }
 
 # Football-Data.org uses the current season when no season filter is sent.
@@ -360,29 +361,29 @@ MICRO_EVENT_BASELINES: dict[str, dict[str, float]] = {
 }
 
 PROMOTED_TEAMS = {
-    # Italia · Serie A
+    # Italy · Serie A
     "Venezia",
     "Frosinone",
     "Monza",
-    # Inghilterra · Premier League
+    # England · Premier League
     "Coventry City",
     "Ipswich Town",
     "Hull City",
-    # Spagna · La Liga
+    # Spain · La Liga
     "Racing Santander",
     "Deportivo La Coruña",
     "Málaga",
-    # Germania · Bundesliga
+    # Germany · Bundesliga
     "Schalke 04",
     "Elversberg",
     "Paderborn",
-    # Francia · Ligue 1
+    # France · Ligue 1
     "Troyes",
     "Le Mans",
-    # Paesi Bassi · Eredivisie
+    # Netherlands · Eredivisie
     "ADO Den Haag",
     "SC Cambuur",
-    # Portogallo · Primeira Liga
+    # Portugal · Primeira Liga
     "Académico de Viseu",
     "Marítimo",
 }
@@ -475,11 +476,11 @@ TEAM_TIER_DEFAULT = 3
 (Base Rating 1480) — MAI il vecchio default piatto 1500."""
 
 TEAM_TIER_LABELS: dict[int, str] = {
-    1: "Tier 1 · Top/Titolo",
-    2: "Tier 2 · Europa",
-    3: "Tier 3 · Metà classifica",
-    4: "Tier 4 · Salvezza",
-    5: "Tier 5 · Neopromosse",
+    1: "Tier 1 · Title Contender",
+    2: "Tier 2 · European Spot",
+    3: "Tier 3 · Mid-Table",
+    4: "Tier 4 · Relegation Battle",
+    5: "Tier 5 · Newly Promoted",
 }
 
 # Chiavi in minuscolo: lookup_team_tier fa un matching per sottostringa (in
@@ -754,8 +755,8 @@ def season_label(season_start: int) -> str:
 def competition_season_status(league: str) -> str:
     season_start, teams, matches, _crests = fetch_competition_snapshot(league)
     if not matches and any(team_id < 0 for team_id, _ in teams):
-        return f"stagione {season_label(season_start)} · lista di riserva (API non disponibile)"
-    return f"stagione {season_label(season_start)} · corrente"
+        return f"season {season_label(season_start)} · fallback list (API unavailable)"
+    return f"season {season_label(season_start)} · current"
 
 
 def _get_football_data_api_key() -> str | None:
@@ -774,7 +775,7 @@ def _football_data_request(endpoint: str, params: dict[str, object] | None = Non
     api_key = _get_football_data_api_key()
     if not api_key:
         raise FootballDataError(
-            "Secret FOOTBALL_DATA_API_KEY non configurato. Aggiungilo prima di usare i dati live."
+            "FOOTBALL_DATA_API_KEY secret not configured. Add it before using live data."
         )
 
     try:
@@ -787,12 +788,12 @@ def _football_data_request(endpoint: str, params: dict[str, object] | None = Non
         response.raise_for_status()
         payload = response.json()
     except requests.RequestException as error:
-        raise FootballDataError(f"Connessione a Football-Data.org non riuscita: {error}") from error
+        raise FootballDataError(f"Connection to Football-Data.org failed: {error}") from error
     except ValueError as error:
-        raise FootballDataError("Football-Data.org ha restituito una risposta non valida.") from error
+        raise FootballDataError("Football-Data.org returned an invalid response.") from error
 
     if not isinstance(payload, dict):
-        raise FootballDataError("Risposta Football-Data.org inattesa.")
+        raise FootballDataError("Unexpected Football-Data.org response.")
     return payload
 
 
@@ -879,7 +880,7 @@ def fetch_competition_snapshot(
         teams = _parse_teams(teams_payload)
         if len(teams) < 2:
             raise FootballDataError(
-                f"Football-Data.org non ha restituito le squadre 2026/27 per {league}."
+                f"Football-Data.org did not return the 2026/27 teams for {league}."
             )
         crest_map = _parse_team_crests(teams_payload)
         return season_start, teams, _parse_finished_matches(matches_payload), crest_map
@@ -919,7 +920,7 @@ def _number(value: object) -> float | None:
 
 def _average(total: float, count: float, label: str, team_name: str) -> float:
     if count <= 0:
-        raise FootballDataError(f"Dati insufficienti per {label} di {team_name}.")
+        raise FootballDataError(f"Insufficient data for {label} of {team_name}.")
     return total / count
 
 
@@ -940,18 +941,18 @@ def fetch_previous_season_matches(league: str) -> tuple[dict[str, object], ...]:
 
 
 def calendar_frame(league: str) -> pd.DataFrame:
-    columns = ["Data", "Stato", "Casa", "Trasferta"]
+    columns = ["Date", "Status", "Home", "Away"]
     matches = sorted(
         fetch_league_matches(league),
         key=lambda match: str(match.get("utcDate", "")),
     )
     rows = []
     status_labels = {
-        "TIMED": "Programmata",
-        "SCHEDULED": "Da programmare",
-        "FINISHED": "Conclusa",
-        "POSTPONED": "Rinviata",
-        "CANCELED": "Annullata",
+        "TIMED": "Scheduled",
+        "SCHEDULED": "To Be Scheduled",
+        "FINISHED": "Finished",
+        "POSTPONED": "Postponed",
+        "CANCELED": "Cancelled",
     }
     for match in matches:
         home = match.get("homeTeam", {})
@@ -961,10 +962,10 @@ def calendar_frame(league: str) -> pd.DataFrame:
         date_value = str(match.get("utcDate", ""))
         rows.append(
             {
-                "Data": date_value[:16].replace("T", " "),
-                "Stato": status_labels.get(str(match.get("status", "")), str(match.get("status", ""))),
-                "Casa": home.get("name", ""),
-                "Trasferta": away.get("name", ""),
+                "Date": date_value[:16].replace("T", " "),
+                "Status": status_labels.get(str(match.get("status", "")), str(match.get("status", ""))),
+                "Home": home.get("name", ""),
+                "Away": away.get("name", ""),
             }
         )
     return pd.DataFrame(rows, columns=columns)
@@ -976,7 +977,7 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
     team_id = next((id_ for id_, name in team_map.items() if name == team_name), None)
     if team_id is None:
         raise FootballDataError(
-            f"La squadra {team_name} non è disponibile in Football-Data.org."
+            f"The team {team_name} is not available in Football-Data.org."
         )
 
     def _team_fixtures(matches: tuple[dict[str, object], ...]) -> list[dict[str, object]]:
@@ -1070,7 +1071,7 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
                 scored_values.extend((scored, conceded))
         if not scored_values:
             raise FootballDataError(
-                f"Football-Data.org non ha dati storici utilizzabili per {team_name}."
+                f"Football-Data.org has no usable historical data for {team_name}."
             )
         neutral_average = sum(scored_values) / len(scored_values)
         matches = 8.0
@@ -1194,45 +1195,45 @@ def build_match_model(
     # fetch_team_live_stats: stagione corrente 100%, precedente al massimo
     # PREVIOUS_SEASON_MAX_WEIGHT. -------------------------------------------
     home_goal_for = (
-        _average(home_stats.home_goals_for, home_stats.home_matches, "gol segnati in casa", home)
+        _average(home_stats.home_goals_for, home_stats.home_matches, "goals scored at home", home)
         if home_stats.home_matches
-        else _average(home_stats.goals_for, home_stats.matches, "gol segnati", home)
+        else _average(home_stats.goals_for, home_stats.matches, "goals scored", home)
     )
     home_goal_against = (
         _average(
             home_stats.home_goals_against,
             home_stats.home_matches,
-            "gol subiti in casa",
+            "goals conceded at home",
             home,
         )
         if home_stats.home_matches
-        else _average(home_stats.goals_against, home_stats.matches, "gol subiti", home)
+        else _average(home_stats.goals_against, home_stats.matches, "goals conceded", home)
     )
     away_goal_for = (
-        _average(away_stats.away_goals_for, away_stats.away_matches, "gol segnati in trasferta", away)
+        _average(away_stats.away_goals_for, away_stats.away_matches, "goals scored away", away)
         if away_stats.away_matches
-        else _average(away_stats.goals_for, away_stats.matches, "gol segnati", away)
+        else _average(away_stats.goals_for, away_stats.matches, "goals scored", away)
     )
     away_goal_against = (
         _average(
             away_stats.away_goals_against,
             away_stats.away_matches,
-            "gol subiti in trasferta",
+            "goals conceded away",
             away,
         )
         if away_stats.away_matches
-        else _average(away_stats.goals_against, away_stats.matches, "gol subiti", away)
+        else _average(away_stats.goals_against, away_stats.matches, "goals conceded", away)
     )
-    home_sot_raw = _average(home_stats.shots_on_target, home_stats.matches, "tiri in porta", home)
-    away_sot_raw = _average(away_stats.shots_on_target, away_stats.matches, "tiri in porta", away)
-    home_shots_raw = _average(home_stats.total_shots, home_stats.matches, "tiri totali", home)
-    away_shots_raw = _average(away_stats.total_shots, away_stats.matches, "tiri totali", away)
-    home_corners_raw = _average(home_stats.corners, home_stats.matches, "corner", home)
-    away_corners_raw = _average(away_stats.corners, away_stats.matches, "corner", away)
-    home_cards_raw = _average(home_stats.cards, home_stats.matches, "cartellini", home)
-    away_cards_raw = _average(away_stats.cards, away_stats.matches, "cartellini", away)
-    fouls = _average(home_stats.fouls, home_stats.matches, "falli", home)
-    fouls += _average(away_stats.fouls, away_stats.matches, "falli", away)
+    home_sot_raw = _average(home_stats.shots_on_target, home_stats.matches, "shots on target", home)
+    away_sot_raw = _average(away_stats.shots_on_target, away_stats.matches, "shots on target", away)
+    home_shots_raw = _average(home_stats.total_shots, home_stats.matches, "total shots", home)
+    away_shots_raw = _average(away_stats.total_shots, away_stats.matches, "total shots", away)
+    home_corners_raw = _average(home_stats.corners, home_stats.matches, "corners", home)
+    away_corners_raw = _average(away_stats.corners, away_stats.matches, "corners", away)
+    home_cards_raw = _average(home_stats.cards, home_stats.matches, "cards", home)
+    away_cards_raw = _average(away_stats.cards, away_stats.matches, "cards", away)
+    fouls = _average(home_stats.fouls, home_stats.matches, "fouls", home)
+    fouls += _average(away_stats.fouls, away_stats.matches, "fouls", away)
 
     # --- 2. DIZIONARIO FASCE DI FORZA + TRANSIZIONE DINAMICA (Dynamic Decay) --
     # Ogni squadra viene risolta in una Fascia di Forza tramite fuzzy matching
@@ -1361,33 +1362,33 @@ def build_match_model(
     engine_note = (
         f"{TEAM_TIER_LABELS[home_tier_number]} ({home}, rating {rating_finale_home:.0f}) "
         f"vs {TEAM_TIER_LABELS[away_tier_number]} ({away}, rating {rating_finale_away:.0f}) · "
-        f"Peso Fascia/Stats: {home}={home_tier_weight:.0%}/{home_stats_weight:.0%}, "
+        f"Tier/Stats Weight: {home}={home_tier_weight:.0%}/{home_stats_weight:.0%}, "
         f"{away}={away_tier_weight:.0%}/{away_stats_weight:.0%} · "
-        f"correzione Dixon-Coles ρ={DIXON_COLES_RHO:+.2f}"
+        f"Dixon-Coles correction ρ={DIXON_COLES_RHO:+.2f}"
     )
     if home_stats.recent_form:
-        engine_note += f" · forma {home}: {''.join(home_stats.recent_form)}"
+        engine_note += f" · {home} form: {''.join(home_stats.recent_form)}"
     if away_stats.recent_form:
-        engine_note += f" · forma {away}: {''.join(away_stats.recent_form)}"
+        engine_note += f" · {away} form: {''.join(away_stats.recent_form)}"
     if manual_factor_home:
-        engine_note += f" · slider {home}: {manual_factor_home:+.0%}"
+        engine_note += f" · {home} slider: {manual_factor_home:+.0%}"
     if manual_factor_away:
-        engine_note += f" · slider {away}: {manual_factor_away:+.0%}"
+        engine_note += f" · {away} slider: {manual_factor_away:+.0%}"
     if fatigue_attack_malus_home or fatigue_defense_malus_home:
         engine_note += (
-            f" · affaticamento {home}: attacco {fatigue_attack_malus_home:+.0%}/"
-            f"difesa {fatigue_defense_malus_home:+.0%}"
+            f" · {home} fatigue: attack {fatigue_attack_malus_home:+.0%}/"
+            f"defense {fatigue_defense_malus_home:+.0%}"
         )
     if fatigue_attack_malus_away or fatigue_defense_malus_away:
         engine_note += (
-            f" · affaticamento {away}: attacco {fatigue_attack_malus_away:+.0%}/"
-            f"difesa {fatigue_defense_malus_away:+.0%}"
+            f" · {away} fatigue: attack {fatigue_attack_malus_away:+.0%}/"
+            f"defense {fatigue_defense_malus_away:+.0%}"
         )
     if early_season:
         engine_note += (
-            f" · ⚠️ Antepost Tiering attivo: {home} {home_stats.current_season_matches} "
-            f"partite reali, {away} {away_stats.current_season_matches} partite reali "
-            f"(soglia piena confidenza: {EARLY_SEASON_MATCHDAY_THRESHOLD})"
+            f" · ⚠️ Antepost Tiering active: {home} {home_stats.current_season_matches} "
+            f"real matches, {away} {away_stats.current_season_matches} real matches "
+            f"(full-confidence threshold: {EARLY_SEASON_MATCHDAY_THRESHOLD})"
         )
 
     return MatchModel(
@@ -1430,7 +1431,7 @@ def fair_odds(probability: float) -> float:
 
 def micro_event_rows(model: MatchModel) -> list[dict[str, object]]:
     groups: list[tuple[str, float, Iterable[float]]] = [
-        ("Tiri totali partita", model.shots_total_lambda, (21.5, 23.5, 25.5)),
+        ("Total Match Shots", model.shots_total_lambda, (21.5, 23.5, 25.5)),
         (
             "Tiri in porta · Casa",
             model.home_shots_on_target_lambda,
@@ -1446,11 +1447,11 @@ def micro_event_rows(model: MatchModel) -> list[dict[str, object]]:
             model.shots_on_target_total_lambda,
             (7.5, 8.5, 9.5),
         ),
-        ("Corner totali match", model.corners_total_lambda, (7.5, 8.5, 9.5, 10.5)),
+        ("Total Match Corners", model.corners_total_lambda, (7.5, 8.5, 9.5, 10.5)),
         ("Cartellini · Casa", model.home_cards_lambda, (1.5, 2.5)),
         ("Cartellini · Trasferta", model.away_cards_lambda, (1.5, 2.5)),
         ("Cartellini · Totali match", model.cards_total_lambda, (3.5, 4.5, 5.5)),
-        ("Falli complessivi match", model.fouls_lambda, (22.5, 24.5, 26.5)),
+        ("Total Match Fouls", model.fouls_lambda, (22.5, 24.5, 26.5)),
     ]
     rows: list[dict[str, object]] = []
     for event, lam, lines in groups:
@@ -1458,11 +1459,11 @@ def micro_event_rows(model: MatchModel) -> list[dict[str, object]]:
             probability = over_probability(lam, line)
             rows.append(
                 {
-                    "Micro-evento": event,
-                    "Soglia": f"Over {line:.1f}",
-                    "Valore atteso": round(lam, 2),
-                    "Probabilità": probability,
-                    "Fair odds": fair_odds(probability),
+                    "Micro-Event": event,
+                    "Threshold": f"Over {line:.1f}",
+                    "Expected Value": round(lam, 2),
+                    "Probability": probability,
+                    "Fair Odds": fair_odds(probability),
                 }
             )
     return rows
@@ -1623,16 +1624,16 @@ def exact_score_matrix(goal_distribution: dict[str, object], grid_size: int = 5)
 
 
 def render_charts_dashboard_tab(model: MatchModel, home: str, away: str) -> None:
-    """📊 Dashboard Grafici & Micro-Eventi: colpo d'occhio visivo immediato
-    sulla distribuzione dei gol, sul mercato Goal/No Goal, sulla mappa dei
-    risultati esatti e sui Multigol — tutti alimentati dalla stessa matrice
-    Poisson bivariata + correzione Dixon-Coles già usata dalle schede
-    Pronostici, Statistiche Gol & Mercati e Simulatore Monte Carlo."""
+    """📊 Charts Dashboard & Micro-Events: an immediate visual snapshot of
+    the goal distribution, the Goal/No Goal market, the exact-score map and
+    the Multi-Goal ranges — all fed by the same bivariate Poisson matrix +
+    Dixon-Coles correction already used by the Forecast, Goal Stats &
+    Markets, and Monte Carlo Simulator tabs."""
     st.markdown(
-        "### 📊 Dashboard Grafici & Micro-Eventi\n"
-        "Colpo d'occhio immediato sulle probabilità di gol, calcolate dallo "
-        "stesso motore (Poisson bivariata + correzione Dixon-Coles) usato "
-        "nelle altre schede: nessun nuovo calcolo, solo grafici aggiuntivi."
+        "### 📊 Charts Dashboard & Micro-Events\n"
+        "An immediate visual snapshot of goal probabilities, calculated by "
+        "the same engine (bivariate Poisson + Dixon-Coles correction) used "
+        "in the other tabs: no new calculations, just additional charts."
     )
 
     goal_distribution = goal_distribution_probabilities(model)
@@ -1641,19 +1642,19 @@ def render_charts_dashboard_tab(model: MatchModel, home: str, away: str) -> None
     chart_col_1, chart_col_2 = st.columns(2)
 
     with chart_col_1:
-        st.markdown("##### ⚽ Distribuzione Gol Totali (partita)")
+        st.markdown("##### ⚽ Total Goals Distribution (match)")
         totals = goal_distribution["totals"]
-        labels = ["0 gol", "1 gol", "2 gol", "3 gol", "4 gol", "5+ gol"]
+        labels = ["0 goals", "1 goal", "2 goals", "3 goals", "4 goals", "5+ goals"]
         values = [
             totals[0], totals[1], totals[2], totals[3], totals[4], goal_distribution["five_plus"],
         ]
-        totals_frame = pd.DataFrame({"Gol totali": labels, "Probabilità": values})
+        totals_frame = pd.DataFrame({"Total Goals": labels, "Probability": values})
         totals_chart = px.bar(
             totals_frame,
-            x="Gol totali",
-            y="Probabilità",
-            text="Probabilità",
-            color="Probabilità",
+            x="Total Goals",
+            y="Probability",
+            text="Probability",
+            color="Probability",
             color_continuous_scale=["#1e3a5f", "#22d3ee"],
         )
         totals_chart.update_traces(texttemplate="%{text:.1%}", textposition="outside")
@@ -1666,22 +1667,22 @@ def render_charts_dashboard_tab(model: MatchModel, home: str, away: str) -> None
             font_color="#e2e8f0",
         )
         st.plotly_chart(totals_chart, use_container_width=True)
-        st.caption("Le barre coprono Under/Over 0.5-4.5 gol: base per valutare qualunque linea Under/Over.")
+        st.caption("The bars cover Under/Over 0.5-4.5 goals: a base for evaluating any Under/Over line.")
 
     with chart_col_2:
-        st.markdown("##### 🥅 Mercato Goal / No Goal")
+        st.markdown("##### 🥅 Goal / No Goal Market")
         gg_frame = pd.DataFrame(
             {
-                "Esito": ["Goal (GG)", "No Goal (NG)"],
-                "Probabilità": [goal_markets["goal_goal"], goal_markets["no_goal"]],
+                "Outcome": ["Goal (GG)", "No Goal (NG)"],
+                "Probability": [goal_markets["goal_goal"], goal_markets["no_goal"]],
             }
         )
         gg_chart = px.pie(
             gg_frame,
-            names="Esito",
-            values="Probabilità",
+            names="Outcome",
+            values="Probability",
             hole=0.55,
-            color="Esito",
+            color="Outcome",
             color_discrete_map={"Goal (GG)": "#16a34a", "No Goal (NG)": "#7f1d1d"},
         )
         gg_chart.update_traces(texttemplate="%{percent}", textinfo="label+percent")
@@ -1692,12 +1693,12 @@ def render_charts_dashboard_tab(model: MatchModel, home: str, away: str) -> None
             showlegend=False,
         )
         st.plotly_chart(gg_chart, use_container_width=True)
-        st.caption("Goal (GG) = entrambe le squadre segnano · No Goal (NG) = almeno una non segna.")
+        st.caption("Goal (GG) = both teams score · No Goal (NG) = at least one fails to score.")
 
-    st.markdown("##### 🗺️ Mappa dei Risultati Esatti (0-4 gol per squadra)")
+    st.markdown("##### 🗺️ Exact Score Map (0-4 goals per team)")
     st.caption(
-        "Matrice di probabilità (Poisson bivariata + correzione Dixon-Coles): "
-        "più il colore è intenso, più il risultato esatto è probabile."
+        "Probability matrix (bivariate Poisson + Dixon-Coles correction): "
+        "the more intense the color, the more likely the exact score."
     )
     score_matrix = exact_score_matrix(goal_distribution, grid_size=5)
     heatmap_chart = px.imshow(
@@ -1705,7 +1706,7 @@ def render_charts_dashboard_tab(model: MatchModel, home: str, away: str) -> None
         text_auto=".1%",
         color_continuous_scale="Viridis",
         aspect="auto",
-        labels={"color": "Probabilità"},
+        labels={"color": "Probability"},
     )
     heatmap_chart.update_layout(
         margin={"l": 10, "r": 10, "t": 20, "b": 10},
@@ -1717,17 +1718,17 @@ def render_charts_dashboard_tab(model: MatchModel, home: str, away: str) -> None
     heatmap_chart.update_xaxes(side="bottom")
     st.plotly_chart(heatmap_chart, use_container_width=True)
 
-    st.markdown("##### 🎯 Distribuzione Multigol")
+    st.markdown("##### 🎯 Multi-Goal Distribution")
     multigol = multigol_probabilities(goal_distribution)
     multigol_frame = pd.DataFrame(
-        {"Mercato": list(multigol.keys()), "Probabilità": list(multigol.values())}
+        {"Market": list(multigol.keys()), "Probability": list(multigol.values())}
     )
     multigol_chart = px.bar(
         multigol_frame,
-        x="Mercato",
-        y="Probabilità",
-        text="Probabilità",
-        color="Probabilità",
+        x="Market",
+        y="Probability",
+        text="Probability",
+        color="Probability",
         color_continuous_scale=["#3f1d5e", "#a855f7"],
     )
     multigol_chart.update_traces(texttemplate="%{text:.1%}", textposition="outside")
@@ -1741,14 +1742,14 @@ def render_charts_dashboard_tab(model: MatchModel, home: str, away: str) -> None
     )
     st.plotly_chart(multigol_chart, use_container_width=True)
     st.caption(
-        "Multigol X-Y = probabilità che il totale gol della partita sia compreso "
-        "nell'intervallo indicato (estremi inclusi)."
+        "Multi-Goal X-Y = probability that the match's total goals fall "
+        "within the indicated range (endpoints included)."
     )
 
     st.caption(
-        f"{home} vs {away} · xG combinato atteso {model.home_lambda + model.away_lambda:.2f} gol. "
-        "Grafici Plotly generati dalla stessa matrice Poisson/Dixon-Coles delle altre schede, "
-        "coerenti con la simulazione Monte Carlo."
+        f"{home} vs {away} · combined expected xG {model.home_lambda + model.away_lambda:.2f} goals. "
+        "Plotly charts generated from the same Poisson/Dixon-Coles matrix as the other tabs, "
+        "consistent with the Monte Carlo simulation."
     )
 
 
@@ -1762,19 +1763,19 @@ def render_charts_dashboard_tab(model: MatchModel, home: str, away: str) -> None
 # calcolo statistico introdotto, solo un nuovo modo di aggregare/consultare
 # le probabilità già prodotte dal motore.
 MULTI_ESITO_GROUPS: dict[str, list[str]] = {
-    "Gruppo A · Casa a zero (1-0, 2-0, 3-0)": ["1-0", "2-0", "3-0"],
-    "Gruppo B · Casa con gol subito (2-1, 3-1, 4-1)": ["2-1", "3-1", "4-1"],
-    "Gruppo C · Ospite a zero (0-1, 0-2, 0-3)": ["0-1", "0-2", "0-3"],
-    "Gruppo D · Pareggi principali (0-0, 1-1, 2-2)": ["0-0", "1-1", "2-2"],
-    "Gruppo E · Over/GOL Combo (2-1, 1-2, 2-2, 3-1, 1-3)": ["2-1", "1-2", "2-2", "3-1", "1-3"],
+    "Group A · Clean Sheet Home Win (1-0, 2-0, 3-0)": ["1-0", "2-0", "3-0"],
+    "Group B · Home Win Conceding (2-1, 3-1, 4-1)": ["2-1", "3-1", "4-1"],
+    "Group C · Clean Sheet Away Win (0-1, 0-2, 0-3)": ["0-1", "0-2", "0-3"],
+    "Group D · Main Draws (0-0, 1-1, 2-2)": ["0-0", "1-1", "2-2"],
+    "Group E · Over/Goal Combo (2-1, 1-2, 2-2, 3-1, 1-3)": ["2-1", "1-2", "2-2", "3-1", "1-3"],
 }
-"""Gruppi Multi Esito predefiniti: combinazioni popolari di risultati esatti
-su cui i bookmaker offrono spesso una quota unica ('multi gol/esito
-combinato'). Ogni voce elenca i punteggi 'Casa-Trasferta' inclusi nel gruppo."""
+"""Preset Multi-Outcome groups: popular combinations of exact scores on
+which bookmakers often offer a single odds ('combined multi-goal/outcome').
+Each entry lists the 'Home-Away' scores included in the group."""
 
-MULTI_ESITO_CUSTOM_LABEL = "🎯 Multi Esito Personalizzato"
-"""Voce speciale nel selettore che attiva il multiselect per la selezione
-manuale dei risultati esatti (vedi render_multi_esito_tab)."""
+MULTI_ESITO_CUSTOM_LABEL = "🎯 Custom Multi-Outcome"
+"""Special entry in the selector that activates the multiselect for manually
+picking exact scores (see render_multi_esito_tab)."""
 
 
 def exact_score_probability_map(model: MatchModel, max_goals: int = 6) -> dict[str, float]:
@@ -1805,24 +1806,24 @@ def multi_esito_score_grid_options(max_goals: int = 5) -> list[str]:
 
 
 def render_multi_esito_tab(model: MatchModel, home: str, away: str) -> None:
-    """🎯 Analizzatore Multi Esito & Value Bet: probabilità cumulata per
-    gruppi di risultati esatti (predefiniti o personalizzati), Quota Reale
-    Equa, confronto con la quota bookmaker inserita ed Expected Value, con
-    stake Kelly consigliato in caso di Value Bet. Riusa esclusivamente le
-    probabilità già calcolate dal motore Poisson + Dixon-Coles."""
+    """🎯 Multi-Outcome & Value Bet Analyzer: cumulative probability for
+    groups of exact scores (preset or custom), Fair Odds, comparison with
+    the entered bookmaker odds and Expected Value, with a suggested Kelly
+    stake in case of a Value Bet. Reuses exclusively the probabilities
+    already computed by the Poisson + Dixon-Coles engine."""
     st.markdown(
-        "### 🎯 Analizzatore Multi Esito & Value Bet\n"
-        "Somma la probabilità di più risultati esatti (Poisson bivariata + "
-        "correzione Dixon-Coles) in un unico 'Multi Esito', per confrontarla "
-        "con la quota reale offerta dal bookmaker su quello stesso mercato "
-        "combinato."
+        "### 🎯 Multi-Outcome & Value Bet Analyzer\n"
+        "Sums the probability of multiple exact scores (bivariate Poisson + "
+        "Dixon-Coles correction) into a single 'Multi-Outcome', to compare it "
+        "with the real odds offered by the bookmaker on that same combined "
+        "market."
     )
 
     score_map = exact_score_probability_map(model, max_goals=6)
 
     group_options = list(MULTI_ESITO_GROUPS) + [MULTI_ESITO_CUSTOM_LABEL]
     selected_group = st.selectbox(
-        "Seleziona un Gruppo Multi Esito",
+        "Select a Multi-Outcome Group",
         options=group_options,
         key="multi_esito_group",
     )
@@ -1830,30 +1831,30 @@ def render_multi_esito_tab(model: MatchModel, home: str, away: str) -> None:
     if selected_group == MULTI_ESITO_CUSTOM_LABEL:
         available_scores = multi_esito_score_grid_options(max_goals=5)
         selected_scores = st.multiselect(
-            "Multi Esito Personalizzato — scegli i risultati esatti da combinare",
+            "Custom Multi-Outcome — choose the exact scores to combine",
             options=available_scores,
             default=["1-0", "2-0"],
             key="multi_esito_custom_scores",
         )
     else:
         selected_scores = MULTI_ESITO_GROUPS[selected_group]
-        st.caption("Risultati inclusi nel gruppo: " + ", ".join(selected_scores))
+        st.caption("Scores included in the group: " + ", ".join(selected_scores))
 
     if not selected_scores:
-        st.info("Seleziona almeno un risultato esatto per calcolare la probabilità cumulata.")
+        st.info("Select at least one exact score to calculate the cumulative probability.")
         return
 
     p_totale = cumulative_group_probability(score_map, selected_scores)
     quota_reale = fair_odds(p_totale)
 
     bookmaker_odds = st.number_input(
-        "Quota Bookmaker per questo Multi Esito",
+        "Bookmaker Odds for this Multi-Outcome",
         min_value=1.01,
         max_value=200.0,
         value=2.20,
         step=0.01,
         key="multi_esito_bookmaker_odds",
-        help="Inserisci la quota reale offerta dal bookmaker sulla combinazione di risultati selezionata.",
+        help="Enter the real odds offered by the bookmaker on the selected combination of scores.",
     )
 
     ev_percent = expected_value_percent(p_totale, bookmaker_odds)
@@ -1861,13 +1862,13 @@ def render_multi_esito_tab(model: MatchModel, home: str, away: str) -> None:
 
     metric_col_1, metric_col_2, metric_col_3, metric_col_4 = st.columns(4)
     with metric_col_1:
-        st.metric("Probabilità Cumulata", f"{p_totale:.1%}")
+        st.metric("Cumulative Probability", f"{p_totale:.1%}")
     with metric_col_2:
-        st.metric("Quota Reale Equa", f"{quota_reale:.2f}")
+        st.metric("Fair Odds", f"{quota_reale:.2f}")
     with metric_col_3:
-        st.metric("Quota Bookmaker", f"{bookmaker_odds:.2f}")
+        st.metric("Bookmaker Odds", f"{bookmaker_odds:.2f}")
     with metric_col_4:
-        st.metric("Valore Atteso (EV)", f"{ev_percent:+.1f}%" if ev_percent is not None else "n/d")
+        st.metric("Expected Value (EV)", f"{ev_percent:+.1f}%" if ev_percent is not None else "n/a")
 
     if ev_percent is not None and ev_percent > 0 and stake_percent is not None:
         st.markdown(
@@ -1875,35 +1876,35 @@ def render_multi_esito_tab(model: MatchModel, home: str, away: str) -> None:
             'border-radius:16px;padding:18px 22px;margin-top:10px;'
             'box-shadow:0 6px 20px rgba(22,163,74,.35)">'
             '<div style="font-size:1.05rem;font-weight:800;letter-spacing:.02em">'
-            '✅ VALUE BET TROVATA!</div>'
+            '✅ VALUE BET FOUND!</div>'
             f'<div style="margin-top:8px;font-weight:600;font-size:.95rem">'
-            f'Probabilità algoritmo {p_totale:.1%} contro quota bookmaker {bookmaker_odds:.2f} '
-            f'(quota equa {quota_reale:.2f}) · EV {ev_percent:+.1f}% · '
-            f'<u>Stake consigliato (Quarter Kelly): {stake_percent:.1f}%</u> del bankroll'
+            f'Algorithm probability {p_totale:.1%} vs bookmaker odds {bookmaker_odds:.2f} '
+            f'(fair odds {quota_reale:.2f}) · EV {ev_percent:+.1f}% · '
+            f'<u>Suggested stake (Quarter Kelly): {stake_percent:.1f}%</u> of bankroll'
             '</div></div>',
             unsafe_allow_html=True,
         )
     else:
-        ev_text = f"{ev_percent:+.1f}%" if ev_percent is not None else "n/d"
+        ev_text = f"{ev_percent:+.1f}%" if ev_percent is not None else "n/a"
         st.markdown(
             '<div style="background:#3f1113;color:#fecaca;border-radius:16px;'
             'padding:18px 22px;margin-top:10px;border:1px solid #7f1d1d">'
             '<div style="font-size:1.05rem;font-weight:800;letter-spacing:.02em">'
-            '⛔ NESSUN VALORE (Sottoquota)</div>'
+            '⛔ NO VALUE (Underpriced)</div>'
             f'<div style="margin-top:8px;font-weight:600;font-size:.95rem">'
-            f'La quota bookmaker inserita ({bookmaker_odds:.2f}) non copre la probabilità '
-            f'stimata dal modello ({p_totale:.1%}, quota equa {quota_reale:.2f}) · EV {ev_text}'
+            f'The entered bookmaker odds ({bookmaker_odds:.2f}) do not cover the probability '
+            f'estimated by the model ({p_totale:.1%}, fair odds {quota_reale:.2f}) · EV {ev_text}'
             '</div></div>',
             unsafe_allow_html=True,
         )
 
-    with st.expander("📋 Dettaglio probabilità dei singoli risultati nel gruppo"):
+    with st.expander("📋 Probability detail for each score in the group"):
         detail_frame = pd.DataFrame(
             [
                 {
-                    "Risultato": score,
-                    "Probabilità": f"{score_map.get(score, 0.0):.1%}",
-                    "Fair odds": f"{fair_odds(score_map.get(score, 0.0)):.2f}",
+                    "Result": score,
+                    "Probability": f"{score_map.get(score, 0.0):.1%}",
+                    "Fair Odds": f"{fair_odds(score_map.get(score, 0.0)):.2f}",
                 }
                 for score in selected_scores
             ]
@@ -1911,9 +1912,9 @@ def render_multi_esito_tab(model: MatchModel, home: str, away: str) -> None:
         st.dataframe(detail_frame, use_container_width=True, hide_index=True)
 
     st.caption(
-        f"{home} vs {away} · Fractional Kelly Stake = ((Probabilità × Quota) - 1) / (Quota - 1) × 100, "
-        f"scalato al {KELLY_FRACTION:.0%} (Quarter Kelly), coerente con il Calcolatore Kelly della "
-        "scheda Value Betting & Heatmap."
+        f"{home} vs {away} · Fractional Kelly Stake = ((Probability × Odds) - 1) / (Odds - 1) × 100, "
+        f"scaled to {KELLY_FRACTION:.0%} (Quarter Kelly), consistent with the Kelly Calculator in "
+        "the Value Betting & Heatmap tab."
     )
 
 
@@ -1964,18 +1965,17 @@ def simulate_single_match(
     away_sot_lambda: float | None = None,
     corners_lambda: float | None = None,
 ) -> dict[str, object]:
-    """Simula UNA singola partita minuto per minuto (1'-90'), in stile
-    'match engine' arcade: `alpha_home`/`alpha_away` sono i gol attesi (xG)
-    di ciascuna squadra per l'intera partita (intensità offensiva), mentre
-    `beta_home`/`beta_away` sono i cartellini attesi (intensità
-    disciplinare/aggressività). Ad ogni minuto viene tirata a sorte la
-    generazione di tiri, tiri in porta/gol, corner e cartellini, con
-    probabilità Bernoulliane calibrate su questi parametri (approssimazione
-    per diradamento di un processo di Poisson). Restituisce la cronaca
-    completa degli eventi e il tabellino statistico finale. Ogni chiamata
-    produce un esito diverso (nessun seed fisso) — è un modulo illustrativo,
-    non una fonte di probabilità: quelle restano il motore Poisson/Dixon-
-    Coles usato dalle altre schede."""
+    """Simulates ONE single match minute by minute (1'-90'), arcade
+    'match engine' style: `alpha_home`/`alpha_away` are each team's expected
+    goals (xG) for the whole match (offensive intensity), while
+    `beta_home`/`beta_away` are expected cards (disciplinary
+    intensity/aggressiveness). Every minute, shots, shots on target/goals,
+    corners and cards are rolled at random, with Bernoulli probabilities
+    calibrated on these parameters (an approximation via thinning of a
+    Poisson process). Returns the full event chronicle and the final
+    statistical box score. Every call produces a different outcome (no fixed
+    seed) — this is an illustrative module, not a source of probabilities:
+    those remain the Poisson/Dixon-Coles engine used by the other tabs."""
     home_shots_lambda = home_shots_lambda if home_shots_lambda and home_shots_lambda > 0 else alpha_home * LIVE_SHOTS_PER_GOAL_RATIO
     away_shots_lambda = away_shots_lambda if away_shots_lambda and away_shots_lambda > 0 else alpha_away * LIVE_SHOTS_PER_GOAL_RATIO
     home_sot_lambda = home_sot_lambda if home_sot_lambda and home_sot_lambda > 0 else alpha_home * LIVE_SOT_PER_GOAL_RATIO
@@ -2019,17 +2019,17 @@ def simulate_single_match(
                     stats["home_goals"] += 1
                     events.append({
                         "minute": minute, "team": "home", "type": "goal",
-                        "text": f"{minute}' ⚽ GOL! {home_team} segna! ({stats['home_goals']}-{stats['away_goals']})",
+                        "text": f"{minute}' ⚽ GOAL! {home_team} score! ({stats['home_goals']}-{stats['away_goals']})",
                     })
                 else:
                     events.append({
                         "minute": minute, "team": "home", "type": "shot_on_target",
-                        "text": f"{minute}' 🎯 Tiro in porta di {home_team}, para il portiere!",
+                        "text": f"{minute}' 🎯 Shot on target by {home_team}, saved by the keeper!",
                     })
             else:
                 events.append({
                     "minute": minute, "team": "home", "type": "shot_off_target",
-                    "text": f"{minute}' 📤 Tiro fuori di {home_team}.",
+                    "text": f"{minute}' 📤 Shot off target by {home_team}.",
                 })
 
         if random.random() < per_minute_away_shot:
@@ -2040,31 +2040,31 @@ def simulate_single_match(
                     stats["away_goals"] += 1
                     events.append({
                         "minute": minute, "team": "away", "type": "goal",
-                        "text": f"{minute}' ⚽ GOL! {away_team} segna! ({stats['home_goals']}-{stats['away_goals']})",
+                        "text": f"{minute}' ⚽ GOAL! {away_team} score! ({stats['home_goals']}-{stats['away_goals']})",
                     })
                 else:
                     events.append({
                         "minute": minute, "team": "away", "type": "shot_on_target",
-                        "text": f"{minute}' 🎯 Tiro in porta di {away_team}, respinto!",
+                        "text": f"{minute}' 🎯 Shot on target by {away_team}, parried away!",
                     })
             else:
                 events.append({
                     "minute": minute, "team": "away", "type": "shot_off_target",
-                    "text": f"{minute}' 📤 Tiro fuori di {away_team}.",
+                    "text": f"{minute}' 📤 Shot off target by {away_team}.",
                 })
 
         if random.random() < per_minute_corner:
             if random.random() < dominance_home:
                 stats["home_corners"] += 1
                 events.append({
-                    "minute": minute, "team": "home", "type": "corner",
-                    "text": f"{minute}' 🚩 Calcio d'angolo per {home_team}.",
+                    "minute": minute, "team": "home", "type": "corners",
+                    "text": f"{minute}' 🚩 Corner kick for {home_team}.",
                 })
             else:
                 stats["away_corners"] += 1
                 events.append({
-                    "minute": minute, "team": "away", "type": "corner",
-                    "text": f"{minute}' 🚩 Calcio d'angolo per {away_team}.",
+                    "minute": minute, "team": "away", "type": "corners",
+                    "text": f"{minute}' 🚩 Corner kick for {away_team}.",
                 })
 
         if random.random() < per_minute_card_home:
@@ -2072,13 +2072,13 @@ def simulate_single_match(
                 stats["home_red"] += 1
                 events.append({
                     "minute": minute, "team": "home", "type": "red",
-                    "text": f"{minute}' 🟥 ESPULSIONE! Rosso diretto per {home_team}!",
+                    "text": f"{minute}' 🟥 SENT OFF! Straight red card for {home_team}!",
                 })
             else:
                 stats["home_yellow"] += 1
                 events.append({
                     "minute": minute, "team": "home", "type": "yellow",
-                    "text": f"{minute}' 🟨 Ammonizione per {home_team}.",
+                    "text": f"{minute}' 🟨 Yellow card for {home_team}.",
                 })
 
         if random.random() < per_minute_card_away:
@@ -2086,13 +2086,13 @@ def simulate_single_match(
                 stats["away_red"] += 1
                 events.append({
                     "minute": minute, "team": "away", "type": "red",
-                    "text": f"{minute}' 🟥 ESPULSIONE! Rosso diretto per {away_team}!",
+                    "text": f"{minute}' 🟥 SENT OFF! Straight red card for {away_team}!",
                 })
             else:
                 stats["away_yellow"] += 1
                 events.append({
                     "minute": minute, "team": "away", "type": "yellow",
-                    "text": f"{minute}' 🟨 Ammonizione per {away_team}.",
+                    "text": f"{minute}' 🟨 Yellow card for {away_team}.",
                 })
 
     possesso_home = round(clamp(50 + (dominance_home - 0.5) * 60, 25, 75))
@@ -2233,7 +2233,7 @@ def render_social_share_card(
     headline: str,
     subtitle: str,
     rows: Sequence[tuple[str, str]],
-    accent: str = "#00ff87",
+    accent: str = "#00E5FF",
 ) -> None:
     """📱 Box 'Scheda Social Share': card compatta e ad alto impatto visivo,
     pensata per essere fotografata/catturata in uno screenshot da condividere
@@ -2252,7 +2252,7 @@ def render_social_share_card(
         f'<div class="social-share-headline">{escape(headline)}</div>'
         f'<div class="social-share-subtitle">{escape(subtitle)}</div>'
         f'<div class="social-share-rows">{rows_html}</div>'
-        '<div class="social-share-footer">Generato con CalcioLab ⚽📊</div>'
+        '<div class="social-share-footer">Powered by WayneLab 🦇📊</div>'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -2306,32 +2306,32 @@ def render_three_way_probability_bar(
 
 
 def render_live_match_tab(model: MatchModel, home: str, away: str) -> None:
-    """🎮 Simulatore Live Match (Stile FC/FIFA): pulsante 'Avvia Simulazione
-    Partita' che genera e anima minuto per minuto UNA singola partita
-    (cronaca diretta + tabellino finale), con possibilità di rigiocarla
-    all'infinito tramite 'Simula di Nuovo'. Modulo di intrattenimento
-    indipendente dal motore analitico: le probabilità di riferimento
-    restano quelle Poisson/Dixon-Coles delle altre schede."""
+    """🎮 Live Match Simulator (FC/FIFA Style): 'Start Match Simulation'
+    button that generates and animates ONE single match minute by minute
+    (live chronicle + final scoreboard), with the option to replay it
+    endlessly via 'Simulate Again'. Entertainment module independent from
+    the analytical engine: the reference probabilities remain the
+    Poisson/Dixon-Coles ones from the other tabs."""
     st.markdown(
-        "### 🎮 Simulatore Live Match (Stile FC/FIFA)\n"
-        "Guarda una singola partita 'giocarsi' minuto per minuto, con cronaca "
-        "diretta ed esito diverso ogni volta. I gol e i cartellini attesi "
-        "sono calibrati sullo stesso Global Power Rating del match — ma "
-        "questa è una simulazione illustrativa di UNA partita, non "
-        "sostituisce i pronostici Poisson/Dixon-Coles/Monte Carlo delle "
-        "altre schede."
+        "### 🎮 Live Match Simulator (FC/FIFA Style)\n"
+        "Watch a single match 'play out' minute by minute, with a live "
+        "chronicle and a different outcome every time. Expected goals and "
+        "cards are calibrated on the same match Global Power Rating — but "
+        "this is an illustrative simulation of ONE match, it does not "
+        "replace the Poisson/Dixon-Coles/Monte Carlo forecasts from the "
+        "other tabs."
     )
 
     if st.session_state.get("live_match_teams") != (home, away):
-        # Cambio di squadre selezionate: la simulazione precedente non è più
-        # pertinente, va ripulita per evitare di mostrare un tabellino di un
-        # match diverso da quello attualmente analizzato.
+        # Selected teams changed: the previous simulation is no longer
+        # relevant and must be cleared to avoid showing a scoreboard for a
+        # different match than the one currently being analyzed.
         st.session_state.pop("live_match_result", None)
         st.session_state.pop("live_match_chronicle", None)
         st.session_state["live_match_teams"] = (home, away)
 
     has_previous_result = "live_match_result" in st.session_state
-    button_label = "🔄 Simula di Nuovo" if has_previous_result else "▶️ Avvia Simulazione Partita"
+    button_label = "🔄 Simulate Again" if has_previous_result else "▶️ Start Match Simulation"
     run_clicked = st.button(button_label, type="primary", key="live_match_run_button")
 
     if run_clicked:
@@ -2344,8 +2344,8 @@ def render_live_match_tab(model: MatchModel, home: str, away: str) -> None:
         scoreboard_placeholder.markdown(
             broadcast_scoreboard_html(home, away, 0, 0, "0' LIVE"), unsafe_allow_html=True
         )
-        progress_bar = st.progress(0, text="Calcio d'inizio! 0'")
-        st.markdown("#### 📻 Cronaca Diretta")
+        progress_bar = st.progress(0, text="Kick-off! 0'")
+        st.markdown("#### 📻 Live Feed")
         ticker = st.empty()
         ticker.markdown(chronicle_feed_html([]), unsafe_allow_html=True)
 
@@ -2364,10 +2364,10 @@ def render_live_match_tab(model: MatchModel, home: str, away: str) -> None:
                 broadcast_scoreboard_html(home, away, live_home_goals, live_away_goals, f"{minute}' LIVE"),
                 unsafe_allow_html=True,
             )
-            progress_bar.progress(minute / 90, text=f"⏱️ Minuto {minute}'")
+            progress_bar.progress(minute / 90, text=f"⏱️ Minute {minute}'")
             ticker.markdown(chronicle_feed_html(chronicle[-8:]), unsafe_allow_html=True)
             time.sleep(LIVE_MATCH_ANIMATION_DELAY_SECONDS)
-        progress_bar.progress(1.0, text="🏁 Triplice fischio! 90'+")
+        progress_bar.progress(1.0, text="🏁 Full time! 90'+")
         scoreboard_placeholder.markdown(
             broadcast_scoreboard_html(home, away, live_home_goals, live_away_goals, "FT 90'+"),
             unsafe_allow_html=True,
@@ -2377,57 +2377,57 @@ def render_live_match_tab(model: MatchModel, home: str, away: str) -> None:
         st.session_state["live_match_chronicle"] = chronicle
 
     if "live_match_result" not in st.session_state:
-        st.info("Premi '▶️ Avvia Simulazione Partita' per far scendere in campo le due squadre.")
+        st.info("Press '▶️ Start Match Simulation' to send the two teams onto the pitch.")
         return
 
     result = st.session_state["live_match_result"]
     stats = result["stats"]
 
     st.markdown("---")
-    st.markdown("## 🏆 Tabellino Finale")
+    st.markdown("## 🏆 Final Scoreboard")
     render_broadcast_scoreboard(home, away, stats["home_goals"], stats["away_goals"], "FT 90'+")
 
-    st.markdown("#### 📊 Confronto Statistiche")
-    render_stat_bar("Tiri Totali", stats["home_shots"], stats["away_shots"])
-    render_stat_bar("Tiri in Porta", stats["home_sot"], stats["away_sot"])
-    render_stat_bar("Calci d'Angolo", stats["home_corners"], stats["away_corners"])
-    render_stat_bar("Cartellini Gialli", stats["home_yellow"], stats["away_yellow"])
-    render_stat_bar("Cartellini Rossi", stats["home_red"], stats["away_red"])
+    st.markdown("#### 📊 Stat Comparison")
+    render_stat_bar("Total Shots", stats["home_shots"], stats["away_shots"])
+    render_stat_bar("Shots on Target", stats["home_sot"], stats["away_sot"])
+    render_stat_bar("Corner Kicks", stats["home_corners"], stats["away_corners"])
+    render_stat_bar("Yellow Cards", stats["home_yellow"], stats["away_yellow"])
+    render_stat_bar("Red Cards", stats["home_red"], stats["away_red"])
     render_stat_bar(
-        "Possesso Palla",
+        "Ball Possession",
         result["possesso_home"],
         result["possesso_away"],
         f"{result['possesso_home']}%",
         f"{result['possesso_away']}%",
     )
 
-    with st.expander("📜 Cronaca completa (90 minuti)", expanded=False):
+    with st.expander("📜 Full Chronicle (90 minutes)", expanded=False):
         full_chronicle = st.session_state.get("live_match_chronicle", [])
         st.markdown(chronicle_feed_html(full_chronicle, reverse=True), unsafe_allow_html=True)
 
-    st.markdown("### 📱 Card per i Social")
+    st.markdown("### 📱 Social Share Card")
     social_rows = [
-        ("⚽ Marcatori", f"{stats['home_goals']} - {stats['away_goals']}"),
-        ("🎯 Tiri in porta", f"{stats['home_sot']} - {stats['away_sot']}"),
-        ("🚩 Corner", f"{stats['home_corners']} - {stats['away_corners']}"),
+        ("⚽ Scorers", f"{stats['home_goals']} - {stats['away_goals']}"),
+        ("🎯 Shots on target", f"{stats['home_sot']} - {stats['away_sot']}"),
+        ("🚩 Corners", f"{stats['home_corners']} - {stats['away_corners']}"),
         (
-            "🟨🟥 Cartellini",
+            "🟨🟥 Cards",
             f"{stats['home_yellow'] + stats['home_red']} - {stats['away_yellow'] + stats['away_red']}",
         ),
-        ("👟 Possesso palla", f"{result['possesso_home']}% - {result['possesso_away']}%"),
+        ("👟 Ball possession", f"{result['possesso_home']}% - {result['possesso_away']}%"),
     ]
     render_social_share_card(
         title=f"{home} vs {away}",
         headline=result["final_score"],
-        subtitle="Simulazione Live Match · CalcioLab",
+        subtitle="Live Match Simulation · WayneLab",
         rows=social_rows,
-        accent="#00ff87",
+        accent="#00e5ff",
     )
 
     st.caption(
-        "Simulazione illustrativa minuto-per-minuto: ad ogni avvio genera un esito diverso, "
-        "calibrato sui gol e cartellini attesi del match, ma NON è la fonte delle probabilità "
-        "usate nelle altre schede (Poisson/Dixon-Coles restano il riferimento analitico)."
+        "Illustrative minute-by-minute simulation: every run generates a different outcome, "
+        "calibrated on the match's expected goals and cards, but it is NOT the source of the "
+        "probabilities used in the other tabs (Poisson/Dixon-Coles remain the analytical reference)."
     )
 
 
@@ -2463,12 +2463,12 @@ def kelly_stake_percent(probability: float, decimal_odds: float | None, fraction
 
 
 def value_bet_badge(stake_percent: float | None) -> tuple[str, str, str]:
-    """Badge Value Bet: (etichetta, colore_sfondo, colore_testo).
-    - Stake > 0% → 'VALUE BET DETECTED' (verde).
-    - Stake <= 0% → 'NO VALUE' (grigio neutro).
-    - Nessuna quota inserita → badge non mostrato (None gestito dal chiamante)."""
+    """Value Bet Badge: (label, background_color, text_color).
+    - Stake > 0% → 'VALUE BET DETECTED' (green).
+    - Stake <= 0% → 'NO VALUE' (neutral gray).
+    - No odds entered → badge not shown (None handled by the caller)."""
     if stake_percent is None:
-        return "QUOTA NON INSERITA", "#1e293b", "#94a3b8"
+        return "ODDS NOT ENTERED", "#1e293b", "#94a3b8"
     if stake_percent > 0:
         return "VALUE BET DETECTED", "#16a34a", "#052e16"
     return "NO VALUE", "#475569", "#e2e8f0"
@@ -2535,15 +2535,15 @@ def rank_value_bets(
 ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4"
 
 ODDS_API_SPORT_KEYS: dict[str, str] = {
-    "Italia · Serie A": "soccer_italy_serie_a",
-    "Inghilterra · Premier League": "soccer_epl",
-    "Inghilterra · EFL Championship": "soccer_efl_champ",
-    "Spagna · La Liga": "soccer_spain_la_liga",
-    "Germania · Bundesliga": "soccer_germany_bundesliga",
-    "Francia · Ligue 1": "soccer_france_ligue_one",
-    "Paesi Bassi · Eredivisie": "soccer_netherlands_eredivisie",
-    "Portogallo · Primeira Liga": "soccer_portugal_primeira_liga",
-    "Europa · UEFA Champions League": "soccer_uefa_champs_league",
+    "Italy · Serie A": "soccer_italy_serie_a",
+    "England · Premier League": "soccer_epl",
+    "England · EFL Championship": "soccer_efl_champ",
+    "Spain · La Liga": "soccer_spain_la_liga",
+    "Germany · Bundesliga": "soccer_germany_bundesliga",
+    "France · Ligue 1": "soccer_france_ligue_one",
+    "Netherlands · Eredivisie": "soccer_netherlands_eredivisie",
+    "Portugal · Primeira Liga": "soccer_portugal_primeira_liga",
+    "Europe · UEFA Champions League": "soccer_uefa_champs_league",
 }
 """Mappatura campionato interno -> sport key di The Odds API. Se la lega
 selezionata non è mappata, get_live_odds ripiega automaticamente su None
@@ -2656,14 +2656,14 @@ def get_live_odds(
 
 
 def render_bookmaker_comparison_table(our_fair_odds: float, bookmaker_odds: dict[str, float]) -> None:
-    """Tabella 'Confronto Bookmaker': la quota equa del nostro algoritmo
-    (fair odds, inverso della probabilità stimata) affiancata alle quote
-    reali recuperate da The Odds API, con il bookmaker che offre la quota
-    più alta evidenziato in verde (il maggior valore per chi scommette)."""
+    """'Bookmaker Comparison' table: our algorithm's fair odds (inverse of
+    the estimated probability) side by side with the real odds retrieved
+    from The Odds API, with the bookmaker offering the highest odds
+    highlighted in green (the best value for the bettor)."""
     if not bookmaker_odds:
         return
     best_bookmaker = max(bookmaker_odds, key=bookmaker_odds.get)
-    rows_html = [f"<tr><td>🤖 Il nostro algoritmo (fair odds)</td><td>{our_fair_odds:.2f}</td></tr>"]
+    rows_html = [f"<tr><td>🤖 Our algorithm (fair odds)</td><td>{our_fair_odds:.2f}</td></tr>"]
     for bookmaker, price in sorted(bookmaker_odds.items(), key=lambda item: item[1], reverse=True):
         row_style = (
             ' style="background:#16a34a;color:#052e16;font-weight:700"'
@@ -2674,7 +2674,7 @@ def render_bookmaker_comparison_table(our_fair_odds: float, bookmaker_odds: dict
         rows_html.append(f"<tr{row_style}><td>{escape(bookmaker)}{marker}</td><td>{price:.2f}</td></tr>")
     st.markdown(
         '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse">'
-        "<thead><tr><th>Fonte</th><th>Quota</th></tr></thead>"
+        "<thead><tr><th>Source</th><th>Odds</th></tr></thead>"
         f"<tbody>{''.join(rows_html)}</tbody></table></div>",
         unsafe_allow_html=True,
     )
@@ -2692,37 +2692,37 @@ def double_chance_probabilities(model: MatchModel) -> dict[str, float]:
 
 
 def heatmap_market_probabilities(model: MatchModel, home: str, away: str) -> list[dict[str, object]]:
-    """Elenco dei mercati (1X2, Doppia Chance, Over/Under 1.5-2.5-3.5,
-    Goal/No Goal) con la relativa probabilità, per la Heatmap ad alta
-    probabilità. Riusa goal_market_probabilities/double_chance_probabilities,
-    già coerenti con Dixon-Coles."""
+    """List of markets (1X2, Double Chance, Over/Under 1.5-2.5-3.5, Goal/No
+    Goal) with their probability, for the high-probability Heatmap. Reuses
+    goal_market_probabilities/double_chance_probabilities, already
+    consistent with Dixon-Coles."""
     markets = goal_market_probabilities(model)
     dc = double_chance_probabilities(model)
     return [
-        {"Mercato": f"1 · {home}", "Probabilità": model.home_win_prob},
-        {"Mercato": "X · Pareggio", "Probabilità": model.draw_prob},
-        {"Mercato": f"2 · {away}", "Probabilità": model.away_win_prob},
-        {"Mercato": "1X · Doppia Chance", "Probabilità": dc["1X"]},
-        {"Mercato": "X2 · Doppia Chance", "Probabilità": dc["X2"]},
-        {"Mercato": "12 · Doppia Chance", "Probabilità": dc["12"]},
-        {"Mercato": "Over 1.5", "Probabilità": markets["total_over"][1.5]},
-        {"Mercato": "Under 1.5", "Probabilità": 1 - markets["total_over"][1.5]},
-        {"Mercato": "Over 2.5", "Probabilità": markets["total_over"][2.5]},
-        {"Mercato": "Under 2.5", "Probabilità": 1 - markets["total_over"][2.5]},
-        {"Mercato": "Over 3.5", "Probabilità": markets["total_over"][3.5]},
-        {"Mercato": "Under 3.5", "Probabilità": 1 - markets["total_over"][3.5]},
-        {"Mercato": "Goal (GG)", "Probabilità": markets["goal_goal"]},
-        {"Mercato": "No Goal (NG)", "Probabilità": markets["no_goal"]},
-        {"Mercato": f"Over 1.5 {home}", "Probabilità": markets["home_over"][1.5]},
-        {"Mercato": f"Over 1.5 {away}", "Probabilità": markets["away_over"][1.5]},
+        {"Market": f"1 · {home}", "Probability": model.home_win_prob},
+        {"Market": "X · Draw", "Probability": model.draw_prob},
+        {"Market": f"2 · {away}", "Probability": model.away_win_prob},
+        {"Market": "1X · Double Chance", "Probability": dc["1X"]},
+        {"Market": "X2 · Double Chance", "Probability": dc["X2"]},
+        {"Market": "12 · Double Chance", "Probability": dc["12"]},
+        {"Market": "Over 1.5", "Probability": markets["total_over"][1.5]},
+        {"Market": "Under 1.5", "Probability": 1 - markets["total_over"][1.5]},
+        {"Market": "Over 2.5", "Probability": markets["total_over"][2.5]},
+        {"Market": "Under 2.5", "Probability": 1 - markets["total_over"][2.5]},
+        {"Market": "Over 3.5", "Probability": markets["total_over"][3.5]},
+        {"Market": "Under 3.5", "Probability": 1 - markets["total_over"][3.5]},
+        {"Market": "Goal (GG)", "Probability": markets["goal_goal"]},
+        {"Market": "No Goal (NG)", "Probability": markets["no_goal"]},
+        {"Market": f"Over 1.5 {home}", "Probability": markets["home_over"][1.5]},
+        {"Market": f"Over 1.5 {away}", "Probability": markets["away_over"][1.5]},
     ]
 
 
 def top_heatmap_markets(model: MatchModel, home: str, away: str, top_n: int = 5) -> list[dict[str, object]]:
-    """Top N mercati per probabilità decrescente, per la griglia visiva
-    compatta in cima alla scheda Value Betting & Heatmap."""
+    """Top N markets by descending probability, for the compact visual grid
+    at the top of the Value Betting & Heatmap tab."""
     rows = heatmap_market_probabilities(model, home, away)
-    return sorted(rows, key=lambda row: row["Probabilità"], reverse=True)[:top_n]
+    return sorted(rows, key=lambda row: row["Probability"], reverse=True)[:top_n]
 
 
 def heatmap_color(probability: float) -> tuple[str, str]:
@@ -2759,9 +2759,9 @@ FATIGUE_TRAVEL_DEFENSE_MALUS = 0.03
 """Trasferta europea/viaggio lungo: malus aggiuntivo difesa +3%."""
 
 TURNOVER_LEVELS: dict[str, float] = {
-    "Nessun turnover": 0.0,
-    "Turnover parziale (-3%)": -0.03,
-    "Turnover massiccio (-7%)": -0.07,
+    "No rotation": 0.0,
+    "Partial rotation (-3%)": -0.03,
+    "Heavy rotation (-7%)": -0.07,
 }
 """Malus attacco per il Livello di Turnover Previsto in formazione."""
 
@@ -2816,20 +2816,20 @@ def fatigue_turnover_index(rest_days: int, european_away_trip: bool, turnover_le
 
 
 def fatigue_alert_message(team: str, fatigue: dict[str, object]) -> str | None:
-    """Messaggio di allerta ('⚠️ Allerta Affaticamento: <squadra> ...') se il
-    malus complessivo sull'attacco supera FATIGUE_ALERT_THRESHOLD (5% in
-    valore assoluto), altrimenti None (nessun badge da mostrare)."""
+    """Alert message ('⚠️ Fatigue Alert: <team> ...') shown when the overall
+    attack malus exceeds FATIGUE_ALERT_THRESHOLD (5% in absolute value),
+    otherwise None (no badge to display)."""
     if abs(fatigue["attack_malus"]) < FATIGUE_ALERT_THRESHOLD:
         return None
     details = []
     if fatigue["rest_days"] <= 4:
-        details.append(f"ha giocato {fatigue['rest_days']} giorni fa")
+        details.append(f"played {fatigue['rest_days']} days ago")
     if fatigue["has_travel_malus"]:
-        details.append("in trasferta europea")
-    if fatigue["turnover_level"] != "Nessun turnover":
-        details.append(f"turnover previsto: {fatigue['turnover_level'].split(' (')[0].lower()}")
-    detail_text = " · ".join(details) if details else "condizione fisica non ottimale"
-    return f"⚠️ Allerta Affaticamento: {team} {detail_text} (malus attacco {fatigue['attack_malus']:+.0%})"
+        details.append("on a European away trip")
+    if fatigue["turnover_level"] != "No rotation":
+        details.append(f"rotation expected: {fatigue['turnover_level'].split(' (')[0].lower()}")
+    detail_text = " · ".join(details) if details else "not at full physical condition"
+    return f"⚠️ Fatigue Alert: {team} {detail_text} (attack malus {fatigue['attack_malus']:+.0%})"
 
 
 # ==============================================================================
@@ -2846,7 +2846,7 @@ BANKROLL_CONFIG_PATH = "bankroll_config.json"
 BANKROLL_LOG_COLUMNS = [
     "timestamp", "league", "match", "market", "odds", "stake", "stake_type", "outcome", "profit",
 ]
-BET_OUTCOMES = ("In Corso", "Vinta", "Persa")
+BET_OUTCOMES = ("Pending", "Won", "Lost")
 DEFAULT_INITIAL_BANKROLL = 1000.0
 
 
@@ -2892,9 +2892,9 @@ def save_bankroll_log(df: pd.DataFrame) -> None:
 def compute_bet_profit(odds: float, stake: float, outcome: str) -> float:
     """Profitto/perdita di una singola giocata: stake*(quota-1) se vinta,
     -stake se persa, 0 se ancora 'In Corso' (non ancora conteggiata nel ROI)."""
-    if outcome == "Vinta":
+    if outcome == "Won":
         return stake * (odds - 1)
-    if outcome == "Persa":
+    if outcome == "Lost":
         return -stake
     return 0.0
 
@@ -2920,9 +2920,9 @@ def append_bet(league: str, match: str, market: str, odds: float, stake: float, 
 
 
 def recompute_and_save_log(df: pd.DataFrame) -> pd.DataFrame:
-    """Ricalcola la colonna 'profit' per ogni riga (es. dopo che l'utente ha
-    aggiornato manualmente un esito da 'In Corso' a 'Vinta'/'Persa' nella
-    tabella) e ripersiste lo storico aggiornato."""
+    """Recomputes the 'profit' column for every row (e.g. after the user
+    manually updated an outcome from 'Pending' to 'Won'/'Lost' in the
+    table) and re-persists the updated history."""
     df = df.copy()
     df["profit"] = [
         compute_bet_profit(float(row["odds"]), float(row["stake"]), str(row["outcome"]))
@@ -2940,11 +2940,11 @@ def bankroll_metrics(df: pd.DataFrame, initial_bankroll: float) -> dict[str, flo
             "total_staked": 0.0, "total_profit": 0.0, "roi": 0.0,
             "win_rate": 0.0, "current_bankroll": initial_bankroll, "settled_count": 0,
         }
-    settled = df[df["outcome"].isin(["Vinta", "Persa"])]
+    settled = df[df["outcome"].isin(["Won", "Lost"])]
     total_staked = float(settled["stake"].sum()) if not settled.empty else 0.0
     total_profit = float(settled["profit"].sum()) if not settled.empty else 0.0
     roi = (total_profit / total_staked * 100) if total_staked > 0 else 0.0
-    win_rate = (float((settled["outcome"] == "Vinta").sum()) / len(settled) * 100) if len(settled) > 0 else 0.0
+    win_rate = (float((settled["outcome"] == "Won").sum()) / len(settled) * 100) if len(settled) > 0 else 0.0
     return {
         "total_staked": total_staked,
         "total_profit": total_profit,
@@ -2958,14 +2958,14 @@ def bankroll_metrics(df: pd.DataFrame, initial_bankroll: float) -> dict[str, flo
 def bankroll_timeline(df: pd.DataFrame, initial_bankroll: float) -> pd.DataFrame:
     """Serie storica del Bankroll (per il grafico st.line_chart): valore
     dopo ciascuna giocata conclusa, in ordine cronologico."""
-    settled = df[df["outcome"].isin(["Vinta", "Persa"])].copy()
+    settled = df[df["outcome"].isin(["Won", "Lost"])].copy()
     if settled.empty:
-        return pd.DataFrame({"Giocata": [0], "Bankroll (€)": [initial_bankroll]})
+        return pd.DataFrame({"Bet": [0], "Bankroll (€)": [initial_bankroll]})
     settled = settled.sort_values("timestamp")
     settled["Bankroll (€)"] = initial_bankroll + settled["profit"].astype(float).cumsum()
-    settled["Giocata"] = range(1, len(settled) + 1)
-    timeline = settled[["Giocata", "Bankroll (€)"]].reset_index(drop=True)
-    starting_point = pd.DataFrame({"Giocata": [0], "Bankroll (€)": [initial_bankroll]})
+    settled["Bet"] = range(1, len(settled) + 1)
+    timeline = settled[["Bet", "Bankroll (€)"]].reset_index(drop=True)
+    starting_point = pd.DataFrame({"Bet": [0], "Bankroll (€)": [initial_bankroll]})
     return pd.concat([starting_point, timeline], ignore_index=True)
 
 
@@ -3003,41 +3003,42 @@ def build_match_summary_prompt(
     fatigue_away: dict[str, object] | None,
     kelly_rows: list[tuple[str, float, float | None]],
 ) -> str:
-    """Costruisce il prompt testuale con tutti i dati già calcolati dal
-    motore (Power Rating, xG, 1X2, affaticamento, value bet), da passare
-    all'LLM per generare il Report Analitico Intelligence."""
-    value_bets = [f"{label} (prob. {prob:.0%}, stake consigliato {stake:.1f}%)" for label, prob, stake in kelly_rows if stake is not None and stake > 0]
+    """Builds the text prompt with all the data already computed by the
+    engine (Power Rating, xG, 1X2, fatigue, value bets), to pass to the LLM
+    to generate the Intelligence Analysis Report."""
+    value_bets = [f"{label} (prob. {prob:.0%}, suggested stake {stake:.1f}%)" for label, prob, stake in kelly_rows if stake is not None and stake > 0]
     lines = [
-        f"Partita: {home} vs {away}.",
+        f"Match: {home} vs {away}.",
         f"Power Rating: {home} {model.home_rating:.0f}, {away} {model.away_rating:.0f}.",
-        f"xG attesi: {home} {model.home_lambda:.2f}, {away} {model.away_lambda:.2f}.",
-        f"Probabilità 1X2: 1={model.home_win_prob:.0%} X={model.draw_prob:.0%} 2={model.away_win_prob:.0%}.",
+        f"Expected xG: {home} {model.home_lambda:.2f}, {away} {model.away_lambda:.2f}.",
+        f"1X2 Probability: 1={model.home_win_prob:.0%} X={model.draw_prob:.0%} 2={model.away_win_prob:.0%}.",
     ]
     if model.manual_factor_home or model.manual_factor_away:
         lines.append(
-            f"Slider manuali (Mercato+Infortuni): {home} {model.manual_factor_home:+.0%}, "
+            f"Manual sliders (Market+Injuries): {home} {model.manual_factor_home:+.0%}, "
             f"{away} {model.manual_factor_away:+.0%}."
         )
     if fatigue_home and abs(float(fatigue_home.get("attack_malus", 0.0))) >= FATIGUE_ALERT_THRESHOLD:
-        lines.append(f"Affaticamento {home}: malus attacco {float(fatigue_home['attack_malus']):+.0%}.")
+        lines.append(f"Fatigue {home}: attack malus {float(fatigue_home['attack_malus']):+.0%}.")
     if fatigue_away and abs(float(fatigue_away.get("attack_malus", 0.0))) >= FATIGUE_ALERT_THRESHOLD:
-        lines.append(f"Affaticamento {away}: malus attacco {float(fatigue_away['attack_malus']):+.0%}.")
-    lines.append("Value bet rilevate: " + ("; ".join(value_bets) if value_bets else "nessuna al momento."))
+        lines.append(f"Fatigue {away}: attack malus {float(fatigue_away['attack_malus']):+.0%}.")
+    lines.append("Value bets detected: " + ("; ".join(value_bets) if value_bets else "none at the moment."))
     lines.append(
-        "Scrivi un Report Analitico Intelligence di 3-4 punti chiave in italiano, in linguaggio "
-        "naturale e professionale, in formato elenco puntato Markdown, per un utente che deve "
-        "decidere se scommettere su questa partita. Copri: 1) confronto Power Rating/favorita, "
-        "2) impatto di slider manuali/affaticamento se presenti, 3) eventuali value bet rilevate, "
-        "4) sintesi del pronostico 1X2/xG. Non inventare dati non forniti."
+        "Write a 3-4 key-point Intelligence Analysis Report in English, in natural "
+        "and professional language, as a Markdown bullet list, for a user who has "
+        "to decide whether to bet on this match. Cover: 1) Power Rating/favorite "
+        "comparison, 2) impact of manual sliders/fatigue if present, 3) any value "
+        "bets detected, 4) summary of the 1X2/xG forecast. Do not invent data that "
+        "was not provided."
     )
     return "\n".join(lines)
 
 
 def generate_match_summary_ai(prompt: str, provider: str, api_key: str) -> str | None:
-    """Tenta la generazione del report via LLM (Anthropic/OpenAI/Gemini).
-    Ritorna None per qualunque errore (libreria non installata, rete, quota,
-    chiave non valida...), così il chiamante ripiega sul template Python
-    senza mai far crashare l'app."""
+    """Attempts to generate the report via LLM (Anthropic/OpenAI/Gemini).
+    Returns None for any error (library not installed, network, quota,
+    invalid key...), so the caller falls back to the Python template
+    without ever crashing the app."""
     try:
         if provider == "anthropic":
             import anthropic
@@ -3081,9 +3082,9 @@ def generate_match_summary_template(
     fatigue_away: dict[str, object] | None,
     kelly_rows: list[tuple[str, float, float | None]],
 ) -> str:
-    """Fallback senza LLM: genera 3-4 punti chiave in linguaggio naturale
-    incrociando i dati già calcolati dal motore, con un generatore di
-    template testuale condizionale in Python (nessuna chiamata esterna)."""
+    """Fallback without LLM: generates 3-4 key points in natural language by
+    cross-referencing data already computed by the engine, with a
+    conditional Python text-template generator (no external calls)."""
     bullets: list[str] = []
 
     favorite = home if model.home_rating >= model.away_rating else away
@@ -3091,8 +3092,8 @@ def generate_match_summary_template(
     favorite_rating = model.home_rating if favorite == home else model.away_rating
     underdog_rating = model.away_rating if favorite == home else model.home_rating
     bullets.append(
-        f"**Power Rating**: {favorite} parte favorita con un Power Rating di {favorite_rating:.0f} "
-        f"contro il {underdog_rating:.0f} di {underdog}."
+        f"**Power Rating**: {favorite} is favored with a Power Rating of {favorite_rating:.0f} "
+        f"against {underdog_rating:.0f} for {underdog}."
     )
 
     impact_notes = []
@@ -3101,28 +3102,28 @@ def generate_match_summary_template(
     if model.manual_factor_away:
         impact_notes.append(f"{away} (slider {model.manual_factor_away:+.0%})")
     if fatigue_home and abs(float(fatigue_home.get("attack_malus", 0.0))) >= FATIGUE_ALERT_THRESHOLD:
-        impact_notes.append(f"{home} affaticata (malus attacco {float(fatigue_home['attack_malus']):+.0%})")
+        impact_notes.append(f"{home} fatigued (attack malus {float(fatigue_home['attack_malus']):+.0%})")
     if fatigue_away and abs(float(fatigue_away.get("attack_malus", 0.0))) >= FATIGUE_ALERT_THRESHOLD:
-        impact_notes.append(f"{away} affaticata (malus attacco {float(fatigue_away['attack_malus']):+.0%})")
+        impact_notes.append(f"{away} fatigued (attack malus {float(fatigue_away['attack_malus']):+.0%})")
     if impact_notes:
-        bullets.append("**Assenze / Mercato / Affaticamento**: attenzione a " + ", ".join(impact_notes) + ".")
+        bullets.append("**Absences / Market / Fatigue**: keep an eye on " + ", ".join(impact_notes) + ".")
     else:
-        bullets.append("**Assenze / Mercato / Affaticamento**: nessun correttivo manuale rilevante applicato.")
+        bullets.append("**Absences / Market / Fatigue**: no significant manual adjustment applied.")
 
     value_bets = [
-        f"'{label}' quota inserita, probabilità stimata {prob:.0%}, stake consigliato {stake:.1f}%"
+        f"'{label}' odds entered, estimated probability {prob:.0%}, suggested stake {stake:.1f}%"
         for label, prob, stake in kelly_rows
         if stake is not None and stake > 0
     ]
     if value_bets:
-        bullets.append("**Value Bet rilevate**: " + "; ".join(value_bets) + ".")
+        bullets.append("**Value Bets detected**: " + "; ".join(value_bets) + ".")
     else:
-        bullets.append("**Value Bet**: nessuna quota inserita o nessun vantaggio rilevato al momento nel tab Value Betting.")
+        bullets.append("**Value Bets**: no odds entered or no edge detected at the moment in the Value Betting tab.")
 
     total_goals = model.home_lambda + model.away_lambda
     bullets.append(
-        f"**Pronostico**: 1={model.home_win_prob:.0%} · X={model.draw_prob:.0%} · 2={model.away_win_prob:.0%}, "
-        f"con xG combinato atteso di {total_goals:.2f} gol."
+        f"**Forecast**: 1={model.home_win_prob:.0%} · X={model.draw_prob:.0%} · 2={model.away_win_prob:.0%}, "
+        f"with a combined expected xG of {total_goals:.2f} goals."
     )
 
     return "\n\n".join(f"- {bullet}" for bullet in bullets)
@@ -3136,10 +3137,10 @@ def generate_match_executive_summary(
     fatigue_away: dict[str, object] | None,
     kelly_rows: list[tuple[str, float, float | None]],
 ) -> tuple[str, str]:
-    """Ritorna (testo_report, fonte) dove fonte è 'AI (<provider>)' o
-    'Template Python'. Prova prima l'LLM se una chiave API è configurata;
-    in assenza di chiave o in caso di qualunque errore, ripiega
-    automaticamente sul generatore di template — l'app non si blocca mai."""
+    """Returns (report_text, source) where source is 'AI (<provider>)' or
+    'Python Template'. Tries the LLM first if an API key is configured;
+    without a key, or on any error, it automatically falls back to the
+    template generator — the app never gets stuck."""
     api = _get_llm_api_key()
     if api is not None:
         provider, api_key = api
@@ -3147,7 +3148,7 @@ def generate_match_executive_summary(
         ai_text = generate_match_summary_ai(prompt, provider, api_key)
         if ai_text:
             return ai_text, f"AI ({provider})"
-    return generate_match_summary_template(model, home, away, fatigue_home, fatigue_away, kelly_rows), "Template Python"
+    return generate_match_summary_template(model, home, away, fatigue_home, fatigue_away, kelly_rows), "Python Template"
 
 
 def _kelly_market_definitions(model: MatchModel, home: str, away: str) -> list[tuple[str, str, float]]:
@@ -3193,6 +3194,65 @@ def compute_kelly_rows_from_session(model: MatchModel, home: str, away: str) -> 
     ]
 
 
+def render_matrix_cyber_loading(duration_seconds: float = 1.6) -> None:
+    """🖥️ Matrix/Cyber-style loading animation shown while the 10,000 Monte
+    Carlo simulations run: a canvas-based 'digital rain' effect (falling
+    glyphs in Electric Blue) rendered through an embedded HTML/JS component
+    via streamlit.components.v1.html — plain st.markdown strips <script>
+    tags, so components.html is required for the animation to actually
+    execute. Purely a visual flourish for social-media appeal: it runs for
+    a fixed short duration and is then cleared; it does not affect, delay,
+    or replace any part of the simulation logic itself."""
+    placeholder = st.empty()
+    with placeholder:
+        components.html(
+            """
+            <div style="background:#050505;border-radius:12px;overflow:hidden;
+                        border:1px solid rgba(0,229,255,.35);
+                        box-shadow:0 0 24px rgba(0,229,255,.15);">
+              <canvas id="matrixCanvas" style="display:block;width:100%;height:150px;"></canvas>
+              <div style="text-align:center;color:#00E5FF;font-family:'Courier New',monospace;
+                          font-size:.78rem;letter-spacing:.16em;text-transform:uppercase;
+                          padding:8px 0;background:#050505;">
+                ⚡ Running 10,000 simulations...
+              </div>
+            </div>
+            <script>
+            const canvas = document.getElementById('matrixCanvas');
+            const ctx = canvas.getContext('2d');
+            function resizeCanvas() {
+                canvas.width = canvas.clientWidth;
+                canvas.height = canvas.clientHeight;
+            }
+            resizeCanvas();
+            window.addEventListener('resize', resizeCanvas);
+            const glyphs = '01λβαΣΔ⚽01λβαΣΔ01';
+            const fontSize = 14;
+            let columns = Math.floor(canvas.width / fontSize) || 20;
+            let drops = new Array(columns).fill(1);
+            function draw() {
+                ctx.fillStyle = 'rgba(5,5,5,0.18)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = '#00E5FF';
+                ctx.font = fontSize + 'px monospace';
+                for (let i = 0; i < drops.length; i++) {
+                    const glyph = glyphs[Math.floor(Math.random() * glyphs.length)];
+                    ctx.fillText(glyph, i * fontSize, drops[i] * fontSize);
+                    if (drops[i] * fontSize > canvas.height && Math.random() > 0.975) {
+                        drops[i] = 0;
+                    }
+                    drops[i]++;
+                }
+            }
+            setInterval(draw, 45);
+            </script>
+            """,
+            height=190,
+        )
+    time.sleep(duration_seconds)
+    placeholder.empty()
+
+
 def run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, object]:
     rng = np.random.default_rng()
     home_goals = rng.poisson(model.home_lambda, n_simulations)
@@ -3224,9 +3284,9 @@ def run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, 
     top_scores = sorted(weighted_scores.items(), key=lambda item: item[1], reverse=True)[:5]
     score_rows = [
         {
-            "Risultato esatto": f"{h_goal}-{a_goal}",
-            "Simulazioni": int(round(weight)),
-            "Probabilità": weight / total_weight,
+            "Exact Score": f"{h_goal}-{a_goal}",
+            "Simulations": int(round(weight)),
+            "Probability": weight / total_weight,
         }
         for (h_goal, a_goal), weight in top_scores
     ]
@@ -3242,9 +3302,9 @@ def run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, 
     draws = float(weights[draw_mask].sum())
     away_wins = float(weights[away_win_mask].sum())
     outcome_rows = [
-        {"Esito": "1 (vittoria casa)", "Simulazioni": int(round(home_wins)), "Probabilità": home_wins / total_weight},
-        {"Esito": "X (pareggio)", "Simulazioni": int(round(draws)), "Probabilità": draws / total_weight},
-        {"Esito": "2 (vittoria trasferta)", "Simulazioni": int(round(away_wins)), "Probabilità": away_wins / total_weight},
+        {"Outcome": "1 (home win)", "Simulations": int(round(home_wins)), "Probability": home_wins / total_weight},
+        {"Outcome": "X (draw)", "Simulations": int(round(draws)), "Probability": draws / total_weight},
+        {"Outcome": "2 (away win)", "Simulations": int(round(away_wins)), "Probability": away_wins / total_weight},
     ]
 
     key_events = [
@@ -3258,9 +3318,9 @@ def run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, 
     ]
     event_rows = [
         {
-            "Micro-evento simulato": name,
-            "Frequenza": int(mask.sum()),
-            "Probabilità": float(mask.mean()),
+            "Simulated Micro-Event": name,
+            "Frequency": int(mask.sum()),
+            "Probability": float(mask.mean()),
         }
         for name, mask in key_events
     ]
@@ -3281,21 +3341,21 @@ def run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, 
 
 def render_probability_table(frame: pd.DataFrame) -> str:
     """Render the Poisson table with bright-green rows over 80%."""
-    headers = ["Micro-evento", "Soglia", "Valore atteso", "Probabilità", "Fair odds"]
+    headers = ["Micro-Event", "Threshold", "Expected Value", "Probability", "Fair Odds"]
     table_rows = []
     for _, row in frame.iterrows():
-        probability = float(row["Probabilità"])
+        probability = float(row["Probability"])
         row_style = (
             ' style="background:#39ff14;color:#061a0e;font-weight:700"'
             if probability > 0.8
             else ""
         )
         cells = [
-            escape(str(row["Micro-evento"])),
-            escape(str(row["Soglia"])),
-            f"{float(row['Valore atteso']):.2f}",
+            escape(str(row["Micro-Event"])),
+            escape(str(row["Threshold"])),
+            f"{float(row['Expected Value']):.2f}",
             f"{probability:.1%}",
-            f"{float(row['Fair odds']):.2f}",
+            f"{float(row['Fair Odds']):.2f}",
         ]
         table_rows.append(
             f"<tr{row_style}>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>"
@@ -3328,7 +3388,7 @@ def render_outcome_table(model: MatchModel, home: str, away: str) -> str:
         table_rows.append(
             f"<tr{row_style}>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>"
         )
-    header_html = "".join(f"<th>{escape(header)}</th>" for header in ["Esito", "Probabilità", "Fair odds"])
+    header_html = "".join(f"<th>{escape(header)}</th>" for header in ["Outcome", "Probability", "Fair Odds"])
     return (
         '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse">'
         f"<thead><tr>{header_html}</tr></thead>"
@@ -3347,13 +3407,13 @@ def try_build_match_model(
     fatigue_home: dict[str, object] | None = None,
     fatigue_away: dict[str, object] | None = None,
 ) -> tuple[MatchModel | None, str]:
-    """Costruisce il MatchModel (unico motore di simulazione) gestendo in modo
-    uniforme i casi di squadre mancanti/uguali o dati Football-Data.org non
-    disponibili. Restituisce (None, messaggio_errore) in caso di problemi."""
+    """Builds the MatchModel (the single simulation engine) handling
+    missing/identical teams or unavailable Football-Data.org data
+    uniformly. Returns (None, error_message) if there are problems."""
     if not home or not away:
-        return None, "Carica le squadre da Football-Data.org per iniziare."
+        return None, "Load the teams from Football-Data.org to get started."
     if home == away:
-        return None, "Seleziona due squadre diverse."
+        return None, "Select two different teams."
     try:
         model = build_match_model(
             league,
@@ -3367,105 +3427,105 @@ def try_build_match_model(
             fatigue_away=fatigue_away,
         )
     except FootballDataError as error:
-        return None, f"Dati Football-Data.org non disponibili: {error}"
+        return None, f"Football-Data.org data unavailable: {error}"
     return model, ""
 
 
 def render_login() -> None:
     st.markdown(
-        "### Accesso protetto\n"
-        "Inserisci la password per accedere alle analisi Poisson e Monte Carlo."
+        "### 🦇 Restricted Access\n"
+        "Enter the password to access the Poisson and Monte Carlo analysis engine."
     )
     with st.form("login_form", clear_on_submit=False):
         password = st.text_input(
-            "Password di accesso",
+            "Access Password",
             type="password",
-            placeholder="Inserisci la password",
+            placeholder="Enter the password",
         )
-        submitted = st.form_submit_button("Accedi", type="primary")
+        submitted = st.form_submit_button("Log In", type="primary")
     if submitted:
         if password == APP_PASSWORD:
             st.session_state.authenticated = True
             st.rerun()
         else:
-            st.error("Password non valida. I dati della dashboard restano nascosti.")
+            st.error("Invalid password. The dashboard data remains hidden.")
 
 
 def render_sidebar_controls() -> dict[str, object]:
-    """Slider manuali nella sidebar: Fattore Mercato (-20%/+20%) e Impatto
-    Infortuni/Titolari Assenti (-30%/+30%), per casa e trasferta, più
-    l'Indice di Affaticamento & Turnover (Fase 2). I valori incrementano/
-    riducono Power Index e attacco/difesa attesa PRIMA del calcolo di xG,
-    tiri e probabilità (vedi build_match_model)."""
-    st.markdown("### 💼 Impatto Mercato / Aspettative")
-    st.caption("Rinforzi o cessioni importanti rispetto alla media stagionale.")
+    """Manual sidebar sliders: Market Factor (-20%/+20%) and Injury/Missing
+    Starters Impact (-30%/+30%), for home and away, plus the Fatigue &
+    Rotation Index (Phase 2). Values increase/decrease the Power Index and
+    expected attack/defense BEFORE the xG, shots and probability calculation
+    (see build_match_model)."""
+    st.markdown("### 💼 Market Impact / Expectations")
+    st.caption("Major signings or departures relative to the season average.")
     market_factor_home = (
-        st.slider("Fattore Mercato Casa", -20, 20, 0, format="%d%%", key="market_factor_home") / 100
+        st.slider("Home Market Factor", -20, 20, 0, format="%d%%", key="market_factor_home") / 100
     )
     market_factor_away = (
-        st.slider("Fattore Mercato Trasferta", -20, 20, 0, format="%d%%", key="market_factor_away") / 100
+        st.slider("Away Market Factor", -20, 20, 0, format="%d%%", key="market_factor_away") / 100
     )
 
-    st.markdown("### 🩹 Impatto Infortuni / Titolari Assenti")
-    st.caption("Assenze pesanti rispetto alla formazione tipo.")
+    st.markdown("### 🩹 Injuries / Missing Starters Impact")
+    st.caption("Heavy absences relative to the usual starting lineup.")
     injury_factor_home = (
-        st.slider("Impatto Infortuni Casa", -30, 30, 0, format="%d%%", key="injury_factor_home") / 100
+        st.slider("Home Injury Impact", -30, 30, 0, format="%d%%", key="injury_factor_home") / 100
     )
     injury_factor_away = (
-        st.slider("Impatto Infortuni Trasferta", -30, 30, 0, format="%d%%", key="injury_factor_away") / 100
+        st.slider("Away Injury Impact", -30, 30, 0, format="%d%%", key="injury_factor_away") / 100
     )
 
-    st.markdown("### 🩺 Affaticamento & Impegni Infrasettimanali")
-    with st.expander("Affaticamento & Impegni Infrasettimanali", expanded=False):
+    st.markdown("### 🩺 Fatigue & Midweek Fixtures")
+    with st.expander("Fatigue & Midweek Fixtures", expanded=False):
         st.caption(
-            "Giorni di riposo, trasferte europee e turnover previsto: si SOMMANO "
-            "agli slider di Mercato/Assenze qui sopra, senza sovrascriverli."
+            "Rest days, European away trips and expected rotation: these ADD "
+            "to the Market/Absences sliders above, without overriding them."
         )
         col_rest_home, col_rest_away = st.columns(2)
         with col_rest_home:
             rest_days_home = st.slider(
-                "Giorni di riposo Casa", 2, 7, 7, key="rest_days_home",
-                help="7 = 7 o più giorni di riposo (nessun malus).",
+                "Home Rest Days", 2, 7, 7, key="rest_days_home",
+                help="7 = 7 or more rest days (no malus).",
             )
         with col_rest_away:
             rest_days_away = st.slider(
-                "Giorni di riposo Trasferta", 2, 7, 7, key="rest_days_away",
-                help="7 = 7 o più giorni di riposo (nessun malus).",
+                "Away Rest Days", 2, 7, 7, key="rest_days_away",
+                help="7 = 7 or more rest days (no malus).",
             )
 
         col_travel_home, col_travel_away = st.columns(2)
         with col_travel_home:
             travel_home = st.checkbox(
-                "Trasferta europea faticosa Casa", key="travel_home",
+                "Tiring European Away Trip · Home", key="travel_home",
             )
         with col_travel_away:
             travel_away = st.checkbox(
-                "Trasferta europea faticosa Trasferta", key="travel_away",
+                "Tiring European Away Trip · Away", key="travel_away",
             )
 
         col_turnover_home, col_turnover_away = st.columns(2)
         with col_turnover_home:
             turnover_home = st.selectbox(
-                "Turnover previsto Casa", options=list(TURNOVER_LEVELS), key="turnover_home",
+                "Expected Rotation · Home", options=list(TURNOVER_LEVELS), key="turnover_home",
             )
         with col_turnover_away:
             turnover_away = st.selectbox(
-                "Turnover previsto Trasferta", options=list(TURNOVER_LEVELS), key="turnover_away",
+                "Expected Rotation · Away", options=list(TURNOVER_LEVELS), key="turnover_away",
             )
 
-    st.markdown("### 🎲 The Odds API (quote reali)")
-    with st.expander("Recupero automatico quote bookmaker", expanded=False):
+    st.markdown("### 🎲 The Odds API (real odds)")
+    with st.expander("Automatic bookmaker odds retrieval", expanded=False):
         st.caption(
-            "Inserisci una API Key gratuita di [The Odds API](https://the-odds-api.com) "
-            "per recuperare automaticamente le quote reali (Sisal, Snai, bet365...) nel "
-            "Calcolatore Kelly. Senza chiave, o se la chiamata fallisce, restano attivi "
-            "gli inserimenti manuali delle quote — l'app non si blocca mai."
+            "Enter a free API Key from [The Odds API](https://the-odds-api.com) "
+            "to automatically pull real bookmaker odds into the Kelly "
+            "Calculator. Without a key, or if the call fails, manual odds "
+            "entry stays available — the app never breaks."
         )
         odds_api_key = st.text_input(
-            "API Key The Odds API",
+            "The Odds API Key",
             type="password",
             key="odds_api_key",
-            placeholder="Lascia vuoto per inserire le quote manualmente",
+            placeholder="Leave empty to enter odds manually",
         )
 
     fatigue_home = fatigue_turnover_index(rest_days_home, travel_home, turnover_home)
@@ -3491,14 +3551,14 @@ def render_team_header(league: str, home: str, away: str, crests: dict[str, str]
         if crests.get(home):
             st.image(crests[home], width=84)
         st.markdown(f'<div class="team-name">{escape(home)}</div>', unsafe_allow_html=True)
-        st.caption("Casa")
+        st.caption("Home")
     with col_vs:
         st.markdown('<div class="vs-badge">VS</div>', unsafe_allow_html=True)
     with col_away:
         if crests.get(away):
             st.image(crests[away], width=84)
         st.markdown(f'<div class="team-name">{escape(away)}</div>', unsafe_allow_html=True)
-        st.caption("Trasferta")
+        st.caption("Away")
 
 
 def render_metric_cards(cards: list[tuple[str, str]], columns: int = 4) -> None:
@@ -3537,13 +3597,13 @@ def render_best_value_bet_box(ranked_bets: list[dict[str, object]]) -> None:
     rilevate, ordinate per Stake Kelly decrescente."""
     if not ranked_bets:
         st.info(
-            "Nessuna Value Bet rilevata al momento: inserisci le quote reali del "
-            "bookmaker nel Calcolatore Kelly qui sotto per attivare l'ordinamento."
+            "No Value Bet detected at the moment: enter the real bookmaker "
+            "odds in the Kelly Calculator below to activate the ranking."
         )
         return
 
     best = ranked_bets[0]
-    ev_text = f"{best['ev']:+.1f}%" if best["ev"] is not None else "n/d"
+    ev_text = f"{best['ev']:+.1f}%" if best["ev"] is not None else "n/a"
     st.markdown(
         '<div style="background:linear-gradient(135deg,#f59e0b,#facc15);color:#1c1300;'
         'border-radius:16px;padding:18px 22px;margin-bottom:18px;'
@@ -3552,22 +3612,22 @@ def render_best_value_bet_box(ranked_bets: list[dict[str, object]]) -> None:
         '👑 BEST VALUE BET OF THE MATCH</div>'
         f'<div style="font-size:1.5rem;font-weight:800;margin-top:6px">{escape(str(best["label"]))}</div>'
         '<div style="margin-top:8px;font-weight:600;font-size:.95rem">'
-        f'Quota {best["odds"]:.2f} · Probabilità algoritmo {best["probability"]:.1%} · '
-        f'Expected Value {ev_text} · <u>Stake consigliato {best["stake"]:.1f}%</u>'
+        f'Odds {best["odds"]:.2f} · Algorithm probability {best["probability"]:.1%} · '
+        f'Expected Value {ev_text} · <u>Suggested stake {best["stake"]:.1f}%</u>'
         '</div></div>',
         unsafe_allow_html=True,
     )
 
     if len(ranked_bets) > 1:
-        st.markdown("##### 📋 Altre Value Bet rilevate (ordinate per Stake Kelly)")
+        st.markdown("##### 📋 Other Value Bets detected (ranked by Kelly Stake)")
         ranking_frame = pd.DataFrame(
             [
                 {
-                    "Mercato": row["label"],
-                    "Quota": f"{row['odds']:.2f}",
-                    "Probabilità": f"{row['probability']:.1%}",
-                    "Expected Value": f"{row['ev']:+.1f}%" if row["ev"] is not None else "n/d",
-                    "Stake Kelly": f"{row['stake']:.1f}%",
+                    "Market": row["label"],
+                    "Odds": f"{row['odds']:.2f}",
+                    "Probability": f"{row['probability']:.1%}",
+                    "Expected Value": f"{row['ev']:+.1f}%" if row["ev"] is not None else "n/a",
+                    "Kelly Stake": f"{row['stake']:.1f}%",
                 }
                 for row in ranked_bets[1:]
             ]
@@ -3577,52 +3637,52 @@ def render_best_value_bet_box(ranked_bets: list[dict[str, object]]) -> None:
 
 
 def render_value_betting_tab(model: MatchModel, home: str, away: str, league: str, odds_api_key: str) -> None:
-    """FASE 1: VALUE BETTING & UX — Heatmap dei mercati ad alta probabilità
-    + Calcolatore Kelly Criterion (Quarter Kelly), con recupero automatico
-    delle quote reali da The Odds API (fallback manuale se assente/fallisce).
-    Estensione puramente additiva: legge solo il MatchModel già calcolato dal
-    motore esistente."""
+    """PHASE 1: VALUE BETTING & UX — High-probability markets Heatmap
+    + Kelly Criterion Calculator (Quarter Kelly), with automatic retrieval
+    of real odds from The Odds API (manual fallback if absent/failing).
+    Purely additive extension: only reads the MatchModel already computed
+    by the existing engine."""
     ranked_bets = rank_value_bets(compute_kelly_rows_detailed(model, home, away))
     render_best_value_bet_box(ranked_bets)
 
     st.markdown(
-        "### 🟩 Heatmap dei Mercati ad Alta Probabilità\n"
-        "I 5 mercati più probabili per questa partita, calcolati dalla stessa "
-        "matrice Poisson + Dixon-Coles usata nelle altre schede. "
+        "### 🟩 High-Probability Markets Heatmap\n"
+        "The 5 most likely markets for this match, calculated from the same "
+        "Poisson + Dixon-Coles matrix used in the other tabs. "
         "🟩 ≥70% · 🟧 50-69% · 🟥 <50%."
     )
     top_markets = top_heatmap_markets(model, home, away, top_n=5)
     heatmap_cols = st.columns(len(top_markets))
     for col, row in zip(heatmap_cols, top_markets):
         with col:
-            _render_heatmap_cell(row["Mercato"], row["Probabilità"], big=True)
+            _render_heatmap_cell(row["Market"], row["Probability"], big=True)
 
-    with st.expander("Griglia completa dei mercati (1X2, Doppia Chance, Over/Under, Goal/No Goal)"):
+    with st.expander("Full markets grid (1X2, Double Chance, Over/Under, Goal/No Goal)"):
         all_rows = heatmap_market_probabilities(model, home, away)
         grid_cols = st.columns(4)
         for index, row in enumerate(all_rows):
             with grid_cols[index % 4]:
-                _render_heatmap_cell(row["Mercato"], row["Probabilità"])
+                _render_heatmap_cell(row["Market"], row["Probability"])
 
     st.markdown("---")
     st.markdown(
-        "### 💰 Calcolatore Kelly Criterion (Quarter Kelly)\n"
-        "Con una API Key di The Odds API inserita in sidebar, la quota "
-        "migliore disponibile viene recuperata e proposta automaticamente "
-        "per ciascun mercato — resta comunque modificabile a mano. Senza "
-        "chiave (o se il recupero fallisce) inserisci la quota reale "
-        "manualmente: se la probabilità del nostro algoritmo supera quella "
-        "implicita nella quota, lo stake consigliato (25% del Kelly pieno) "
-        "sarà positivo — altrimenti nessun vantaggio (**NO VALUE**)."
+        "### 💰 Kelly Criterion Calculator (Quarter Kelly)\n"
+        "With a The Odds API key entered in the sidebar, the best available "
+        "odds are automatically retrieved and proposed for each market — "
+        "still fully editable by hand. Without a key (or if retrieval "
+        "fails) enter the real odds manually: if our algorithm's "
+        "probability exceeds the one implied by the odds, the suggested "
+        "stake (25% of full Kelly) will be positive — otherwise there is no "
+        "edge (**NO VALUE**)."
     )
     if odds_api_key:
-        st.caption("🎲 The Odds API collegata: recupero automatico attivo per i mercati disponibili.")
+        st.caption("🎲 The Odds API connected: automatic retrieval active for available markets.")
 
     header_cols = st.columns([2.4, 1, 1.1, 2.5])
-    header_cols[0].caption("Mercato")
-    header_cols[1].caption("Probabilità algoritmo")
-    header_cols[2].caption("Quota bookmaker")
-    header_cols[3].caption("Esito Kelly")
+    header_cols[0].caption("Market")
+    header_cols[1].caption("Algorithm Probability")
+    header_cols[2].caption("Bookmaker Odds")
+    header_cols[3].caption("Kelly Outcome")
 
     for key, label, probability in _kelly_market_definitions(model, home, away):
         live_odds = get_live_odds(home, away, key, league, odds_api_key) if odds_api_key else None
@@ -3630,21 +3690,21 @@ def render_value_betting_tab(model: MatchModel, home: str, away: str, league: st
 
         odds_input_key = f"{key}_odds"
         if best_live_odds is not None and odds_input_key not in st.session_state:
-            # Pre-compila l'input manuale con la quota migliore recuperata
-            # automaticamente, SENZA sovrascrivere un valore già inserito
-            # dall'utente in una sessione precedente — resta sempre modificabile.
+            # Pre-fills the manual input with the best odds retrieved
+            # automatically, WITHOUT overwriting a value already entered by
+            # the user in a previous session — it stays fully editable.
             st.session_state[odds_input_key] = round(best_live_odds, 2)
 
         col_label, col_prob, col_odds, col_badge = st.columns([2.4, 1, 1.1, 2.5])
         with col_label:
             st.markdown(f"**{label}**")
             if best_live_odds is not None:
-                st.caption(f"🎲 Auto da The Odds API: {best_live_odds:.2f}")
+                st.caption(f"🎲 Auto from The Odds API: {best_live_odds:.2f}")
         with col_prob:
             st.markdown(f"{probability:.1%}")
         with col_odds:
             odds = st.number_input(
-                "Quota",
+                "Odds",
                 min_value=0.0,
                 max_value=50.0,
                 value=0.0,
@@ -3656,9 +3716,9 @@ def render_value_betting_tab(model: MatchModel, home: str, away: str, league: st
             stake = kelly_stake_percent(probability, odds if odds > 1.0 else None)
             badge_label, bg, text_color = value_bet_badge(stake)
             if stake is None:
-                st.caption("Inserisci una quota per calcolare lo stake")
+                st.caption("Enter odds to calculate the stake")
             else:
-                detail = f"Stake consigliato: {stake:.1f}%" if stake > 0 else "Quota sbilanciata a favore del bookmaker"
+                detail = f"Suggested stake: {stake:.1f}%" if stake > 0 else "Odds skewed in favor of the bookmaker"
                 st.markdown(
                     f'<div style="background:{bg};color:{text_color};border-radius:8px;'
                     f'padding:6px 10px;font-weight:700;text-align:center">{badge_label}'
@@ -3667,12 +3727,12 @@ def render_value_betting_tab(model: MatchModel, home: str, away: str, league: st
                 )
 
         if live_odds:
-            with st.expander(f"📊 Confronto Bookmaker — {label}"):
+            with st.expander(f"📊 Bookmaker Comparison — {label}"):
                 render_bookmaker_comparison_table(fair_odds(probability), live_odds)
 
     st.caption(
-        f"Fractional Kelly Stake = ((Probabilità × Quota) - 1) / (Quota - 1) × 100, "
-        f"scalato al {KELLY_FRACTION:.0%} (Quarter Kelly) per contenere la varianza sul bankroll."
+        f"Fractional Kelly Stake = ((Probability × Odds) - 1) / (Odds - 1) × 100, "
+        f"scaled to {KELLY_FRACTION:.0%} (Quarter Kelly) to contain bankroll variance."
     )
 
 
@@ -3683,32 +3743,32 @@ def render_match_executive_summary(
     fatigue_home: dict[str, object] | None,
     fatigue_away: dict[str, object] | None,
 ) -> None:
-    """🤖 Report Analitico Intelligence: expander in cima alla pagina match
-    con 3-4 punti chiave in linguaggio naturale, generati via LLM se una
-    chiave API è configurata, altrimenti tramite template Python (fallback
-    automatico trasparente — non richiede alcuna azione dell'utente)."""
+    """🤖 Intelligence Analysis Report: expander at the top of the match
+    page with 3-4 key points in natural language, generated via LLM if an
+    API key is configured, otherwise via a Python template (transparent
+    automatic fallback — requires no action from the user)."""
     kelly_rows = compute_kelly_rows_from_session(model, home, away)
-    with st.expander("🤖 Report Analitico Intelligence", expanded=True):
+    with st.expander("🤖 Intelligence Analysis Report", expanded=True):
         summary_text, source = generate_match_executive_summary(model, home, away, fatigue_home, fatigue_away, kelly_rows)
         st.markdown(summary_text)
-        st.caption(f"Generato da: {source} · aggiornato in base a Power Rating, slider manuali e quote inserite.")
+        st.caption(f"Generated by: {source} · updated based on Power Rating, manual sliders and entered odds.")
 
 
 def render_bankroll_tab() -> None:
-    """📊 Gestione Bankroll & Storico: Bankroll Iniziale, form nuova giocata,
-    storico persistito su file (CSV/JSON), metriche ROI/Yield/Win Rate e
-    grafico dell'andamento del bankroll. Modulo indipendente dal motore di
-    simulazione (non legge Power Rating/Dixon-Coles/slider manuali)."""
+    """📊 Bankroll & History Management: Initial Bankroll, new-bet form,
+    history persisted to file (CSV/JSON), ROI/Yield/Win Rate metrics and a
+    bankroll trend chart. Module independent from the simulation engine
+    (does not read Power Rating/Dixon-Coles/manual sliders)."""
     st.markdown(
-        "### 📊 Gestione Bankroll & Storico\n"
-        "Traccia le giocate effettuate e monitora ROI, Win Rate e andamento "
-        "del bankroll nel tempo. Lo storico è salvato su file e non si "
-        "azzera ricaricando la pagina."
+        "### 📊 Bankroll & History Management\n"
+        "Track your placed bets and monitor ROI, Win Rate and bankroll "
+        "trend over time. The history is saved to file and does not reset "
+        "when you reload the page."
     )
 
     config = load_bankroll_config()
     initial_bankroll = st.number_input(
-        "Bankroll Iniziale (€)",
+        "Initial Bankroll (€)",
         min_value=0.0,
         value=float(config["initial_bankroll"]),
         step=50.0,
@@ -3718,25 +3778,25 @@ def render_bankroll_tab() -> None:
         save_bankroll_config(initial_bankroll)
 
     st.markdown("---")
-    st.markdown("##### ➕ Registra una nuova giocata")
+    st.markdown("##### ➕ Log a new bet")
     with st.form("new_bet_form", clear_on_submit=True):
         col_league, col_match = st.columns(2)
         with col_league:
-            bet_league = st.selectbox("Campionato", options=list(FOOTBALL_DATA_COMPETITIONS), key="bet_league")
+            bet_league = st.selectbox("League", options=list(FOOTBALL_DATA_COMPETITIONS), key="bet_league")
         with col_match:
-            bet_match = st.text_input("Partita", placeholder="es. Inter - Cagliari", key="bet_match")
+            bet_match = st.text_input("Match", placeholder="e.g. Inter - Cagliari", key="bet_match")
 
         col_market, col_odds, col_outcome = st.columns(3)
         with col_market:
-            bet_market = st.text_input("Mercato / Pronostico", placeholder="es. 1, Over 2.5", key="bet_market")
+            bet_market = st.text_input("Market / Pick", placeholder="e.g. 1, Over 2.5", key="bet_market")
         with col_odds:
-            bet_odds = st.number_input("Quota", min_value=1.01, value=1.90, step=0.05, key="bet_odds")
+            bet_odds = st.number_input("Odds", min_value=1.01, value=1.90, step=0.05, key="bet_odds")
         with col_outcome:
-            bet_outcome = st.selectbox("Esito", options=BET_OUTCOMES, key="bet_outcome")
+            bet_outcome = st.selectbox("Outcome", options=BET_OUTCOMES, key="bet_outcome")
 
         col_stake_type, col_stake_value = st.columns(2)
         with col_stake_type:
-            stake_type = st.radio("Stake in", options=["€", "% Bankroll (Kelly)"], horizontal=True, key="bet_stake_type")
+            stake_type = st.radio("Stake In", options=["€", "% Bankroll (Kelly)"], horizontal=True, key="bet_stake_type")
         with col_stake_value:
             if stake_type == "€":
                 stake_amount = st.number_input("Stake (€)", min_value=0.0, value=10.0, step=1.0, key="bet_stake_eur")
@@ -3745,23 +3805,23 @@ def render_bankroll_tab() -> None:
                 current_bankroll_for_stake = bankroll_metrics(load_bankroll_log(), initial_bankroll)["current_bankroll"]
                 stake_amount = current_bankroll_for_stake * stake_percent / 100
 
-        submitted = st.form_submit_button("Registra giocata", type="primary")
+        submitted = st.form_submit_button("Log Bet", type="primary")
         if submitted:
             if not bet_match or not bet_market:
-                st.warning("Inserisci almeno Partita e Mercato prima di registrare la giocata.")
+                st.warning("Enter at least Match and Market before logging the bet.")
             else:
                 append_bet(bet_league, bet_match, bet_market, bet_odds, stake_amount, stake_type, bet_outcome)
-                st.success(f"Giocata registrata: {bet_match} · {bet_market} · stake {stake_amount:.2f}€")
+                st.success(f"Bet logged: {bet_match} · {bet_market} · stake {stake_amount:.2f}€")
                 st.rerun()
 
     st.markdown("---")
     log_df = load_bankroll_log()
 
     if log_df.empty:
-        st.info("Nessuna giocata registrata finora. Usa il form sopra per iniziare a tracciare il tuo storico.")
+        st.info("No bets logged yet. Use the form above to start tracking your history.")
         return
 
-    st.markdown("##### ✏️ Storico giocate (modifica l'esito per aggiornare ROI/Bankroll)")
+    st.markdown("##### ✏️ Bet history (edit the outcome to update ROI/Bankroll)")
     edited_df = st.data_editor(
         log_df,
         use_container_width=True,
@@ -3778,33 +3838,33 @@ def render_bankroll_tab() -> None:
         st.rerun()
 
     metrics = bankroll_metrics(edited_df, initial_bankroll)
-    st.markdown("##### 📈 Metriche finanziarie")
+    st.markdown("##### 📈 Financial Metrics")
     col_pnl, col_roi, col_winrate, col_bankroll = st.columns(4)
     with col_pnl:
-        st.metric("Profitto/Perdita Totale", f"{metrics['total_profit']:+.2f} €")
+        st.metric("Total Profit/Loss", f"{metrics['total_profit']:+.2f} €")
     with col_roi:
         st.metric("ROI", f"{metrics['roi']:+.1f}%")
     with col_winrate:
-        st.metric("Win Rate", f"{metrics['win_rate']:.1f}%", help=f"Su {metrics['settled_count']} giocate concluse")
+        st.metric("Win Rate", f"{metrics['win_rate']:.1f}%", help=f"Out of {metrics['settled_count']} settled bets")
     with col_bankroll:
-        st.metric("Bankroll Attuale", f"{metrics['current_bankroll']:.2f} €", delta=f"{metrics['total_profit']:+.2f} €")
+        st.metric("Current Bankroll", f"{metrics['current_bankroll']:.2f} €", delta=f"{metrics['total_profit']:+.2f} €")
 
-    st.markdown("##### 📉 Andamento del Bankroll")
+    st.markdown("##### 📉 Bankroll Trend")
     timeline = bankroll_timeline(edited_df, initial_bankroll)
-    st.line_chart(timeline.set_index("Giocata"))
+    st.line_chart(timeline.set_index("Bet"))
 
 
 def render_dashboard(sidebar_values: dict[str, float]) -> None:
     st.markdown(
-        "### Impostazioni partita\n"
-        "Squadre, calendario e risultati vengono recuperati direttamente da "
-        "Football-Data.org. Non sono quotazioni di un bookmaker."
+        "### Match Settings\n"
+        "Teams, fixtures and results are fetched directly from "
+        "Football-Data.org. These are not bookmaker odds."
     )
 
     col_league, col_home, col_away = st.columns(3)
     with col_league:
         league = st.selectbox(
-            "Campionato",
+            "League",
             options=list(FOOTBALL_DATA_COMPETITIONS),
             key="league_select",
         )
@@ -3812,51 +3872,51 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
     try:
         team_rows = fetch_league_teams(league)
     except FootballDataError as error:
-        st.error(f"Football-Data.org non disponibile: {error}")
+        st.error(f"Football-Data.org unavailable: {error}")
         team_rows = ()
 
     teams = [name for _, name in team_rows]
 
     if len(teams) < 2:
         with col_home:
-            st.selectbox("Squadra di casa", options=teams, disabled=True)
+            st.selectbox("Home Team", options=teams, disabled=True)
         with col_away:
-            st.selectbox("Squadra ospite", options=teams, disabled=True)
-        st.warning("Football-Data.org non ha restituito due squadre disponibili.")
+            st.selectbox("Away Team", options=teams, disabled=True)
+        st.warning("Football-Data.org did not return two available teams.")
         return
 
-    # Se il campionato è cambiato, riporta le selezioni squadra ai valori di default.
+    # If the league changed, reset the team selections to their default values.
     if st.session_state.get("_last_league") != league:
         st.session_state["_last_league"] = league
         st.session_state["home_select"] = teams[0]
         st.session_state["away_select"] = teams[1]
 
     with col_home:
-        home = st.selectbox("Squadra di casa", options=teams, key="home_select")
+        home = st.selectbox("Home Team", options=teams, key="home_select")
     with col_away:
-        away = st.selectbox("Squadra ospite", options=teams, key="away_select")
+        away = st.selectbox("Away Team", options=teams, key="away_select")
 
     try:
         status_text = (
-            f"Football-Data.org: {len(teams)} squadre caricate · "
+            f"Football-Data.org: {len(teams)} teams loaded · "
             f"{competition_season_status(league)}. "
-            "Micro-eventi stimati su baseline di campionato."
+            "Micro-events estimated on league baseline."
         )
         st.info(status_text)
     except FootballDataError as error:
-        st.warning(f"Stato stagione non disponibile: {error}")
+        st.warning(f"Season status unavailable: {error}")
 
     try:
         calendar = calendar_frame(league)
     except FootballDataError as error:
-        st.error(f"Calendario Football-Data.org non disponibile: {error}")
-        calendar = pd.DataFrame(columns=["Data", "Stato", "Casa", "Trasferta"])
+        st.error(f"Football-Data.org fixtures unavailable: {error}")
+        calendar = pd.DataFrame(columns=["Date", "Status", "Home", "Away"])
 
-    with st.expander("📅 Calendario stagione 2026/27", expanded=False):
+    with st.expander("📅 2026/27 Season Fixtures", expanded=False):
         st.dataframe(calendar, use_container_width=True, hide_index=True)
 
     if home == away:
-        st.info("Seleziona due squadre diverse per avviare l'analisi.")
+        st.info("Select two different teams to start the analysis.")
         return
 
     try:
@@ -3883,19 +3943,19 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
         st.error(error_message)
         return
 
-    # --- 🤖 Report Analitico Intelligence (Fase 3b), in cima alla pagina match --
+    # --- 🤖 Intelligence Analysis Report (Phase 3b), at the top of the match page --
     render_match_executive_summary(
         model, home, away, sidebar_values.get("fatigue_home"), sidebar_values.get("fatigue_away")
     )
 
-    # --- Avviso Modalità Inizio Stagione (badge/warning giallo) -----------------
+    # --- Early Season Mode warning (yellow badge/warning) -----------------
     if model.early_season_warning:
         st.warning(
-            "⚠️ Analisi a confidenza ridotta - Inizio Stagione in corso  \n"
-            f"{home}: {model.home_current_season_matches} partite disputate · "
-            f"{away}: {model.away_current_season_matches} partite disputate "
-            f"(soglia piena confidenza: {EARLY_SEASON_MATCHDAY_THRESHOLD}). "
-            "Il Power Index viene mescolato con dati reali ancora parziali."
+            "⚠️ Reduced-confidence analysis - Early Season in progress  \n"
+            f"{home}: {model.home_current_season_matches} matches played · "
+            f"{away}: {model.away_current_season_matches} matches played "
+            f"(full-confidence threshold: {EARLY_SEASON_MATCHDAY_THRESHOLD}). "
+            "The Power Index is being blended with still-partial real data."
         )
 
     # --- Avviso Affaticamento & Turnover (Fase 2, badge/warning giallo) --------
@@ -3910,54 +3970,54 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
         if away_fatigue_alert:
             st.warning(away_fatigue_alert)
 
-    # --- Visualizzazione 1X2 in evidenza (st.metric su 3 colonne) --------------
+    # --- 1X2 highlight display (st.metric across 3 columns) --------------
     col_1x2_home, col_1x2_draw, col_1x2_away = st.columns(3)
     with col_1x2_home:
-        st.metric(f"🏠 Vittoria {home}", f"{model.home_win_prob:.1%}")
+        st.metric(f"🏠 {home} Win", f"{model.home_win_prob:.1%}")
     with col_1x2_draw:
-        st.metric("🤝 Pareggio", f"{model.draw_prob:.1%}")
+        st.metric("🤝 Draw", f"{model.draw_prob:.1%}")
     with col_1x2_away:
-        st.metric(f"✈️ Vittoria {away}", f"{model.away_win_prob:.1%}")
+        st.metric(f"✈️ {away} Win", f"{model.away_win_prob:.1%}")
 
-    # --- Card visive pulite per le stime dei micro-eventi -----------------------
+    # --- Clean visual cards for micro-event estimates -----------------------
     total_goals_lambda = model.home_lambda + model.away_lambda
     over_25 = over_probability(total_goals_lambda, 2.5)
     metric_cards = [
         (f"Global Power Rating {home}", f"{model.home_rating:.0f}"),
         (f"Global Power Rating {away}", f"{model.away_rating:.0f}"),
-        ("xG Casa", f"{model.home_lambda:.2f}"),
-        ("xG Trasferta", f"{model.away_lambda:.2f}"),
-        ("Tiri Totali", f"{model.shots_total_lambda:.1f}"),
-        ("Tiri in Porta (match)", f"{model.shots_on_target_total_lambda:.1f}"),
-        ("Corner Totali", f"{model.corners_total_lambda:.1f}"),
-        ("Cartellini Totali", f"{model.cards_total_lambda:.1f}"),
-        ("Over 2.5 Gol", f"{over_25:.1%}"),
-        ("Under 2.5 Gol", f"{1 - over_25:.1%}"),
+        ("Home xG", f"{model.home_lambda:.2f}"),
+        ("Away xG", f"{model.away_lambda:.2f}"),
+        ("Total Shots", f"{model.shots_total_lambda:.1f}"),
+        ("Shots on Target (match)", f"{model.shots_on_target_total_lambda:.1f}"),
+        ("Total Corners", f"{model.corners_total_lambda:.1f}"),
+        ("Total Cards", f"{model.cards_total_lambda:.1f}"),
+        ("Over 2.5 Goals", f"{over_25:.1%}"),
+        ("Under 2.5 Goals", f"{1 - over_25:.1%}"),
     ]
     render_metric_cards(metric_cards, columns=5)
 
-    note = escape(model.engine_note) if model.engine_note else "Global Power Rating calcolato."
+    note = escape(model.engine_note) if model.engine_note else "Global Power Rating calculated."
     st.caption(note)
 
     if model.home_win_prob >= model.away_win_prob and model.home_win_prob >= model.draw_prob:
-        pronostico_headline = f"🏆 Favorita: {home} ({model.home_win_prob:.0%})"
-        pronostico_accent = "#00ff87"
+        pronostico_headline = f"🏆 Favorite: {home} ({model.home_win_prob:.0%})"
+        pronostico_accent = "#00e5ff"
     elif model.away_win_prob > model.home_win_prob and model.away_win_prob >= model.draw_prob:
-        pronostico_headline = f"🏆 Favorita: {away} ({model.away_win_prob:.0%})"
+        pronostico_headline = f"🏆 Favorite: {away} ({model.away_win_prob:.0%})"
         pronostico_accent = "#00e5ff"
     else:
-        pronostico_headline = f"🤝 Equilibrio: Pareggio {model.draw_prob:.0%}"
+        pronostico_headline = f"🤝 Even Match: Draw {model.draw_prob:.0%}"
         pronostico_accent = "#00e5ff"
 
     render_social_share_card(
         title=f"{home} vs {away}",
         headline=pronostico_headline,
-        subtitle="Pronostico CalcioLab · Poisson + Correzione Dixon-Coles",
+        subtitle="WayneLab Forecast · Poisson + Dixon-Coles Correction",
         rows=[
-            (f"🏠 Vittoria {home}", f"{model.home_win_prob:.0%}"),
-            ("🤝 Pareggio", f"{model.draw_prob:.0%}"),
-            (f"✈️ Vittoria {away}", f"{model.away_win_prob:.0%}"),
-            ("⚽ xG Combinato Atteso", f"{model.home_lambda + model.away_lambda:.2f}"),
+            (f"🏠 {home} Win", f"{model.home_win_prob:.0%}"),
+            ("🤝 Draw", f"{model.draw_prob:.0%}"),
+            (f"✈️ {away} Win", f"{model.away_win_prob:.0%}"),
+            ("⚽ Combined Expected xG", f"{model.home_lambda + model.away_lambda:.2f}"),
             ("📈 Global Power Rating", f"{model.home_rating:.0f} - {model.away_rating:.0f}"),
         ],
         accent=pronostico_accent,
@@ -3973,56 +4033,56 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
         tab_live_match,
     ) = st.tabs(
         [
-            "Analisi Quote & Probabilità (Poisson)",
-            "📊 Statistiche Gol & Mercati",
-            "📊 Dashboard Grafici & Micro-Eventi",
-            "🎯 Analizzatore Multi Esito & Value Bet",
+            "Odds & Probability Analysis (Poisson)",
+            "📊 Goal Stats & Markets",
+            "📊 Charts Dashboard & Micro-Events",
+            "🎯 Multi-Outcome & Value Bet Analyzer",
             "💰 Value Betting & Heatmap",
-            "Simulatore Monte Carlo (10.000 Partite)",
-            "🎮 Simulatore Live Match (Stile FC/FIFA)",
+            "Monte Carlo Simulator (10,000 Matches)",
+            "🎮 Live Match Simulator (FC/FIFA Style)",
         ]
     )
 
     with tab_poisson:
         st.markdown(
-            "Le righe in verde brillante indicano probabilità superiori all'80%. "
-            "La fair odds è l'inverso della probabilità modellata. Pareggi e "
-            "risultati a basso punteggio sono corretti con Dixon-Coles."
+            "Rows in bright green indicate probabilities above 80%. "
+            "Fair odds are the inverse of the modeled probability. Draws and "
+            "low-scoring results are corrected with Dixon-Coles."
         )
-        st.markdown("##### Dettaglio quote implicite 1X2")
+        st.markdown("##### 1X2 Implied Odds Detail")
         st.markdown(render_outcome_table(model, home, away), unsafe_allow_html=True)
 
-        st.markdown("##### Risultati esatti più probabili (Poisson + Dixon-Coles)")
+        st.markdown("##### Most Likely Exact Scores (Poisson + Dixon-Coles)")
         exact_scores = exact_score_probabilities(model.home_lambda, model.away_lambda)[:6]
         exact_score_frame = pd.DataFrame(
-            [{"Risultato": score, "Probabilità": f"{prob:.1%}"} for score, prob in exact_scores]
+            [{"Result": score, "Probability": f"{prob:.1%}"} for score, prob in exact_scores]
         )
         st.dataframe(exact_score_frame, use_container_width=True, hide_index=True)
 
-        st.markdown("##### Micro-eventi (tiri, corner, cartellini, falli)")
+        st.markdown("##### Micro-Events (shots, corners, cards, fouls)")
         poisson_html = render_probability_table(pd.DataFrame(micro_event_rows(model)))
         st.markdown(poisson_html, unsafe_allow_html=True)
 
         st.markdown(
-            "##### Lettura del modello\n"
-            "Tutte le probabilità (1X2 e micro-eventi) derivano dallo stesso "
-            "Global Power Rating: gol attesi, tiri fatti/subiti e corner sono "
-            "scalati in base al differenziale di rating fra le due squadre "
-            "(fattore campo incluso), con Time-Decay sui dati storici, "
-            "Modalità Inizio Stagione e slider manuali applicati a monte, e "
-            "correzione Dixon-Coles sui pareggi/risultati bassi."
+            "##### Reading the Model\n"
+            "All probabilities (1X2 and micro-events) derive from the same "
+            "Global Power Rating: expected goals, shots for/against and "
+            "corners are scaled based on the rating differential between "
+            "the two teams (home advantage included), with Time-Decay on "
+            "historical data, Early Season Mode and manual sliders applied "
+            "upstream, and Dixon-Coles correction on draws/low scores."
         )
 
     with tab_goal_markets:
         st.markdown(
-            "Percentuali Under/Over e Goal/No Goal calcolate dalla stessa matrice "
-            "di Poisson bivariata con correzione Dixon-Coles usata per il "
-            "pronostico 1X2 e i risultati esatti, quindi pienamente coerenti "
-            "con le altre schede."
+            "Under/Over and Goal/No Goal percentages calculated from the "
+            "same bivariate Poisson matrix with Dixon-Coles correction used "
+            "for the 1X2 forecast and exact scores, therefore fully "
+            "consistent with the other tabs."
         )
         markets = goal_market_probabilities(model)
 
-        st.markdown("##### Under / Over gol totali (partita)")
+        st.markdown("##### Total Goals Under / Over (match)")
         total_cols = st.columns(4)
         for index, line in enumerate((1.5, 2.5, 3.5, 4.5)):
             over_p = markets["total_over"][line]
@@ -4032,7 +4092,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
                 st.progress(min(max(over_p, 0.0), 1.0))
                 st.caption(f"Under {line:.1f}: {under_p:.1%}")
 
-        st.markdown("##### Under / Over gol squadra Casa")
+        st.markdown("##### Home Team Goals Under / Over")
         home_cols = st.columns(3)
         for index, line in enumerate((0.5, 1.5, 2.5)):
             over_p = markets["home_over"][line]
@@ -4042,7 +4102,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
                 st.progress(min(max(over_p, 0.0), 1.0))
                 st.caption(f"Under {line:.1f}: {under_p:.1%}")
 
-        st.markdown("##### Under / Over gol squadra Trasferta")
+        st.markdown("##### Away Team Goals Under / Over")
         away_cols = st.columns(3)
         for index, line in enumerate((0.5, 1.5, 2.5)):
             over_p = markets["away_over"][line]
@@ -4052,7 +4112,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
                 st.progress(min(max(over_p, 0.0), 1.0))
                 st.caption(f"Under {line:.1f}: {under_p:.1%}")
 
-        st.markdown("##### Goal / No Goal (entrambe le squadre segnano)")
+        st.markdown("##### Goal / No Goal (both teams score)")
         gg_col, ng_col = st.columns(2)
         with gg_col:
             st.metric("Goal (GG)", f"{markets['goal_goal']:.1%}")
@@ -4072,32 +4132,32 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
 
     with tab_montecarlo:
         st.markdown(
-            "Ogni esecuzione genera 10.000 partite indipendenti con distribuzioni "
-            "di Poisson calcolate sugli stessi lambda del Global Power Rating, "
-            "pesate con la correzione Dixon-Coles sui risultati a basso punteggio: "
-            "le frequenze qui sotto devono essere coerenti con il pronostico 1X2 "
-            "mostrato nella scheda Poisson."
+            "Every run generates 10,000 independent matches with Poisson "
+            "distributions calculated on the same Global Power Rating "
+            "lambdas, weighted with the Dixon-Coles correction on "
+            "low-scoring results: the frequencies below should be "
+            "consistent with the 1X2 forecast shown in the Poisson tab."
         )
 
         if st.session_state.get("montecarlo_teams") != (home, away):
-            # Cambio di squadre selezionate: la simulazione precedente non è
-            # più pertinente al match attualmente analizzato.
+            # Selected teams changed: the previous simulation is no longer
+            # relevant to the match currently being analyzed.
             st.session_state.pop("montecarlo_result", None)
             st.session_state["montecarlo_teams"] = (home, away)
 
         montecarlo_button_label = (
-            "🔁 Rilancia 10.000 Simulazioni Monte Carlo"
+            "🔁 Relaunch 10,000 Monte Carlo Simulations"
             if "montecarlo_result" in st.session_state
-            else "🎲 Esegui 10.000 Simulazioni Monte Carlo"
+            else "🎲 Run 10,000 Monte Carlo Simulations"
         )
         run_clicked = st.button(montecarlo_button_label, type="primary", key="simulate_button")
 
         if run_clicked:
-            with st.spinner("Simulazione di 10.000 partite in corso..."):
-                st.session_state["montecarlo_result"] = run_simulation(model)
+            render_matrix_cyber_loading(1.6)
+            st.session_state["montecarlo_result"] = run_simulation(model)
 
         if "montecarlo_result" not in st.session_state:
-            st.info("Premi il pulsante per lanciare 10.000 simulazioni Monte Carlo di questo match.")
+            st.info("Press the button to launch 10,000 Monte Carlo simulations for this match.")
         else:
             simulation = st.session_state["montecarlo_result"]
             score_frame: pd.DataFrame = simulation["scores"]
@@ -4107,52 +4167,52 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
 
             top_score_row = score_frame.iloc[0]
             render_top_result_highlight_card(
-                score_label=str(top_score_row["Risultato esatto"]),
-                probability=float(top_score_row["Probabilità"]),
-                simulations_count=int(top_score_row["Simulazioni"]),
+                score_label=str(top_score_row["Exact Score"]),
+                probability=float(top_score_row["Probability"]),
+                simulations_count=int(top_score_row["Simulations"]),
             )
 
-            st.markdown("##### 🎯 Pronostico 1X2 simulato (Casa · Pareggio · Ospite)")
+            st.markdown("##### 🎯 Simulated 1X2 Forecast (Home · Draw · Away)")
             outcome_probabilities = {
-                str(row["Esito"]): float(row["Probabilità"]) for _, row in outcome_frame.iterrows()
+                str(row["Outcome"]): float(row["Probability"]) for _, row in outcome_frame.iterrows()
             }
             render_three_way_probability_bar(
-                home_prob=outcome_probabilities.get("1 (vittoria casa)", 0.0),
-                draw_prob=outcome_probabilities.get("X (pareggio)", 0.0),
-                away_prob=outcome_probabilities.get("2 (vittoria trasferta)", 0.0),
+                home_prob=outcome_probabilities.get("1 (home win)", 0.0),
+                draw_prob=outcome_probabilities.get("X (draw)", 0.0),
+                away_prob=outcome_probabilities.get("2 (away win)", 0.0),
                 home_label=home,
                 away_label=away,
             )
-            st.caption("Frequenze osservate su 10.000 partite simulate, pesate con la correzione Dixon-Coles.")
+            st.caption("Frequencies observed over 10,000 simulated matches, weighted with the Dixon-Coles correction.")
 
             st.markdown("---")
             col_scores, col_chart = st.columns(2)
             with col_scores:
-                st.markdown("**I 5 risultati esatti più frequenti (pesati Dixon-Coles)**")
+                st.markdown("**The 5 most frequent exact scores (Dixon-Coles weighted)**")
                 st.dataframe(score_frame, use_container_width=True, hide_index=True)
 
-                st.markdown("**Frequenza dei micro-eventi chiave**")
+                st.markdown("**Frequency of key micro-events**")
                 st.dataframe(event_frame, use_container_width=True, hide_index=True)
             with col_chart:
                 exact_score_chart = px.bar(
                     score_frame,
-                    x="Risultato esatto",
-                    y="Probabilità",
-                    text="Probabilità",
-                    labels={"Probabilità": "Probabilità", "Risultato esatto": "Risultato"},
-                    color="Probabilità",
-                    color_continuous_scale=["#161b22", "#00e5ff", "#00ff87"],
+                    x="Exact Score",
+                    y="Probability",
+                    text="Probability",
+                    labels={"Probability": "Probability", "Exact Score": "Result"},
+                    color="Probability",
+                    color_continuous_scale=["#161b22", "#00e5ff", "#e0e0e0"],
                 )
                 exact_score_chart.update_traces(texttemplate="%{text:.1%}", textposition="outside")
                 exact_score_chart.update_layout(
-                    title="Risultati Esatti Più Frequenti",
+                    title="Most Frequent Exact Scores",
                     showlegend=False,
                     yaxis_tickformat=".0%",
                     margin={"l": 10, "r": 10, "t": 40, "b": 10},
                     paper_bgcolor="rgba(0,0,0,0)",
                     plot_bgcolor="rgba(0,0,0,0)",
                     font_color="#e6edf3",
-                    title_font_color="#00ff87",
+                    title_font_color="#00e5ff",
                 )
                 st.plotly_chart(exact_score_chart, use_container_width=True)
 
@@ -4163,22 +4223,22 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
                 bucket_counts.append(int((total_goals_array >= max_bucket).sum()))
                 goals_distribution_frame = pd.DataFrame(
                     {
-                        "Gol totali": bucket_labels,
-                        "Simulazioni": bucket_counts,
-                        "Probabilità": [count / len(total_goals_array) for count in bucket_counts],
+                        "Total Goals": bucket_labels,
+                        "Simulations": bucket_counts,
+                        "Probability": [count / len(total_goals_array) for count in bucket_counts],
                     }
                 )
                 goals_chart = px.bar(
                     goals_distribution_frame,
-                    x="Gol totali",
-                    y="Probabilità",
-                    text="Probabilità",
-                    color="Probabilità",
+                    x="Total Goals",
+                    y="Probability",
+                    text="Probability",
+                    color="Probability",
                     color_continuous_scale=["#161b22", "#ff8a00", "#ffd60a"],
                 )
                 goals_chart.update_traces(texttemplate="%{text:.1%}", textposition="outside")
                 goals_chart.update_layout(
-                    title="Distribuzione Gol Totali (Monte Carlo)",
+                    title="Total Goals Distribution (Monte Carlo)",
                     showlegend=False,
                     yaxis_tickformat=".0%",
                     margin={"l": 10, "r": 10, "t": 40, "b": 10},
@@ -4189,24 +4249,24 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
                 )
                 st.plotly_chart(goals_chart, use_container_width=True)
 
-            st.markdown("### 📱 Card per i Social")
-            top_event_row = event_frame.loc[event_frame["Probabilità"].idxmax()]
+            st.markdown("### 📱 Social Share Card")
+            top_event_row = event_frame.loc[event_frame["Probability"].idxmax()]
             social_rows = [
-                ("🏆 Risultato più probabile", f"{top_score_row['Risultato esatto']} ({float(top_score_row['Probabilità']):.1%})"),
-                (f"🏠 Vittoria {home}", f"{outcome_probabilities.get('1 (vittoria casa)', 0.0):.0%}"),
-                ("🤝 Pareggio", f"{outcome_probabilities.get('X (pareggio)', 0.0):.0%}"),
-                (f"✈️ Vittoria {away}", f"{outcome_probabilities.get('2 (vittoria trasferta)', 0.0):.0%}"),
-                ("🔥 Micro-evento top", f"{top_event_row['Micro-evento simulato']} · {float(top_event_row['Probabilità']):.0%}"),
+                ("🏆 Most Likely Result", f"{top_score_row['Exact Score']} ({float(top_score_row['Probability']):.1%})"),
+                (f"🏠 {home} Win", f"{outcome_probabilities.get('1 (home win)', 0.0):.0%}"),
+                ("🤝 Draw", f"{outcome_probabilities.get('X (draw)', 0.0):.0%}"),
+                (f"✈️ {away} Win", f"{outcome_probabilities.get('2 (away win)', 0.0):.0%}"),
+                ("🔥 Top Micro-Event", f"{top_event_row['Simulated Micro-Event']} · {float(top_event_row['Probability']):.0%}"),
             ]
             render_social_share_card(
                 title=f"{home} vs {away}",
-                headline=str(top_score_row["Risultato esatto"]),
-                subtitle="Monte Carlo · 10.000 Partite Simulate · CalcioLab",
+                headline=str(top_score_row["Exact Score"]),
+                subtitle="Monte Carlo · 10,000 Simulated Matches · WayneLab",
                 rows=social_rows,
                 accent="#ffd60a",
             )
 
-            st.success("Simulazione completata: 10.000 partite generate.")
+            st.success("Simulation completed: 10,000 matches generated.")
 
     with tab_live_match:
         render_live_match_tab(model, home, away)
@@ -4215,20 +4275,20 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
 DARK_THEME_CSS = """
 <style>
 /* ==========================================================================
-   CalcioLab · Dark Gaming Theme (stile EA Sports FC / TV Broadcast)
+   WayneLab · Gotham Dark Theme (Batman-inspired, EA Sports FC / TV Broadcast style)
    Restyling puramente estetico (CSS + wrapper HTML via st.markdown): non
    tocca alcuna logica di calcolo (Dixon-Coles, Monte Carlo, Kelly, Multi
    Esito, Simulatore Live) — solo la presentazione visiva dei componenti.
    ========================================================================== */
 :root {
-    --clab-bg: #0e1117;
-    --clab-bg-2: #161b22;
-    --clab-card: rgba(22, 27, 34, 0.72);
-    --clab-border: rgba(0, 255, 135, 0.22);
-    --clab-accent: #00ff87;
-    --clab-accent-2: #00e5ff;
-    --clab-text: #e6edf3;
-    --clab-muted: #8b949e;
+    --clab-bg: #050505;
+    --clab-bg-2: #0d0d0d;
+    --clab-card: rgba(18, 18, 18, 0.68);
+    --clab-border: rgba(0, 229, 255, 0.25);
+    --clab-accent: #00e5ff;
+    --clab-accent-2: #e0e0e0;
+    --clab-text: #e0e0e0;
+    --clab-muted: #9aa0a6;
 }
 
 html, body, [class*="css"] {
@@ -4237,14 +4297,14 @@ html, body, [class*="css"] {
 
 .stApp {
     background:
-        radial-gradient(circle at 8% 0%, rgba(0, 255, 135, 0.06) 0%, transparent 45%),
-        radial-gradient(circle at 92% 12%, rgba(0, 229, 255, 0.06) 0%, transparent 45%),
+        radial-gradient(circle at 8% 0%, rgba(0, 229, 255, 0.07) 0%, transparent 45%),
+        radial-gradient(circle at 92% 12%, rgba(0, 229, 255, 0.05) 0%, transparent 45%),
         linear-gradient(180deg, var(--clab-bg-2) 0%, var(--clab-bg) 60%);
     color: var(--clab-text);
 }
 
 section[data-testid="stSidebar"] {
-    background: #0a0d12;
+    background: #020202;
     border-right: 1px solid var(--clab-border);
 }
 
@@ -4286,7 +4346,7 @@ h1, h2, h3, h4, h5 {
     box-shadow: 0 0 18px rgba(0, 255, 135, 0.35);
 }
 
-/* Card "vetro" (glassmorphism) riutilizzata dalle metric-card esistenti */
+/* Glassmorphism "glass" card reused by the existing metric-card component */
 .metric-card {
     background: linear-gradient(160deg, var(--clab-card) 0%, rgba(14, 17, 23, 0.85) 100%);
     border: 1px solid var(--clab-border);
@@ -4335,7 +4395,7 @@ table {
 }
 
 thead tr {
-    background: #1c2333;
+    background: #141414;
     color: var(--clab-text);
 }
 
@@ -4447,7 +4507,7 @@ td, th {
     height: 10px;
     border-radius: 999px;
     overflow: hidden;
-    background: #1c2333;
+    background: #141414;
     border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
@@ -4680,7 +4740,8 @@ td, th {
 
 def main() -> None:
     st.set_page_config(
-        page_title="CalcioLab · Analisi e Simulazioni",
+        page_title="WayneLab · Football Intelligence",
+        page_icon="🦇",
         layout="wide",
     )
     st.markdown(DARK_THEME_CSS, unsafe_allow_html=True)
@@ -4689,21 +4750,22 @@ def main() -> None:
         st.session_state.authenticated = False
 
     st.markdown(
-        "# ⚽ CalcioLab\n"
-        "Analisi probabilistica e simulazioni di calcio con dati live da Football-Data.org."
+        "# 🦇 WayneLab\n"
+        "**Football Intelligence** — probabilistic analysis and match simulations "
+        "powered by live Football-Data.org data."
     )
 
     if st.session_state.authenticated:
         with st.sidebar:
-            st.success("Accesso autorizzato.")
-            if st.button("Esci"):
+            st.success("Access authorized.")
+            if st.button("Log Out"):
                 st.session_state.authenticated = False
                 st.rerun()
             st.markdown("---")
             sidebar_values = render_sidebar_controls()
 
         main_tab_analysis, main_tab_bankroll = st.tabs(
-            ["⚽ Analisi Match", "📊 Gestione Bankroll & Storico"]
+            ["⚽ Match Analysis", "📊 Bankroll & History Management"]
         )
         with main_tab_analysis:
             render_dashboard(sidebar_values)
