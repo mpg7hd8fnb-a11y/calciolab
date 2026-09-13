@@ -2235,11 +2235,11 @@ def render_social_share_card(
     rows: Sequence[tuple[str, str]],
     accent: str = "#00E5FF",
 ) -> None:
-    """📱 Box 'Scheda Social Share': card compatta e ad alto impatto visivo,
-    pensata per essere fotografata/catturata in uno screenshot da condividere
-    sui social — riassume risultato/pronostico, statistiche principali e un
-    footer con il nome dell'app. Contenuto puramente derivato da dati già
-    calcolati altrove (MatchModel o simulate_single_match)."""
+    """📱 'Social Share Card' box: a compact, high-visual-impact card meant
+    to be photographed/captured in a screenshot to share on social media —
+    summarizes the result/forecast, key stats, and a footer with the app
+    name. Content purely derived from data already computed elsewhere
+    (MatchModel or simulate_single_match)."""
     rows_html = "".join(
         f'<div class="social-share-row"><span class="social-share-row-label">{escape(label)}</span>'
         f'<span class="social-share-row-value">{escape(value)}</span></div>'
@@ -2247,7 +2247,7 @@ def render_social_share_card(
     )
     st.markdown(
         f'<div class="social-share-card" style="--social-accent:{escape(accent)}">'
-        f'<div class="social-share-title">📱 Card per i Social</div>'
+        f'<div class="social-share-title">📱 Social Share Card</div>'
         f'<div class="social-share-title" style="opacity:.7;margin-top:2px">{escape(title)}</div>'
         f'<div class="social-share-headline">{escape(headline)}</div>'
         f'<div class="social-share-subtitle">{escape(subtitle)}</div>'
@@ -2259,14 +2259,15 @@ def render_social_share_card(
 
 
 def render_top_result_highlight_card(score_label: str, probability: float, simulations_count: int) -> None:
-    """🏆 Card oro/verde fluo con il 'Risultato Più Probabile' emerso dalle
-    10.000 simulazioni Monte Carlo: pensata per catturare subito l'occhio in
-    cima alla scheda, prima delle tabelle di dettaglio."""
+    """🏆 HUD reveal card for the 'Top Result' emerging from the 10,000
+    Monte Carlo paths: giant gold/neon score front and center, with the
+    confidence percentage in evidence — built to be the first thing a
+    viewer's eye lands on when the simulation finishes."""
     st.markdown(
         '<div class="mc-highlight-card">'
-        '<div class="mc-highlight-label">🏆 Risultato Più Probabile · 10.000 Simulazioni</div>'
+        '<div class="mc-highlight-label">🏆 TOP RESULT · 10,000 SIMULATIONS</div>'
         f'<div class="mc-highlight-score">{escape(score_label)}</div>'
-        f'<div class="mc-highlight-sub">Probabilità {probability:.1%} · {simulations_count:,} simulazioni su 10.000</div>'
+        f'<div class="mc-highlight-sub">Confidence: {probability:.1%} · {simulations_count:,} / 10,000 paths</div>'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -2279,9 +2280,9 @@ def render_three_way_probability_bar(
     home_label: str,
     away_label: str,
 ) -> None:
-    """Barra 1X2 a 3 colori (Casa verde/azzurro fluo · Pareggio oro ·
-    Ospite arancio/rosso), con le percentuali incise direttamente nel
-    segmento quando c'è spazio sufficiente, altrimenti solo in legenda."""
+    """3-color 1X2 bar (Home green/blue neon · Draw gold · Away
+    orange/red), with the percentages engraved directly in the segment
+    when there is enough room, otherwise only in the legend."""
     total = max(home_prob + draw_prob + away_prob, 1e-9)
     home_pct = clamp(home_prob / total * 100, 0.0, 100.0)
     draw_pct = clamp(draw_prob / total * 100, 0.0, 100.0)
@@ -2298,11 +2299,151 @@ def render_three_way_probability_bar(
         '</div>'
         '<div class="three-way-legend">'
         f'<span>🏠 {escape(home_label)} {home_pct:.0f}%</span>'
-        f'<span>🤝 Pareggio {draw_pct:.0f}%</span>'
+        f'<span>🤝 Draw {draw_pct:.0f}%</span>'
         f'<span>✈️ {escape(away_label)} {away_pct:.0f}%</span>'
         '</div>',
         unsafe_allow_html=True,
     )
+
+
+def render_score_frequency_ranking(
+    score_frame: pd.DataFrame, reference_probability: float, start_rank: int = 1
+) -> None:
+    """🏁 Neon ranking bars for the Monte Carlo exact-score frequencies:
+    each row is sized relative to `reference_probability` (the single
+    highest-probability row overall, i.e. the hero Top Result card's
+    score) rather than the max of the rows being rendered here, so that —
+    when called on the alternatives below the hero card — the viewer can
+    immediately gauge, at a glance, how far behind the top pick they trail."""
+    if score_frame.empty:
+        return
+    reference_probability = max(reference_probability, 1e-9)
+    rows_html = []
+    for offset, (_, row) in enumerate(score_frame.iterrows()):
+        rank = start_rank + offset
+        probability = float(row["Probability"])
+        bar_pct = clamp(probability / reference_probability * 100, 3.0, 100.0)
+        rows_html.append(
+            '<div class="score-rank-item">'
+            f'<div class="score-rank-badge">#{rank}</div>'
+            '<div class="score-rank-body">'
+            f'<div class="score-rank-top"><span>{escape(str(row["Exact Score"]))}</span>'
+            f'<span>{probability:.1%}</span></div>'
+            '<div class="score-rank-track">'
+            f'<div class="score-rank-fill" style="width:{bar_pct:.1f}%"></div>'
+            '</div></div></div>'
+        )
+    st.markdown("".join(rows_html), unsafe_allow_html=True)
+
+
+def compute_micro_events_intel(raw: dict[str, object], outcome_probabilities: dict[str, float]) -> dict[str, float]:
+    """Derives the Micro-Events Intel percentages straight from the raw
+    per-simulation NumPy arrays already produced by run_simulation (goals,
+    corners, cards) plus the already-computed 1X2 frequencies — a pure,
+    read-only aggregation layer that does not touch the Monte Carlo engine
+    itself. Asian Handicap lines are derived from the simulated goal
+    difference (no push scenario at the .5 line, so the two sides are
+    exact complements)."""
+    home_goals = raw["home_goals"]
+    away_goals = raw["away_goals"]
+    total_goals = home_goals + away_goals
+    goal_diff = home_goals - away_goals
+    n = len(total_goals)
+
+    return {
+        "over_25_goals": float((total_goals > 2).mean()),
+        "btts": float(((home_goals > 0) & (away_goals > 0)).mean()),
+        "over_85_corners": float((raw["corners"] > 8).mean()),
+        "over_95_corners": float((raw["corners"] > 9).mean()),
+        "over_35_cards": float((raw["total_cards"] > 3).mean()),
+        "over_45_cards": float((raw["total_cards"] > 4).mean()),
+        "ah_home_minus_15": float((goal_diff >= 2).mean()),
+        "ah_away_plus_15": float((goal_diff <= 1).mean()),
+        "double_chance_1x": outcome_probabilities.get("1 (home win)", 0.0) + outcome_probabilities.get("X (draw)", 0.0),
+        "double_chance_12": outcome_probabilities.get("1 (home win)", 0.0) + outcome_probabilities.get("2 (away win)", 0.0),
+        "n_simulations": float(n),
+    }
+
+
+def _intel_bar_color(probability: float) -> str:
+    """Neon gradient for an Intel bar: brighter/greener the higher the
+    probability, shifting toward electric blue for lower readings —
+    purely a color mapping, no new statistic involved."""
+    if probability >= 0.6:
+        return "linear-gradient(90deg, #00e5ff, #00ff87)"
+    if probability >= 0.35:
+        return "linear-gradient(90deg, #00e5ff, #ffd60a)"
+    return "linear-gradient(90deg, #3b4252, #00e5ff)"
+
+
+def render_intel_card(title: str, metrics: Sequence[tuple[str, float]]) -> None:
+    """One 'Micro-Events Intel' card: a title plus one or more neon
+    probability bars, each metric rendered large and high-contrast so it
+    stays readable even when the dashboard is viewed on a phone screen
+    inside a recorded video."""
+    rows_html = []
+    for label, probability in metrics:
+        pct = clamp(probability * 100, 0.0, 100.0)
+        rows_html.append(
+            '<div class="intel-metric-row">'
+            f'<div class="intel-metric-top"><span>{escape(label)}</span>'
+            f'<span class="intel-metric-value">{probability:.1%}</span></div>'
+            '<div class="intel-bar-track">'
+            f'<div class="intel-bar-fill" style="width:{pct:.1f}%;background:{_intel_bar_color(probability)}"></div>'
+            '</div></div>'
+        )
+    st.markdown(
+        f'<div class="intel-card"><div class="intel-card-title">{escape(title)}</div>'
+        f'{"".join(rows_html)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_micro_events_intel_grid(intel: dict[str, float], home: str, away: str) -> None:
+    """📡 Micro-Events Intel dashboard: a grid of neon cards covering
+    Over/Under 2.5 Goals, Both Teams to Score, Corners, Cards, and Asian
+    Handicap / Double Chance — all derived from the same 10,000-path Monte
+    Carlo output already computed above, laid out for instant at-a-glance
+    reading on a recorded video."""
+    st.markdown("##### 📡 Micro-Events Intel")
+    grid_col_1, grid_col_2, grid_col_3 = st.columns(3)
+    with grid_col_1:
+        render_intel_card(
+            "⚽ Over/Under 2.5 Goals",
+            [("Over 2.5 Goals", intel["over_25_goals"])],
+        )
+    with grid_col_2:
+        render_intel_card(
+            "🥅 Both Teams to Score",
+            [("BTTS / GOAL", intel["btts"])],
+        )
+    with grid_col_3:
+        render_intel_card(
+            "🚩 Corners",
+            [
+                ("Over 8.5 Corners", intel["over_85_corners"]),
+                ("Over 9.5 Corners", intel["over_95_corners"]),
+            ],
+        )
+    grid_col_4, grid_col_5 = st.columns(2)
+    with grid_col_4:
+        render_intel_card(
+            "🟨 Cards",
+            [
+                ("Over 3.5 Cards", intel["over_35_cards"]),
+                ("Over 4.5 Cards", intel["over_45_cards"]),
+            ],
+        )
+    with grid_col_5:
+        render_intel_card(
+            "🎯 Asian Handicap & Double Chance",
+            [
+                (f"{home} -1.5 AH", intel["ah_home_minus_15"]),
+                (f"{away} +1.5 AH", intel["ah_away_plus_15"]),
+                ("Double Chance 1X", intel["double_chance_1x"]),
+                ("Double Chance 12", intel["double_chance_12"]),
+            ],
+        )
 
 
 def render_live_match_tab(model: MatchModel, home: str, away: str) -> None:
@@ -3194,57 +3335,83 @@ def compute_kelly_rows_from_session(model: MatchModel, home: str, away: str) -> 
     ]
 
 
-def render_matrix_cyber_loading(duration_seconds: float = 1.6) -> None:
-    """🖥️ Matrix/Cyber-style loading animation shown while the 10,000 Monte
-    Carlo simulations run: a canvas-based 'digital rain' effect (falling
-    glyphs in Electric Blue) rendered through an embedded HTML/JS component
-    via streamlit.components.v1.html — plain st.markdown strips <script>
-    tags, so components.html is required for the animation to actually
-    execute. Purely a visual flourish for social-media appeal: it runs for
-    a fixed short duration and is then cleared; it does not affect, delay,
-    or replace any part of the simulation logic itself."""
+def render_monte_carlo_computing_hud(total_paths: int = 10_000, duration_seconds: float = 2.6) -> None:
+    """⚙️ 'Computing' HUD shown while the 10,000 Monte Carlo paths run: a
+    canvas-based digital-rain backdrop (Electric Blue glyphs) with an
+    overlaid live counter racing from 0 to `total_paths` ('1,000... 5,000...
+    10,000 paths calculated') and a neon green→blue progress bar underneath,
+    built to hook a viewer's attention in the first seconds of a screen
+    recording. Rendered through streamlit.components.v1.html — plain
+    st.markdown strips <script> tags, so components.html is required for
+    the animation to actually execute. The whole count-up is timed inside
+    the embedded JavaScript so it runs smoothly without per-frame Streamlit
+    reruns; Python only sleeps for the matching duration before clearing the
+    placeholder. Purely a visual flourish: it never affects, delays, or
+    replaces any part of the actual simulation logic, which runs instantly
+    via NumPy right after this animation completes."""
     placeholder = st.empty()
+    duration_ms = int(duration_seconds * 1000)
     with placeholder:
         components.html(
-            """
-            <div style="background:#050505;border-radius:12px;overflow:hidden;
-                        border:1px solid rgba(0,229,255,.35);
-                        box-shadow:0 0 24px rgba(0,229,255,.15);">
-              <canvas id="matrixCanvas" style="display:block;width:100%;height:150px;"></canvas>
-              <div style="text-align:center;color:#00E5FF;font-family:'Courier New',monospace;
-                          font-size:.78rem;letter-spacing:.16em;text-transform:uppercase;
-                          padding:8px 0;background:#050505;">
-                ⚡ Running 10,000 simulations...
+            f"""
+            <div class="mc-hud-wrap" style="height:190px;">
+              <canvas id="matrixCanvas" style="display:block;width:100%;height:190px;"></canvas>
+              <div class="mc-hud-overlay">
+                <div class="mc-hud-label">⚙️ RUNNING MONTE CARLO ENGINE</div>
+                <div class="mc-hud-counter" id="mcCounter">0</div>
+                <div class="mc-hud-sub" id="mcSub">paths calculated</div>
+                <div class="mc-hud-track"><div class="mc-hud-fill" id="mcFill"></div></div>
               </div>
             </div>
             <script>
             const canvas = document.getElementById('matrixCanvas');
             const ctx = canvas.getContext('2d');
-            function resizeCanvas() {
+            function resizeCanvas() {{
                 canvas.width = canvas.clientWidth;
                 canvas.height = canvas.clientHeight;
-            }
+            }}
             resizeCanvas();
             window.addEventListener('resize', resizeCanvas);
             const glyphs = '01λβαΣΔ⚽01λβαΣΔ01';
             const fontSize = 14;
             let columns = Math.floor(canvas.width / fontSize) || 20;
             let drops = new Array(columns).fill(1);
-            function draw() {
+            function drawRain() {{
                 ctx.fillStyle = 'rgba(5,5,5,0.18)';
                 ctx.fillRect(0, 0, canvas.width, canvas.height);
                 ctx.fillStyle = '#00E5FF';
                 ctx.font = fontSize + 'px monospace';
-                for (let i = 0; i < drops.length; i++) {
+                for (let i = 0; i < drops.length; i++) {{
                     const glyph = glyphs[Math.floor(Math.random() * glyphs.length)];
                     ctx.fillText(glyph, i * fontSize, drops[i] * fontSize);
-                    if (drops[i] * fontSize > canvas.height && Math.random() > 0.975) {
+                    if (drops[i] * fontSize > canvas.height && Math.random() > 0.975) {{
                         drops[i] = 0;
-                    }
+                    }}
                     drops[i]++;
-                }
-            }
-            setInterval(draw, 45);
+                }}
+            }}
+            setInterval(drawRain, 45);
+
+            const totalPaths = {total_paths};
+            const durationMs = {duration_ms};
+            const counterEl = document.getElementById('mcCounter');
+            const fillEl = document.getElementById('mcFill');
+            const startTime = performance.now();
+            function tickCounter(now) {{
+                const elapsed = now - startTime;
+                const progress = Math.min(elapsed / durationMs, 1);
+                const eased = 1 - Math.pow(1 - progress, 2);
+                const current = Math.floor(eased * totalPaths);
+                counterEl.textContent = current.toLocaleString('en-US');
+                fillEl.style.width = (eased * 100).toFixed(0) + '%';
+                if (progress < 1) {{
+                    requestAnimationFrame(tickCounter);
+                }} else {{
+                    counterEl.textContent = totalPaths.toLocaleString('en-US');
+                    fillEl.style.width = '100%';
+                }}
+            }}
+            requestAnimationFrame(tickCounter);
             </script>
             """,
             height=190,
@@ -3308,13 +3475,13 @@ def run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, 
     ]
 
     key_events = [
-        ("Over 2.5 gol", home_goals + away_goals > 2),
-        ("Over 8.5 corner", corners > 8),
-        ("Over 22.5 tiri totali", total_shots > 22),
-        ("Casa Over 4.5 tiri in porta", home_sot > 4),
-        ("Trasferta Over 3.5 tiri in porta", away_sot > 3),
-        ("Over 3.5 cartellini", total_cards > 3),
-        ("Over 24.5 falli", fouls > 24),
+        ("Over 2.5 Goals", home_goals + away_goals > 2),
+        ("Over 8.5 Corners", corners > 8),
+        ("Over 22.5 Total Shots", total_shots > 22),
+        ("Home Over 4.5 Shots on Target", home_sot > 4),
+        ("Away Over 3.5 Shots on Target", away_sot > 3),
+        ("Over 3.5 Cards", total_cards > 3),
+        ("Over 24.5 Fouls", fouls > 24),
     ]
     event_rows = [
         {
@@ -4148,12 +4315,12 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
         montecarlo_button_label = (
             "🔁 Relaunch 10,000 Monte Carlo Simulations"
             if "montecarlo_result" in st.session_state
-            else "🎲 Run 10,000 Monte Carlo Simulations"
+            else "▶️ Run 10,000 Monte Carlo Simulations"
         )
         run_clicked = st.button(montecarlo_button_label, type="primary", key="simulate_button")
 
         if run_clicked:
-            render_matrix_cyber_loading(1.6)
+            render_monte_carlo_computing_hud(total_paths=10_000, duration_seconds=2.6)
             st.session_state["montecarlo_result"] = run_simulation(model)
 
         if "montecarlo_result" not in st.session_state:
@@ -4162,9 +4329,13 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
             simulation = st.session_state["montecarlo_result"]
             score_frame: pd.DataFrame = simulation["scores"]
             outcome_frame: pd.DataFrame = simulation["outcomes"]
-            event_frame: pd.DataFrame = simulation["events"]
             raw = simulation["raw"]
 
+            outcome_probabilities = {
+                str(row["Outcome"]): float(row["Probability"]) for _, row in outcome_frame.iterrows()
+            }
+
+            # --- HUD 1: Top Result reveal ---------------------------------
             top_score_row = score_frame.iloc[0]
             render_top_result_highlight_card(
                 score_label=str(top_score_row["Exact Score"]),
@@ -4172,10 +4343,8 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
                 simulations_count=int(top_score_row["Simulations"]),
             )
 
-            st.markdown("##### 🎯 Simulated 1X2 Forecast (Home · Draw · Away)")
-            outcome_probabilities = {
-                str(row["Outcome"]): float(row["Probability"]) for _, row in outcome_frame.iterrows()
-            }
+            # --- HUD 2: Match Outcome Probability (1X2) --------------------
+            st.markdown("##### 🎯 Match Outcome Probability")
             render_three_way_probability_bar(
                 home_prob=outcome_probabilities.get("1 (home win)", 0.0),
                 draw_prob=outcome_probabilities.get("X (draw)", 0.0),
@@ -4186,87 +4355,60 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
             st.caption("Frequencies observed over 10,000 simulated matches, weighted with the Dixon-Coles correction.")
 
             st.markdown("---")
-            col_scores, col_chart = st.columns(2)
-            with col_scores:
-                st.markdown("**The 5 most frequent exact scores (Dixon-Coles weighted)**")
-                st.dataframe(score_frame, use_container_width=True, hide_index=True)
 
-                st.markdown("**Frequency of key micro-events**")
-                st.dataframe(event_frame, use_container_width=True, hide_index=True)
-            with col_chart:
-                exact_score_chart = px.bar(
-                    score_frame,
-                    x="Exact Score",
-                    y="Probability",
-                    text="Probability",
-                    labels={"Probability": "Probability", "Exact Score": "Result"},
-                    color="Probability",
-                    color_continuous_scale=["#161b22", "#00e5ff", "#e0e0e0"],
-                )
-                exact_score_chart.update_traces(texttemplate="%{text:.1%}", textposition="outside")
-                exact_score_chart.update_layout(
-                    title="Most Frequent Exact Scores",
-                    showlegend=False,
-                    yaxis_tickformat=".0%",
-                    margin={"l": 10, "r": 10, "t": 40, "b": 10},
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    font_color="#e6edf3",
-                    title_font_color="#00e5ff",
-                )
-                st.plotly_chart(exact_score_chart, use_container_width=True)
-
-                total_goals_array = raw["home_goals"] + raw["away_goals"]
-                max_bucket = 7
-                bucket_labels = [str(n) for n in range(max_bucket)] + [f"{max_bucket}+"]
-                bucket_counts = [int((total_goals_array == n).sum()) for n in range(max_bucket)]
-                bucket_counts.append(int((total_goals_array >= max_bucket).sum()))
-                goals_distribution_frame = pd.DataFrame(
-                    {
-                        "Total Goals": bucket_labels,
-                        "Simulations": bucket_counts,
-                        "Probability": [count / len(total_goals_array) for count in bucket_counts],
-                    }
-                )
-                goals_chart = px.bar(
-                    goals_distribution_frame,
-                    x="Total Goals",
-                    y="Probability",
-                    text="Probability",
-                    color="Probability",
-                    color_continuous_scale=["#161b22", "#ff8a00", "#ffd60a"],
-                )
-                goals_chart.update_traces(texttemplate="%{text:.1%}", textposition="outside")
-                goals_chart.update_layout(
-                    title="Total Goals Distribution (Monte Carlo)",
-                    showlegend=False,
-                    yaxis_tickformat=".0%",
-                    margin={"l": 10, "r": 10, "t": 40, "b": 10},
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    font_color="#e6edf3",
-                    title_font_color="#ffd60a",
-                )
-                st.plotly_chart(goals_chart, use_container_width=True)
-
-            st.markdown("### 📱 Social Share Card")
-            top_event_row = event_frame.loc[event_frame["Probability"].idxmax()]
-            social_rows = [
-                ("🏆 Most Likely Result", f"{top_score_row['Exact Score']} ({float(top_score_row['Probability']):.1%})"),
-                (f"🏠 {home} Win", f"{outcome_probabilities.get('1 (home win)', 0.0):.0%}"),
-                ("🤝 Draw", f"{outcome_probabilities.get('X (draw)', 0.0):.0%}"),
-                (f"✈️ {away} Win", f"{outcome_probabilities.get('2 (away win)', 0.0):.0%}"),
-                ("🔥 Top Micro-Event", f"{top_event_row['Simulated Micro-Event']} · {float(top_event_row['Probability']):.0%}"),
-            ]
-            render_social_share_card(
-                title=f"{home} vs {away}",
-                headline=str(top_score_row["Exact Score"]),
-                subtitle="Monte Carlo · 10,000 Simulated Matches · WayneLab",
-                rows=social_rows,
-                accent="#ffd60a",
+            # --- HUD 3: Top Alternative Outcomes ranking -------------------
+            st.markdown("##### 🏁 Top Alternative Outcomes")
+            render_score_frequency_ranking(
+                score_frame.iloc[1:],
+                reference_probability=float(top_score_row["Probability"]),
+                start_rank=2,
             )
 
-            st.success("Simulation completed: 10,000 matches generated.")
+            st.markdown("---")
+
+            # --- HUD 4: Micro-Events Intel grid -----------------------------
+            intel = compute_micro_events_intel(raw, outcome_probabilities)
+            render_micro_events_intel_grid(intel, home, away)
+
+            st.markdown("---")
+
+            # --- Total Goals Distribution chart (secondary analytical view) --
+            st.markdown("##### 📈 Total Goals Distribution (10,000 Paths)")
+            total_goals_array = raw["home_goals"] + raw["away_goals"]
+            max_bucket = 7
+            bucket_labels = [str(n) for n in range(max_bucket)] + [f"{max_bucket}+"]
+            bucket_counts = [int((total_goals_array == n).sum()) for n in range(max_bucket)]
+            bucket_counts.append(int((total_goals_array >= max_bucket).sum()))
+            goals_distribution_frame = pd.DataFrame(
+                {
+                    "Total Goals": bucket_labels,
+                    "Simulations": bucket_counts,
+                    "Probability": [count / len(total_goals_array) for count in bucket_counts],
+                }
+            )
+            goals_chart = px.bar(
+                goals_distribution_frame,
+                x="Total Goals",
+                y="Probability",
+                text="Probability",
+                color="Probability",
+                color_continuous_scale=["#161b22", "#00e5ff", "#00ff87"],
+            )
+            goals_chart.update_traces(texttemplate="%{text:.1%}", textposition="outside")
+            goals_chart.update_layout(
+                showlegend=False,
+                yaxis_tickformat=".0%",
+                margin={"l": 10, "r": 10, "t": 10, "b": 10},
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font_color="#e0e0e0",
+            )
+            st.plotly_chart(goals_chart, use_container_width=True)
+
+            st.caption(
+                f"⚙️ Engine status: 10,000 / 10,000 paths computed for {home} vs {away} · "
+                "live feed synced with the Dixon-Coles matrix above."
+            )
 
     with tab_live_match:
         render_live_match_tab(model, home, away)
@@ -4648,47 +4790,240 @@ td, th {
 }
 
 /* --------------------------------------------------------------------
-   Monte Carlo · Card "Risultato Più Probabile" (oro/verde fluo)
+   Monte Carlo · "Computing" HUD (shown while the 10,000 paths run)
+   -------------------------------------------------------------------- */
+.mc-hud-wrap {
+    position: relative;
+    border-radius: 16px;
+    overflow: hidden;
+    border: 1px solid rgba(0, 229, 255, 0.35);
+    box-shadow: 0 0 30px rgba(0, 229, 255, 0.18);
+    margin-bottom: 18px;
+    background: #050505;
+}
+
+.mc-hud-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 10px;
+    text-align: center;
+    background: rgba(5, 5, 5, 0.35);
+}
+
+.mc-hud-label {
+    font-family: "Courier New", monospace;
+    font-size: 0.75rem;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: #00e5ff;
+    text-shadow: 0 0 8px rgba(0, 229, 255, 0.7);
+}
+
+.mc-hud-counter {
+    font-family: "Courier New", monospace;
+    font-size: 2.6rem;
+    font-weight: 900;
+    letter-spacing: 0.04em;
+    font-variant-numeric: tabular-nums;
+    background: linear-gradient(135deg, #00ff87, #00e5ff);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    text-shadow: 0 0 24px rgba(0, 255, 135, 0.35);
+}
+
+.mc-hud-sub {
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: #9aa0a6;
+}
+
+.mc-hud-track {
+    width: 80%;
+    height: 8px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.08);
+    margin-top: 4px;
+}
+
+.mc-hud-fill {
+    height: 100%;
+    width: 0%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #00ff87, #00e5ff);
+    box-shadow: 0 0 12px rgba(0, 229, 255, 0.8);
+    transition: width 0.05s linear;
+}
+
+/* --------------------------------------------------------------------
+   Monte Carlo · Top Result HUD reveal card (gold/neon hero card)
    -------------------------------------------------------------------- */
 .mc-highlight-card {
     border-radius: 20px;
-    padding: 20px 24px;
-    background: linear-gradient(135deg, rgba(255, 214, 10, 0.14), rgba(0, 255, 135, 0.10));
-    border: 1px solid #ffd60a;
-    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45), 0 0 26px rgba(255, 214, 10, 0.18);
+    padding: 26px 24px;
+    background:
+        radial-gradient(circle at 50% 0%, rgba(0, 229, 255, 0.14), transparent 60%),
+        linear-gradient(135deg, rgba(255, 214, 10, 0.12), rgba(0, 255, 135, 0.08));
+    border: 1px solid #00e5ff;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5), 0 0 32px rgba(0, 229, 255, 0.22);
     margin-bottom: 18px;
     backdrop-filter: blur(10px);
     text-align: center;
 }
 
 .mc-highlight-label {
-    font-size: 0.8rem;
+    font-family: "Courier New", monospace;
+    font-size: 0.82rem;
     text-transform: uppercase;
-    letter-spacing: 0.14em;
-    color: #ffd60a;
+    letter-spacing: 0.16em;
+    color: #00e5ff;
     font-weight: 800;
+    text-shadow: 0 0 8px rgba(0, 229, 255, 0.6);
 }
 
 .mc-highlight-score {
-    font-size: 3rem;
+    font-size: 4.2rem;
     font-weight: 900;
     letter-spacing: 0.03em;
-    background: linear-gradient(135deg, #ffd60a, var(--clab-accent));
+    background: linear-gradient(135deg, #ffd60a, #00ff87 55%, #00e5ff);
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
-    margin: 8px 0 4px 0;
+    margin: 10px 0 6px 0;
     font-variant-numeric: tabular-nums;
+    line-height: 1;
 }
 
 .mc-highlight-sub {
-    font-size: 0.9rem;
+    font-family: "Courier New", monospace;
+    font-size: 1rem;
     color: var(--clab-text);
-    font-weight: 600;
+    font-weight: 700;
+    letter-spacing: 0.04em;
 }
 
 /* --------------------------------------------------------------------
-   Barra 1X2 a 3 colori (Casa · Pareggio · Ospite)
+   Monte Carlo · Top Alternative Outcomes ranking bars
+   -------------------------------------------------------------------- */
+.score-rank-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.score-rank-badge {
+    flex: 0 0 auto;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 900;
+    font-size: 0.85rem;
+    background: rgba(0, 229, 255, 0.12);
+    border: 1px solid rgba(0, 229, 255, 0.5);
+    color: #00e5ff;
+}
+
+.score-rank-body {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.score-rank-top {
+    display: flex;
+    justify-content: space-between;
+    font-weight: 800;
+    font-size: 0.92rem;
+    color: var(--clab-text);
+    margin-bottom: 4px;
+    font-variant-numeric: tabular-nums;
+}
+
+.score-rank-track {
+    width: 100%;
+    height: 10px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.07);
+    overflow: hidden;
+}
+
+.score-rank-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #00e5ff, #00ff87);
+    box-shadow: 0 0 10px rgba(0, 229, 255, 0.5);
+}
+
+/* --------------------------------------------------------------------
+   Monte Carlo · Micro-Events Intel grid
+   -------------------------------------------------------------------- */
+.intel-card {
+    border-radius: 16px;
+    padding: 16px 18px;
+    background: var(--clab-card);
+    border: 1px solid rgba(0, 229, 255, 0.22);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(10px);
+    margin-bottom: 14px;
+    height: 100%;
+}
+
+.intel-card-title {
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #9aa0a6;
+    font-weight: 800;
+    margin-bottom: 10px;
+}
+
+.intel-metric-row {
+    margin-bottom: 10px;
+}
+
+.intel-metric-row:last-child {
+    margin-bottom: 0;
+}
+
+.intel-metric-top {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: var(--clab-text);
+    margin-bottom: 4px;
+}
+
+.intel-metric-value {
+    font-weight: 900;
+    font-variant-numeric: tabular-nums;
+}
+
+.intel-bar-track {
+    width: 100%;
+    height: 9px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.07);
+    overflow: hidden;
+}
+
+.intel-bar-fill {
+    height: 100%;
+    border-radius: 999px;
+}
+
+/* --------------------------------------------------------------------
+   3-color 1X2 bar (Home · Draw · Away)
    -------------------------------------------------------------------- */
 .three-way-bar-track {
     display: flex;
