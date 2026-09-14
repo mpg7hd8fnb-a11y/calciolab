@@ -2399,6 +2399,30 @@ def render_intel_card(title: str, metrics: Sequence[tuple[str, float]]) -> None:
     )
 
 
+def render_micro_events_intel_column(intel: dict[str, float]) -> None:
+    """📡 Compact vertical stack of the 4 core Micro-Events Intel cards
+    (Over/Under 2.5 Goals, Both Teams to Score, Over Corners, Over Cards),
+    built for Column 3 of the single-screen Monte Carlo HUD: no nested
+    st.columns, just a lightweight vertical stack that fits one narrow
+    column without pushing the page into vertical scroll."""
+    render_intel_card("⚽ Over/Under 2.5 Goals", [("Over 2.5 Goals", intel["over_25_goals"])])
+    render_intel_card("🥅 Both Teams to Score", [("BTTS / GOAL", intel["btts"])])
+    render_intel_card(
+        "🚩 Over Corners",
+        [
+            ("Over 8.5 Corners", intel["over_85_corners"]),
+            ("Over 9.5 Corners", intel["over_95_corners"]),
+        ],
+    )
+    render_intel_card(
+        "🟨 Over Cards",
+        [
+            ("Over 3.5 Cards", intel["over_35_cards"]),
+            ("Over 4.5 Cards", intel["over_45_cards"]),
+        ],
+    )
+
+
 def render_micro_events_intel_grid(intel: dict[str, float], home: str, away: str) -> None:
     """📡 Micro-Events Intel dashboard: a grid of neon cards covering
     Over/Under 2.5 Goals, Both Teams to Score, Corners, Cards, and Asian
@@ -4332,11 +4356,9 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
 
     with tab_montecarlo:
         st.markdown(
-            "Every run generates 10,000 independent matches with Poisson "
-            "distributions calculated on the same Global Power Rating "
-            "lambdas, weighted with the Dixon-Coles correction on "
-            "low-scoring results: the frequencies below should be "
-            "consistent with the 1X2 forecast shown in the Poisson tab."
+            '<div class="mc-intro-caption">10,000 independent Poisson-distributed matches, weighted with the '
+            "Dixon-Coles correction on low-scoring results · consistent with the 1X2 forecast in the Poisson tab.</div>",
+            unsafe_allow_html=True,
         )
 
         render_match_banner_compact(league, home, away, crests)
@@ -4369,81 +4391,88 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
             outcome_probabilities = {
                 str(row["Outcome"]): float(row["Probability"]) for _, row in outcome_frame.iterrows()
             }
-
-            # --- HUD 1: Top Result reveal ---------------------------------
             top_score_row = score_frame.iloc[0]
-            render_top_result_highlight_card(
-                score_label=str(top_score_row["Exact Score"]),
-                probability=float(top_score_row["Probability"]),
-                simulations_count=int(top_score_row["Simulations"]),
-            )
-
-            # --- HUD 2: Match Outcome Probability (1X2) --------------------
-            st.markdown("##### 🎯 Match Outcome Probability")
-            render_three_way_probability_bar(
-                home_prob=outcome_probabilities.get("1 (home win)", 0.0),
-                draw_prob=outcome_probabilities.get("X (draw)", 0.0),
-                away_prob=outcome_probabilities.get("2 (away win)", 0.0),
-                home_label=home,
-                away_label=away,
-            )
-            st.caption("Frequencies observed over 10,000 simulated matches, weighted with the Dixon-Coles correction.")
-
-            st.markdown("---")
-
-            # --- HUD 3: Top Alternative Outcomes ranking -------------------
-            st.markdown("##### 🏁 Top Alternative Outcomes")
-            render_score_frequency_ranking(
-                score_frame.iloc[1:],
-                reference_probability=float(top_score_row["Probability"]),
-                start_rank=2,
-            )
-
-            st.markdown("---")
-
-            # --- HUD 4: Micro-Events Intel grid -----------------------------
             intel = compute_micro_events_intel(raw, outcome_probabilities)
-            render_micro_events_intel_grid(intel, home, away)
 
-            st.markdown("---")
+            # --- Single-Screen HUD: 3 columns, all post-simulation data ----
+            # side by side in one row so the whole dashboard fits one
+            # viewport with no vertical scroll (screen-recording friendly).
+            col_top_outcome, col_alt_frequencies, col_micro_intel = st.columns([1.2, 1, 1.2])
 
-            # --- Total Goals Distribution chart (secondary analytical view) --
-            st.markdown("##### 📈 Total Goals Distribution (10,000 Paths)")
-            total_goals_array = raw["home_goals"] + raw["away_goals"]
-            max_bucket = 7
-            bucket_labels = [str(n) for n in range(max_bucket)] + [f"{max_bucket}+"]
-            bucket_counts = [int((total_goals_array == n).sum()) for n in range(max_bucket)]
-            bucket_counts.append(int((total_goals_array >= max_bucket).sum()))
-            goals_distribution_frame = pd.DataFrame(
-                {
-                    "Total Goals": bucket_labels,
-                    "Simulations": bucket_counts,
-                    "Probability": [count / len(total_goals_array) for count in bucket_counts],
-                }
-            )
-            goals_chart = px.bar(
-                goals_distribution_frame,
-                x="Total Goals",
-                y="Probability",
-                text="Probability",
-                color="Probability",
-                color_continuous_scale=["#161b22", "#00e5ff", "#00ff87"],
-            )
-            goals_chart.update_traces(texttemplate="%{text:.1%}", textposition="outside")
-            goals_chart.update_layout(
-                showlegend=False,
-                yaxis_tickformat=".0%",
-                margin={"l": 10, "r": 10, "t": 10, "b": 10},
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                font_color="#e0e0e0",
-            )
-            st.plotly_chart(goals_chart, use_container_width=True)
+            with col_top_outcome:
+                st.markdown('<div class="mc-col-title">🏆 TOP OUTCOME</div>', unsafe_allow_html=True)
+                render_top_result_highlight_card(
+                    score_label=str(top_score_row["Exact Score"]),
+                    probability=float(top_score_row["Probability"]),
+                    simulations_count=int(top_score_row["Simulations"]),
+                )
+
+            with col_alt_frequencies:
+                st.markdown('<div class="mc-col-title">📊 ALTERNATIVE FREQUENCIES</div>', unsafe_allow_html=True)
+                render_score_frequency_ranking(
+                    score_frame.iloc[1:],
+                    reference_probability=float(top_score_row["Probability"]),
+                    start_rank=2,
+                )
+
+            with col_micro_intel:
+                st.markdown('<div class="mc-col-title">📡 MICRO-EVENTS INTEL</div>', unsafe_allow_html=True)
+                render_micro_events_intel_column(intel)
 
             st.caption(
-                f"⚙️ Engine status: 10,000 / 10,000 paths computed for {home} vs {away} · "
-                "live feed synced with the Dixon-Coles matrix above."
+                f"⚙️ 10,000 / 10,000 paths computed for {home} vs {away} · "
+                "synced with the Dixon-Coles matrix above."
             )
+
+            # --- Extended analytics, tucked away collapsed so the primary --
+            # HUD above stays a single, scroll-free screen by default.
+            with st.expander("📈 Extended Analytics (Match Outcome %, full Intel grid, Goal Distribution)", expanded=False):
+                st.markdown("##### 🎯 Match Outcome Probability")
+                render_three_way_probability_bar(
+                    home_prob=outcome_probabilities.get("1 (home win)", 0.0),
+                    draw_prob=outcome_probabilities.get("X (draw)", 0.0),
+                    away_prob=outcome_probabilities.get("2 (away win)", 0.0),
+                    home_label=home,
+                    away_label=away,
+                )
+                st.caption("Frequencies observed over 10,000 simulated matches, weighted with the Dixon-Coles correction.")
+
+                st.markdown("---")
+                st.markdown("##### 📡 Full Micro-Events Intel Grid")
+                render_micro_events_intel_grid(intel, home, away)
+
+                st.markdown("---")
+                st.markdown("##### 📈 Total Goals Distribution (10,000 Paths)")
+                total_goals_array = raw["home_goals"] + raw["away_goals"]
+                max_bucket = 7
+                bucket_labels = [str(n) for n in range(max_bucket)] + [f"{max_bucket}+"]
+                bucket_counts = [int((total_goals_array == n).sum()) for n in range(max_bucket)]
+                bucket_counts.append(int((total_goals_array >= max_bucket).sum()))
+                goals_distribution_frame = pd.DataFrame(
+                    {
+                        "Total Goals": bucket_labels,
+                        "Simulations": bucket_counts,
+                        "Probability": [count / len(total_goals_array) for count in bucket_counts],
+                    }
+                )
+                goals_chart = px.bar(
+                    goals_distribution_frame,
+                    x="Total Goals",
+                    y="Probability",
+                    text="Probability",
+                    color="Probability",
+                    color_continuous_scale=["#161b22", "#00e5ff", "#00ff87"],
+                )
+                goals_chart.update_traces(texttemplate="%{text:.1%}", textposition="outside")
+                goals_chart.update_layout(
+                    showlegend=False,
+                    yaxis_tickformat=".0%",
+                    margin={"l": 10, "r": 10, "t": 10, "b": 10},
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font_color="#e0e0e0",
+                )
+                st.plotly_chart(goals_chart, use_container_width=True)
 
     with tab_live_match:
         render_live_match_tab(model, home, away)
@@ -4832,7 +4861,7 @@ td, th {
     border: 1px solid #00e5ff;
     border-radius: 14px;
     padding: 14px 18px;
-    margin: 10px 0 16px 0;
+    margin: 8px 0 10px 0;
     box-shadow: 0 0 24px rgba(0, 229, 255, 0.15);
     backdrop-filter: blur(8px);
 }
@@ -4972,71 +5001,74 @@ td, th {
 
 /* --------------------------------------------------------------------
    Monte Carlo · Top Result HUD reveal card (gold/neon hero card)
+   Compact single-screen HUD sizing: tight padding/margins so the full
+   3-column post-simulation dashboard fits one viewport with no scroll.
    -------------------------------------------------------------------- */
 .mc-highlight-card {
-    border-radius: 20px;
-    padding: 26px 24px;
+    border-radius: 16px;
+    padding: 14px 16px;
     background:
         radial-gradient(circle at 50% 0%, rgba(0, 229, 255, 0.14), transparent 60%),
         linear-gradient(135deg, rgba(255, 214, 10, 0.12), rgba(0, 255, 135, 0.08));
     border: 1px solid #00e5ff;
-    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5), 0 0 32px rgba(0, 229, 255, 0.22);
-    margin-bottom: 18px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5), 0 0 26px rgba(0, 229, 255, 0.22);
+    margin-bottom: 8px;
     backdrop-filter: blur(10px);
     text-align: center;
+    height: 100%;
 }
 
 .mc-highlight-label {
     font-family: "Courier New", monospace;
-    font-size: 0.82rem;
+    font-size: 0.65rem;
     text-transform: uppercase;
-    letter-spacing: 0.16em;
+    letter-spacing: 0.12em;
     color: #00e5ff;
     font-weight: 800;
     text-shadow: 0 0 8px rgba(0, 229, 255, 0.6);
 }
 
 .mc-highlight-score {
-    font-size: 4.2rem;
+    font-size: 2.7rem;
     font-weight: 900;
-    letter-spacing: 0.03em;
+    letter-spacing: 0.02em;
     background: linear-gradient(135deg, #ffd60a, #00ff87 55%, #00e5ff);
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
-    margin: 10px 0 6px 0;
+    margin: 6px 0 4px 0;
     font-variant-numeric: tabular-nums;
     line-height: 1;
 }
 
 .mc-highlight-sub {
     font-family: "Courier New", monospace;
-    font-size: 1rem;
+    font-size: 0.78rem;
     color: var(--clab-text);
     font-weight: 700;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.02em;
 }
 
 /* --------------------------------------------------------------------
-   Monte Carlo · Top Alternative Outcomes ranking bars
+   Monte Carlo · Top Alternative Outcomes ranking bars (ultra-thin)
    -------------------------------------------------------------------- */
 .score-rank-item {
     display: flex;
     align-items: center;
-    gap: 12px;
-    margin-bottom: 12px;
+    gap: 8px;
+    margin-bottom: 6px;
 }
 
 .score-rank-badge {
     flex: 0 0 auto;
-    width: 30px;
-    height: 30px;
+    width: 20px;
+    height: 20px;
     border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
     font-weight: 900;
-    font-size: 0.85rem;
+    font-size: 0.62rem;
     background: rgba(0, 229, 255, 0.12);
     border: 1px solid rgba(0, 229, 255, 0.5);
     color: #00e5ff;
@@ -5051,15 +5083,15 @@ td, th {
     display: flex;
     justify-content: space-between;
     font-weight: 800;
-    font-size: 0.92rem;
+    font-size: 0.78rem;
     color: var(--clab-text);
-    margin-bottom: 4px;
+    margin-bottom: 2px;
     font-variant-numeric: tabular-nums;
 }
 
 .score-rank-track {
     width: 100%;
-    height: 10px;
+    height: 4px;
     border-radius: 999px;
     background: rgba(255, 255, 255, 0.07);
     overflow: hidden;
@@ -5069,34 +5101,33 @@ td, th {
     height: 100%;
     border-radius: 999px;
     background: linear-gradient(90deg, #00e5ff, #00ff87);
-    box-shadow: 0 0 10px rgba(0, 229, 255, 0.5);
+    box-shadow: 0 0 8px rgba(0, 229, 255, 0.5);
 }
 
 /* --------------------------------------------------------------------
-   Monte Carlo · Micro-Events Intel grid
+   Monte Carlo · Micro-Events Intel grid (compact vertical stack)
    -------------------------------------------------------------------- */
 .intel-card {
-    border-radius: 16px;
-    padding: 16px 18px;
+    border-radius: 12px;
+    padding: 10px 15px;
     background: var(--clab-card);
     border: 1px solid rgba(0, 229, 255, 0.22);
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
     backdrop-filter: blur(10px);
-    margin-bottom: 14px;
-    height: 100%;
+    margin-bottom: 8px;
 }
 
 .intel-card-title {
-    font-size: 0.78rem;
+    font-size: 0.65rem;
     text-transform: uppercase;
-    letter-spacing: 0.1em;
+    letter-spacing: 0.08em;
     color: #9aa0a6;
     font-weight: 800;
-    margin-bottom: 10px;
+    margin-bottom: 6px;
 }
 
 .intel-metric-row {
-    margin-bottom: 10px;
+    margin-bottom: 6px;
 }
 
 .intel-metric-row:last-child {
@@ -5106,10 +5137,10 @@ td, th {
 .intel-metric-top {
     display: flex;
     justify-content: space-between;
-    font-size: 0.85rem;
+    font-size: 0.76rem;
     font-weight: 700;
     color: var(--clab-text);
-    margin-bottom: 4px;
+    margin-bottom: 2px;
 }
 
 .intel-metric-value {
@@ -5119,7 +5150,7 @@ td, th {
 
 .intel-bar-track {
     width: 100%;
-    height: 9px;
+    height: 5px;
     border-radius: 999px;
     background: rgba(255, 255, 255, 0.07);
     overflow: hidden;
@@ -5128,6 +5159,31 @@ td, th {
 .intel-bar-fill {
     height: 100%;
     border-radius: 999px;
+}
+
+/* --------------------------------------------------------------------
+   Monte Carlo · Compact column header labels (replace st.markdown ##### to
+   avoid Streamlit's default heading vertical margins eating screen space)
+   -------------------------------------------------------------------- */
+.mc-col-title {
+    font-family: "Courier New", monospace;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #00e5ff;
+    font-weight: 800;
+    margin: 0 0 8px 0;
+    text-shadow: 0 0 6px rgba(0, 229, 255, 0.45);
+}
+
+/* --------------------------------------------------------------------
+   Monte Carlo · Compact pre-simulation block (banner + description)
+   -------------------------------------------------------------------- */
+.mc-intro-caption {
+    font-size: 0.8rem;
+    color: var(--clab-muted);
+    margin-bottom: 4px;
+    line-height: 1.35;
 }
 
 /* --------------------------------------------------------------------
