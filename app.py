@@ -3392,6 +3392,39 @@ def render_match_banner_compact(league: str, home: str, away: str, crests: dict[
     )
 
 
+def render_pre_match_stats_hud(model: MatchModel, home: str, away: str) -> None:
+    """🛰️ Pre-Match Stats & Parameters HUD: a compact WayneLab panel shown
+    right above the Run button with each team's expected goals (xG) and a
+    row of status badges for the engine parameters actually in play for
+    this MatchModel (model name, iteration count, home advantage, and any
+    manual/fatigue/early-season adjustment already applied). Every value is
+    read directly off the already-computed MatchModel — no new calculation,
+    purely a compact display layer so the pre-simulation screen carries
+    real analytical content instead of empty space."""
+    badges = ["Model: Dixon-Coles", "Iterations: 10,000", "Home Factor: Active"]
+    if model.manual_factor_home or model.manual_factor_away:
+        badges.append("Manual Sliders: Active")
+    if model.fatigue_attack_malus_home or model.fatigue_attack_malus_away:
+        badges.append("Fatigue Adj: Active")
+    if model.early_season_warning:
+        badges.append("Early Season Mode: Active")
+    badges_html = "".join(f'<span class="mc-prematch-badge">{escape(badge)}</span>' for badge in badges)
+
+    st.markdown(
+        '<div class="mc-prematch-hud">'
+        '<div class="mc-prematch-xg-row">'
+        f'<div class="mc-prematch-xg-item"><div class="mc-prematch-xg-label">{escape(home)} xG</div>'
+        f'<div class="mc-prematch-xg-value">{model.home_lambda:.2f}</div></div>'
+        '<div class="mc-prematch-xg-divider">VS</div>'
+        f'<div class="mc-prematch-xg-item"><div class="mc-prematch-xg-label">{escape(away)} xG</div>'
+        f'<div class="mc-prematch-xg-value">{model.away_lambda:.2f}</div></div>'
+        '</div>'
+        f'<div class="mc-prematch-badges">{badges_html}</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def render_monte_carlo_computing_hud(total_paths: int = 10_000, duration_seconds: float = 2.6) -> None:
     """⚙️ 'Computing' HUD shown while the 10,000 Monte Carlo paths run: a
     canvas-based digital-rain backdrop (Electric Blue glyphs) with an
@@ -4362,6 +4395,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
         )
 
         render_match_banner_compact(league, home, away, crests)
+        render_pre_match_stats_hud(model, home, away)
 
         if st.session_state.get("montecarlo_teams") != (home, away):
             # Selected teams changed: the previous simulation is no longer
@@ -4924,6 +4958,78 @@ td, th {
     font-size: 0.85rem;
     color: #00e5ff;
     text-shadow: 0 0 8px rgba(0, 229, 255, 0.6);
+}
+
+/* --------------------------------------------------------------------
+   Monte Carlo · Pre-Match Stats & Parameters HUD (shown before Run button)
+   -------------------------------------------------------------------- */
+.mc-prematch-hud {
+    background: #050505;
+    border: 1px solid #00e5ff;
+    border-radius: 14px;
+    padding: 12px 16px;
+    margin: 0 0 10px 0;
+    box-shadow: 0 0 20px rgba(0, 229, 255, 0.12);
+    backdrop-filter: blur(8px);
+}
+
+.mc-prematch-xg-row {
+    display: flex;
+    justify-content: space-around;
+    align-items: center;
+    margin-bottom: 10px;
+    padding-bottom: 10px;
+    border-bottom: 1px dashed rgba(0, 229, 255, 0.2);
+}
+
+.mc-prematch-xg-item {
+    text-align: center;
+}
+
+.mc-prematch-xg-label {
+    font-family: "Courier New", monospace;
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #9aa0a6;
+    margin-bottom: 2px;
+}
+
+.mc-prematch-xg-value {
+    font-size: 1.5rem;
+    font-weight: 900;
+    font-variant-numeric: tabular-nums;
+    background: linear-gradient(135deg, #00e5ff, #e0e0e0);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    line-height: 1;
+}
+
+.mc-prematch-xg-divider {
+    font-size: 0.8rem;
+    color: #9aa0a6;
+    font-weight: 700;
+}
+
+.mc-prematch-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: center;
+}
+
+.mc-prematch-badge {
+    font-family: "Courier New", monospace;
+    font-size: 0.6rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    padding: 3px 10px;
+    border-radius: 999px;
+    border: 1px solid rgba(0, 229, 255, 0.4);
+    color: #00e5ff;
+    background: rgba(0, 229, 255, 0.08);
+    white-space: nowrap;
 }
 
 /* --------------------------------------------------------------------
