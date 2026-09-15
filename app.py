@@ -481,11 +481,22 @@ RATING_SCALE = 400.0
 
 HOME_ADVANTAGE_RATING = 60.0
 """Bonus di rating ELO per il fattore campo, usato per differenziare
-tiri/corner/cartellini in base al gap di rating (vedi rating_scaling_factors)."""
+tiri/corner/cartellini in base al gap di rating (vedi rating_scaling_factors).
+NOTE: this is added only to the *local* rating_diff used for shots/corners/
+cards scaling — it is never added to rating_finale_home/away themselves, so
+it cannot inflate the Power Rating shown in the UI."""
 
-HOME_ADVANTAGE_GOAL_MULTIPLIER = 1.12
-"""Moltiplicatore diretto sui gol attesi della squadra di casa (~+12%),
-applicato al lambda calcolato da Attacco_Finale × Difesa_Finale avversaria."""
+HOME_ADVANTAGE_GOAL_MULTIPLIER = 1.15
+"""Direct multiplier on the home team's expected goals (xG), calibrated to
+a MODERATE, verified home-advantage bump of +0.20/+0.25 expected goals for
+a league-average matchup (never a disproportionate multiplier of team
+strength): at LEAGUE_AVERAGE_GOALS_PER_TEAM (1.35) with average attack/
+defense multipliers of 1.0 each, home_lambda_base = 1.35 × 1.15 = 1.5525,
+i.e. a +0.2025 xG bump — squarely inside the requested +0.20/+0.25 window.
+The bump scales proportionally with the match's baseline lambda (stronger
+attacks get a slightly larger absolute bump, weaker ones a smaller one),
+which is standard Dixon-Coles practice, but always stays a fixed +15% of
+that baseline — it never multiplies the *rating gap* between the teams."""
 
 RATING_LAMBDA_SENSITIVITY = 0.0022
 """Quanto un punto di differenza di rating ELO sposta, in scala esponenziale,
@@ -510,10 +521,36 @@ PREVIOUS_SEASON_MAX_WEIGHT = 0.35
 calcolo delle medie (tiri, xG, forma). Le partite della stagione corrente
 valgono sempre il 100% (peso 1.0)."""
 
-EARLY_SEASON_MATCHDAY_THRESHOLD = 5
-"""Dalla Giornata 5 (N partite REALI giocate nella stagione corrente) si usa
-il 100% dei dati/statistiche reali. Sotto questa soglia si applica la
-Transizione Dinamica (Dynamic Decay, vedi dynamic_decay_weights)."""
+EARLY_SEASON_MATCHDAY_THRESHOLD = 10
+"""Dalla Giornata 10 (N partite REALI giocate nella stagione corrente, un
+campione minimo di 10-15 partite come richiesto) si usa il 100% dei dati/
+statistiche reali. Sotto questa soglia si applica la Transizione Dinamica
+(Dynamic Decay, vedi dynamic_decay_weights), che pesa progressivamente di
+più il rating di Fascia man mano che il campione reale è piccolo — questo,
+insieme allo shrinkage di REGRESSION_TO_MEAN_SAMPLE_SIZE applicato PRIMA
+del blend (vedi _shrink_to_mean), è la doppia barriera che impedisce a
+2-3 risultati estremi di un club di fascia media di sbilanciare il rating
+sopra quello di una big con un campione più ampio e affidabile."""
+
+REGRESSION_TO_MEAN_SAMPLE_SIZE = 12.0
+"""Numero di partite (pesate) oltre il quale un moltiplicatore Attacco/
+Difesa calcolato dalle statistiche osservate viene usato al 100% del suo
+valore grezzo. Con un campione più piccolo, il moltiplicatore viene
+'ristretto' (shrinkage Bayesiano) verso 1.0 (la media di lega) in proporzione
+al campione disponibile — vedi _shrink_to_mean. Questo è un livello di
+protezione SEPARATO e complementare al Dynamic Decay Tier/Stats: quello
+sfuma fra il rating di Fascia e quello reale; questo attenua il rating
+reale stesso quando è ancora statisticamente inaffidabile (es. 2-3 partite
+di un neopromosso con un filotto di vittorie non devono produrre un
+moltiplicatore Attacco vicino al tetto di 3.0)."""
+
+CLUB_MATCH_LOOKBACK = 15
+"""Massimo numero di partite recenti (per stagione corrente e per stagione
+precedente separatamente) recuperate per ogni squadra di club — alzato da 8
+a 15 per garantire un campione minimo di 10-15 partite come richiesto,
+riducendo ulteriormente la sensibilità del rating a 2-3 risultati anomali
+isolati (si veda anche REGRESSION_TO_MEAN_SAMPLE_SIZE, che agisce sullo
+stesso problema da un angolo complementare)."""
 
 LEAGUE_AVERAGE_GOALS_PER_TEAM = 1.35
 """Gol attesi 'di libro' per una squadra media in una singola partita di
@@ -646,14 +683,34 @@ def team_tier_profile(team_name: str) -> dict[str, float]:
 
 
 def dynamic_decay_weights(matches_played: int) -> tuple[float, float]:
-    """TRANSIZIONE DINAMICA PER LE PRIME 5 GIORNATE (Dynamic Decay):
-    Peso_Fascia = (5 - N) / 5, Peso_Stats = N / 5, con N = partite REALI
-    giocate nella stagione corrente (clampato a [0, 5]). Da N ≥ 5 in poi si
+    """TRANSIZIONE DINAMICA PER LE PRIME EARLY_SEASON_MATCHDAY_THRESHOLD
+    GIORNATE (Dynamic Decay): Peso_Fascia = (T - N) / T, Peso_Stats = N / T,
+    con N = partite REALI giocate nella stagione corrente e T =
+    EARLY_SEASON_MATCHDAY_THRESHOLD (clampato a [0, T]). Da N ≥ T in poi si
     usa il 100% dei dati/statistiche reali (Peso_Fascia = 0)."""
     n = clamp(matches_played, 0, EARLY_SEASON_MATCHDAY_THRESHOLD)
     tier_weight = (EARLY_SEASON_MATCHDAY_THRESHOLD - n) / EARLY_SEASON_MATCHDAY_THRESHOLD
     stats_weight = n / EARLY_SEASON_MATCHDAY_THRESHOLD
     return tier_weight, stats_weight
+
+
+def _shrink_to_mean(
+    multiplier: float, sample_size: float, full_confidence_n: float = REGRESSION_TO_MEAN_SAMPLE_SIZE
+) -> float:
+    """Bayesian-style shrinkage (Regression to the Mean): pulls a per-match
+    Attack/Defense multiplier toward the league-average of 1.0 when the
+    sample of matches behind it is small, in direct proportion to how
+    small that sample is. With `sample_size >= full_confidence_n`, the raw
+    multiplier is returned unchanged (full confidence); with a small
+    sample (e.g. 2-3 matches for a mid/low-tier side on a hot streak), the
+    multiplier is pulled most of the way back to 1.0, preventing it from
+    outweighing a Big club's larger, more reliable sample. This runs
+    BEFORE the Dynamic Decay Tier/Stats blend (dynamic_decay_weights) and
+    is a separate, complementary safeguard: that function blends Tier
+    rating with real stats; this function tempers the real stats
+    themselves while they are still statistically unreliable."""
+    confidence = clamp(sample_size / max(full_confidence_n, 1e-9), 0.0, 1.0)
+    return 1.0 + (multiplier - 1.0) * confidence
 
 
 def is_top_tier(team: str) -> bool:
@@ -1130,9 +1187,9 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
             current_fixtures = _team_fixtures(fetch_league_matches(league))[:NATIONAL_TEAM_MATCH_WINDOW]
         previous_fixtures: list[dict[str, object]] = []
     else:
-        current_fixtures = _team_fixtures(fetch_league_matches(league))[:8]
+        current_fixtures = _team_fixtures(fetch_league_matches(league))[:CLUB_MATCH_LOOKBACK]
         try:
-            previous_fixtures = _team_fixtures(fetch_previous_season_matches(league))[:8]
+            previous_fixtures = _team_fixtures(fetch_previous_season_matches(league))[:CLUB_MATCH_LOOKBACK]
         except FootballDataError:
             previous_fixtures = []
 
@@ -1326,6 +1383,20 @@ def build_match_model(
     home_stats = fetch_team_live_stats(league, home)
     away_stats = fetch_team_live_stats(league, away)
 
+    # --- Defensive Home/Away data-integrity check ------------------------
+    # fetch_team_live_stats resolves each team's stats by team_id/team_name
+    # independently, so a swap here is not structurally possible in the
+    # current code — but this check makes that guarantee explicit and fails
+    # loudly (instead of silently mis-crossing alpha_home with beta_home)
+    # if a future change ever breaks that invariant.
+    if home_stats.team_name != home or away_stats.team_name != away:
+        raise FootballDataError(
+            f"Home/Away data integrity check failed: expected stats for "
+            f"{home} (home) vs {away} (away), but got {home_stats.team_name} "
+            f"vs {away_stats.team_name}. Aborting to avoid a mis-crossed "
+            f"Attack/Defense calculation."
+        )
+
     # --- 0. Slider manuali "Fattore Mercato" e "Impatto Infortuni/Titolari
     # Assenti", calcolati subito perché si applicano direttamente su
     # Attacco_Finale/Difesa_Finale (step 3) prima del calcolo di xG/tiri. ----
@@ -1411,10 +1482,22 @@ def build_match_model(
     def _stats_rating(attack_mult: float, defense_mult: float) -> float:
         return BASE_RATING + (RATING_SCALE / 2) * (attack_mult - 1.0) - (RATING_SCALE / 2) * (defense_mult - 1.0)
 
-    home_stats_attack = _stats_multiplier(home_goal_for)
-    home_stats_defense = _stats_multiplier(home_goal_against)
-    away_stats_attack = _stats_multiplier(away_goal_for)
-    away_stats_defense = _stats_multiplier(away_goal_against)
+    # --- Regression to the Mean (shrinkage) --------------------------------
+    # home_goal_for/home_goal_against (and their away counterparts) are each
+    # backed by a specific number of matches — home_matches/away_matches
+    # when the home-/away-specific split was used, or the full `matches`
+    # count in the small-sample fallback. Shrinking with THAT exact sample
+    # size (not a coarser proxy) ensures a side with only 2-3 home matches
+    # this season — even a hot streak — gets pulled hard back toward the
+    # league-average multiplier of 1.0, so it cannot outweigh a Big club's
+    # larger, more reliable sample. See REGRESSION_TO_MEAN_SAMPLE_SIZE.
+    home_sample_size = home_stats.home_matches if home_stats.home_matches else home_stats.matches
+    away_sample_size = away_stats.away_matches if away_stats.away_matches else away_stats.matches
+
+    home_stats_attack = _shrink_to_mean(_stats_multiplier(home_goal_for), home_sample_size)
+    home_stats_defense = _shrink_to_mean(_stats_multiplier(home_goal_against), home_sample_size)
+    away_stats_attack = _shrink_to_mean(_stats_multiplier(away_goal_for), away_sample_size)
+    away_stats_defense = _shrink_to_mean(_stats_multiplier(away_goal_against), away_sample_size)
     home_stats_rating = _stats_rating(home_stats_attack, home_stats_defense)
     away_stats_rating = _stats_rating(away_stats_attack, away_stats_defense)
 
