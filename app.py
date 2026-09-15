@@ -314,7 +314,65 @@ LEAGUES: dict[str, list[str]] = {
         "Stuttgart",
         "Villarreal",
     ],
+    "International · FIFA World Cup": [
+        "Argentina", "Australia", "Belgium", "Brazil", "Cameroon", "Canada",
+        "Colombia", "Costa Rica", "Croatia", "Denmark", "Ecuador", "England",
+        "France", "Germany", "Ghana", "Iran", "Italy", "Japan", "Mexico",
+        "Morocco", "Netherlands", "Poland", "Portugal", "Qatar", "Saudi Arabia",
+        "Senegal", "Serbia", "South Korea", "Spain", "Switzerland", "Tunisia",
+        "USA", "Uruguay", "Wales",
+    ],
+    "International · UEFA European Championship": [
+        "Albania", "Austria", "Belgium", "Croatia", "Czech Republic", "Denmark",
+        "England", "France", "Georgia", "Germany", "Hungary", "Italy",
+        "Netherlands", "Poland", "Portugal", "Romania", "Scotland", "Serbia",
+        "Slovakia", "Slovenia", "Spain", "Switzerland", "Turkey", "Ukraine",
+    ],
+    "International · UEFA Nations League": [
+        "Albania", "Andorra", "Armenia", "Austria", "Belgium", "Bosnia and Herzegovina",
+        "Bulgaria", "Croatia", "Cyprus", "Czech Republic", "Denmark", "England",
+        "Estonia", "Faroe Islands", "Finland", "France", "Georgia", "Germany",
+        "Gibraltar", "Greece", "Hungary", "Iceland", "Israel", "Italy",
+        "Kazakhstan", "Kosovo", "Latvia", "Liechtenstein", "Lithuania",
+        "Luxembourg", "Malta", "Moldova", "Montenegro", "Netherlands",
+        "North Macedonia", "Northern Ireland", "Norway", "Poland", "Portugal",
+        "Republic of Ireland", "Romania", "San Marino", "Scotland", "Serbia",
+        "Slovakia", "Slovenia", "Spain", "Sweden", "Switzerland", "Turkey",
+        "Ukraine", "Wales",
+    ],
+    "International · Friendlies": [
+        "Argentina", "Brazil", "Belgium", "Croatia", "Colombia", "Denmark",
+        "Egypt", "England", "France", "Germany", "Ghana", "Italy", "Ivory Coast",
+        "Japan", "Mexico", "Morocco", "Netherlands", "Nigeria", "Norway",
+        "Portugal", "Senegal", "South Korea", "Spain", "Sweden", "Switzerland",
+        "Tunisia", "Turkey", "USA", "Uruguay", "Wales",
+    ],
 }
+
+NATIONAL_TEAM_COMPETITIONS: set[str] = {
+    "International · FIFA World Cup",
+    "International · UEFA European Championship",
+    "International · UEFA Nations League",
+    "International · Friendlies",
+}
+"""League display names treated as national-team competitions: matches team
+xG estimation to a broader, cross-competition lookback (see
+fetch_team_recent_matches_extended) instead of the single-competition
+current/previous-season split used for club leagues, since national sides
+play far fewer fixtures per year and a strict season boundary does not
+apply to them."""
+
+NATIONAL_TEAM_MATCH_WINDOW = 10
+"""How many of a national team's most recent FINISHED matches (across ALL
+competitions — qualifiers, finals, Nations League, friendlies) to pull for
+Attack/Defense (alpha/beta) estimation, wider than the club-league lookback
+(8) to compensate for national teams' sparser annual fixture list."""
+
+
+def is_national_team_competition(league: str) -> bool:
+    """True if `league` is one of the international/national-team
+    competitions (see NATIONAL_TEAM_COMPETITIONS)."""
+    return league in NATIONAL_TEAM_COMPETITIONS
 
 
 TOP_DIVISIONS = {
@@ -341,6 +399,14 @@ FOOTBALL_DATA_COMPETITIONS: dict[str, str] = {
     "Netherlands · Eredivisie": "DED",
     "Portugal · Primeira Liga": "PPL",
     "Europe · UEFA Champions League": "CL",
+    # International / national-team competitions. WC and EC are confirmed
+    # Football-Data.org codes; UNL and FRIENDLY are best-effort — if the API
+    # tier does not expose them, the app degrades gracefully to the fallback
+    # roster above (same safety net already used for every club league).
+    "International · FIFA World Cup": "WC",
+    "International · UEFA European Championship": "EC",
+    "International · UEFA Nations League": "UNL",
+    "International · Friendlies": "FRIENDLY",
 }
 
 # Football-Data.org uses the current season when no season filter is sent.
@@ -358,6 +424,13 @@ MICRO_EVENT_BASELINES: dict[str, dict[str, float]] = {
     "DED": {"shots": 13.2, "shots_on_target": 4.6, "corners": 5.2, "cards": 1.9, "fouls": 11.0},
     "PPL": {"shots": 11.5, "shots_on_target": 3.8, "corners": 4.5, "cards": 2.6, "fouls": 13.5},
     "CL": {"shots": 12.6, "shots_on_target": 4.4, "corners": 4.9, "cards": 1.7, "fouls": 10.5},
+    # International matches: generally slightly fewer shots/corners than
+    # club football (less cohesive attacking patterns, more cautious
+    # setups), cards vary with the stakes of the fixture.
+    "WC": {"shots": 11.0, "shots_on_target": 3.8, "corners": 4.3, "cards": 2.2, "fouls": 12.0},
+    "EC": {"shots": 11.2, "shots_on_target": 3.9, "corners": 4.4, "cards": 2.3, "fouls": 12.2},
+    "UNL": {"shots": 10.8, "shots_on_target": 3.6, "corners": 4.1, "cards": 2.0, "fouls": 12.0},
+    "FRIENDLY": {"shots": 10.3, "shots_on_target": 3.4, "corners": 3.9, "cards": 1.5, "fouls": 10.8},
 }
 
 PROMOTED_TEAMS = {
@@ -494,6 +567,9 @@ TEAM_TIER_KEYWORDS: dict[int, tuple[str, ...]] = {
         "real madrid", "bayern", "barcelona", "barça", "barca",
         "psg", "paris saint", "atletico madrid", "atlético madrid",
         "bayer leverkusen", "borussia dortmund",
+        # National teams · Tier 1 (major football powers / World Cup favorites)
+        "brazil", "france", "argentina", "england", "spain", "germany",
+        "portugal", "italy", "belgium", "netherlands",
     ),
     2: (  # Europa / Champions League
         "roma", "lazio", "fiorentina", "bologna", "chelsea", "tottenham",
@@ -502,17 +578,29 @@ TEAM_TIER_KEYWORDS: dict[int, tuple[str, ...]] = {
         "marseille", "villarreal", "stoccarda", "stuttgart", "lione",
         "lyon", "monaco", "psv", "sporting cp", "sporting", "porto",
         "como", "como 1907", "fc como",
+        # National teams · Tier 2 (consistently competitive)
+        "croatia", "uruguay", "denmark", "switzerland", "morocco",
+        "colombia", "japan", "senegal", "mexico", "usa", "united states",
+        "poland", "serbia", "wales", "ukraine",
     ),
     3: (  # Metà classifica
         "torino", "genoa", "udinese", "sassuolo", "everton", "fulham",
         "crystal palace", "brighton", "bournemouth", "athletic bilbao",
         "real betis", "lens", "lille", "feyenoord", "club brugge",
         "galatasaray",
+        # National teams · Tier 3 (mid-table internationals)
+        "scotland", "austria", "turkey", "hungary", "romania", "slovakia",
+        "czech republic", "greece", "norway", "sweden", "canada",
+        "south korea", "australia", "tunisia", "ecuador", "costa rica",
     ),
     4: (  # Salvezza
         "lecce", "cagliari", "monza", "verona", "parma",
         "brentford", "forest", "nottingham", "leeds", "sunderland",
         "elche", "levante", "shakhtar", "slavia praga", "slavia prague",
+        # National teams · Tier 4 (qualification-battle nations)
+        "iceland", "finland", "slovenia", "bosnia and herzegovina",
+        "northern ireland", "republic of ireland", "israel", "georgia",
+        "albania", "north macedonia", "montenegro", "bulgaria",
     ),
     5: (  # Neopromosse
         "frosinone", "venezia", "coventry", "hull", "ipswich",
@@ -520,6 +608,10 @@ TEAM_TIER_KEYWORDS: dict[int, tuple[str, ...]] = {
         "malaga", "schalke", "elversberg", "paderborn", "troyes",
         "le mans", "ado den haag", "cambuur", "académico de viseu",
         "academico de viseu", "marítimo", "maritimo",
+        # National teams · Tier 5 (minor UEFA/friendly-circuit nations)
+        "andorra", "san marino", "liechtenstein", "malta", "gibraltar",
+        "faroe islands", "luxembourg", "moldova", "kosovo", "cyprus",
+        "estonia", "latvia", "lithuania", "armenia", "kazakhstan",
     ),
 }
 
@@ -979,6 +1071,30 @@ def calendar_frame(league: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def fetch_team_recent_matches_extended(
+    league: str, team_name: str, limit: int = NATIONAL_TEAM_MATCH_WINDOW
+) -> tuple[dict[str, object], ...]:
+    """For sparse-schedule competitions (national teams): fetches a team's
+    most recent FINISHED matches ACROSS ALL COMPETITIONS (qualifiers,
+    tournament finals, Nations League, friendlies) via Football-Data.org's
+    per-team endpoint, instead of the single-competition/current-season
+    endpoint used for club leagues. This avoids starving the Attack/Defense
+    (alpha/beta) estimate when a national side has played very few — or
+    zero — matches within the one specific tournament being analyzed."""
+    team_map = dict(fetch_league_teams(league))
+    team_id = next((id_ for id_, name in team_map.items() if name == team_name), None)
+    if team_id is None or team_id < 0:
+        # Negative synthetic IDs come from the offline fallback roster
+        # (_fallback_team_snapshot): there is no live team ID to query.
+        raise FootballDataError(f"No live Football-Data.org team ID available for {team_name}.")
+    payload = _football_data_request(
+        f"/teams/{team_id}/matches",
+        {"status": "FINISHED", "limit": limit},
+    )
+    return _parse_finished_matches(payload)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
     team_map = dict(fetch_league_teams(league))
     team_id = next((id_ for id_, name in team_map.items() if name == team_name), None)
@@ -1000,14 +1116,32 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
             )
         ]
 
-    current_fixtures = _team_fixtures(fetch_league_matches(league))[:8]
-    try:
-        previous_fixtures = _team_fixtures(fetch_previous_season_matches(league))[:8]
-    except FootballDataError:
-        previous_fixtures = []
+    if is_national_team_competition(league):
+        # National teams play far fewer matches per year than clubs, and a
+        # single tournament's own fixture list can be near-empty between
+        # windows. Pull the team's recent matches across ALL competitions
+        # instead, all weighted equally — there is no clean "current vs
+        # previous season" boundary for a national side, so the club-league
+        # Time-Decay previous-season discount does not apply here.
+        try:
+            extended_matches = fetch_team_recent_matches_extended(league, team_name)
+            current_fixtures = _team_fixtures(extended_matches)[:NATIONAL_TEAM_MATCH_WINDOW]
+        except FootballDataError:
+            current_fixtures = _team_fixtures(fetch_league_matches(league))[:NATIONAL_TEAM_MATCH_WINDOW]
+        previous_fixtures: list[dict[str, object]] = []
+    else:
+        current_fixtures = _team_fixtures(fetch_league_matches(league))[:8]
+        try:
+            previous_fixtures = _team_fixtures(fetch_previous_season_matches(league))[:8]
+        except FootballDataError:
+            previous_fixtures = []
 
     # Partite REALI (non pesate) disputate nella stagione in corso: base per
     # la Modalità Inizio Stagione (vedi EARLY_SEASON_MATCHDAY_THRESHOLD).
+    # dynamic_decay_weights() clamps this internally to
+    # [0, EARLY_SEASON_MATCHDAY_THRESHOLD], so the same formula is correct
+    # whether current_fixtures came from a club season or the national-team
+    # extended lookback above.
     current_season_matches = len(current_fixtures)
 
     # --- Time-Decay: stagione corrente peso 1.0, precedente al massimo
@@ -2835,6 +2969,11 @@ ODDS_API_SPORT_KEYS: dict[str, str] = {
     "Netherlands · Eredivisie": "soccer_netherlands_eredivisie",
     "Portugal · Primeira Liga": "soccer_portugal_primeira_liga",
     "Europe · UEFA Champions League": "soccer_uefa_champs_league",
+    # Best-effort: UEFA Nations League and Friendlies have no stable/common
+    # Odds API sport key, so they are deliberately left unmapped — get_live_odds
+    # already falls back to manual odds entry for any unmapped league.
+    "International · FIFA World Cup": "soccer_fifa_world_cup",
+    "International · UEFA European Championship": "soccer_uefa_european_championship",
 }
 """Mappatura campionato interno -> sport key di The Odds API. Se la lega
 selezionata non è mappata, get_live_odds ripiega automaticamente su None
@@ -3491,22 +3630,33 @@ def render_match_banner_compact(league: str, home: str, away: str, crests: dict[
     be dropped at the top of a tab (e.g. Monte Carlo Simulator) so the
     match context stays visible even if a screen recording starts mid-page
     or is cropped to a single tab, without depending on the shared page
-    header higher up."""
+    header higher up. For national-team competitions, adds a small
+    'INTERNATIONAL' badge next to the competition name and swaps the
+    missing-crest placeholder from a club shield to a globe (flags come
+    from the same `crests` map — Football-Data.org returns flag images for
+    national teams through the identical /teams endpoint used for clubs)."""
+    is_national = is_national_team_competition(league)
+    placeholder_icon = "🌍" if is_national else "🛡️"
     home_crest = crests.get(home)
     away_crest = crests.get(away)
     home_crest_html = (
         f'<img src="{escape(home_crest)}" class="mc-match-banner-crest" />'
         if home_crest
-        else '<div class="mc-match-banner-crest-placeholder">🛡️</div>'
+        else f'<div class="mc-match-banner-crest-placeholder">{placeholder_icon}</div>'
     )
     away_crest_html = (
         f'<img src="{escape(away_crest)}" class="mc-match-banner-crest" />'
         if away_crest
-        else '<div class="mc-match-banner-crest-placeholder">🛡️</div>'
+        else f'<div class="mc-match-banner-crest-placeholder">{placeholder_icon}</div>'
+    )
+    international_badge_html = (
+        '<span class="mc-prematch-badge" style="margin-left:6px">🌍 INTERNATIONAL</span>'
+        if is_national
+        else ""
     )
     st.markdown(
         '<div class="mc-match-banner">'
-        f'<div class="mc-match-banner-league">{escape(league)}</div>'
+        f'<div class="mc-match-banner-league">{escape(league)}{international_badge_html}</div>'
         '<div class="mc-match-banner-row">'
         f'<div class="mc-match-banner-team">{home_crest_html}'
         f'<div class="mc-match-banner-name">{escape(home)}</div></div>'
@@ -3957,7 +4107,8 @@ def render_sidebar_controls() -> dict[str, object]:
 def render_team_header(league: str, home: str, away: str, crests: dict[str, str]) -> None:
     """Header con stemmi ufficiali (campo 'crest' di Football-Data.org)
     affiancati ai nomi delle squadre in grande."""
-    st.markdown(f'<div class="league-tag">{escape(league)}</div>', unsafe_allow_html=True)
+    league_tag_text = f"🌍 {league}" if is_national_team_competition(league) else league
+    st.markdown(f'<div class="league-tag">{escape(league_tag_text)}</div>', unsafe_allow_html=True)
     col_home, col_vs, col_away = st.columns([2, 0.6, 2])
     with col_home:
         if crests.get(home):
