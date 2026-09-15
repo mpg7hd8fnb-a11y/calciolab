@@ -729,7 +729,14 @@ class LiveTeamStats:
     cards: float
     fouls: float
     recent_form: tuple[str, ...] = ()
-    """Ultimi risultati (più recente per primo): 'V' vittoria, 'N' pareggio, 'P' sconfitta."""
+    """Most recent results first: 'W' win, 'D' draw, 'L' loss."""
+    recent_matches: tuple[dict[str, object], ...] = ()
+    """Detail of the same matches behind `recent_form` (most recent first,
+    up to FORM_MATCHES_WINDOW): each entry is
+    {'date', 'opponent', 'scored', 'conceded', 'result'} — used to render
+    the Recent Form badges and the Team Form & H2H tables without any new
+    calculation (pure display data captured alongside the existing Form
+    Factor loop)."""
     form_factor: float = 1.0
     """Moltiplicatore dinamico ricavato dal Form Factor (vedi compute_form_factor)."""
     current_season_matches: int = 0
@@ -1017,9 +1024,11 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
     recent_results: list[str] = []
     recent_points: list[int] = []
     recent_weights: list[float] = []
+    recent_match_details: list[dict[str, object]] = []
 
     for fixture_item, weight in weighted_pool:
         home_data = fixture_item.get("homeTeam", {})
+        away_data = fixture_item.get("awayTeam", {})
         score = fixture_item.get("score", {})
         full_time = score.get("fullTime", {}) if isinstance(score, dict) else {}
         is_home = home_data.get("id") == team_id
@@ -1045,15 +1054,25 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
         # peso ridotto tramite recent_weights).
         if len(recent_points) < FORM_MATCHES_WINDOW:
             if scored > conceded:
-                recent_results.append("V")
+                recent_results.append("W")
                 recent_points.append(3)
             elif scored == conceded:
-                recent_results.append("N")
+                recent_results.append("D")
                 recent_points.append(1)
             else:
-                recent_results.append("P")
+                recent_results.append("L")
                 recent_points.append(0)
             recent_weights.append(weight)
+            opponent_name = str((away_data if is_home else home_data).get("name", "Unknown"))
+            recent_match_details.append(
+                {
+                    "date": str(fixture_item.get("utcDate", ""))[:10],
+                    "opponent": opponent_name,
+                    "scored": scored,
+                    "conceded": conceded,
+                    "result": recent_results[-1],
+                }
+            )
 
     matches = home_matches + away_matches
     if matches == 0:
@@ -1082,6 +1101,7 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
         recent_results = []
         recent_points = []
         recent_weights = []
+        recent_match_details = []
 
     baseline = MICRO_EVENT_BASELINES[FOOTBALL_DATA_COMPETITIONS[league]]
     # The provider has no micro-event endpoint. Scale the transparent baseline
@@ -1107,6 +1127,7 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
         cards=baseline["cards"] * matches,
         fouls=baseline["fouls"] * matches,
         recent_form=tuple(recent_results),
+        recent_matches=tuple(recent_match_details),
         form_factor=form_factor,
         current_season_matches=current_season_matches,
     )
@@ -1803,6 +1824,111 @@ def multi_esito_score_grid_options(max_goals: int = 5) -> list[str]:
     ragionevole per l'uso pratico, coerente con quella della Heatmap dei
     Risultati Esatti nella Dashboard Grafici."""
     return [f"{home_goals}-{away_goals}" for home_goals in range(max_goals + 1) for away_goals in range(max_goals + 1)]
+
+
+# ==============================================================================
+# TEAM FORM & HEAD-TO-HEAD TAB
+# ==============================================================================
+# Purely additive: reads the recent_matches/recent_form already captured by
+# fetch_team_live_stats (Time-Decay/Form Factor pipeline, unchanged) and
+# only aggregates/displays them — no new fetch endpoint, no change to the
+# Dixon-Coles engine, Team Tiers or Dynamic Decay weighting.
+def compute_form_summary_stats(matches: tuple[dict[str, object], ...]) -> dict[str, float]:
+    """Average goals scored/conceded and clean-sheet count over the recent
+    matches already captured in LiveTeamStats.recent_matches (up to the
+    last FORM_MATCHES_WINDOW games) — a simple read-only aggregation, not a
+    new statistical model."""
+    if not matches:
+        return {"avg_scored": 0.0, "avg_conceded": 0.0, "clean_sheets": 0.0, "count": 0.0}
+    scored_values = [float(match["scored"]) for match in matches]
+    conceded_values = [float(match["conceded"]) for match in matches]
+    clean_sheets = sum(1 for conceded in conceded_values if conceded == 0)
+    count = len(matches)
+    return {
+        "avg_scored": sum(scored_values) / count,
+        "avg_conceded": sum(conceded_values) / count,
+        "clean_sheets": float(clean_sheets),
+        "count": float(count),
+    }
+
+
+def render_recent_matches_table(team_name: str, matches: tuple[dict[str, object], ...]) -> None:
+    """Compact WayneLab-styled table (Obsidian background, Electric Cyan
+    header) with the last matches for one team: Date, Opponent, Score,
+    Result (colored W/D/L pill)."""
+    if not matches:
+        st.info(f"No recent match data available for {team_name}.")
+        return
+    rows_html = []
+    for match in matches:
+        score_text = f"{int(match['scored'])}-{int(match['conceded'])}"
+        rows_html.append(
+            "<tr>"
+            f"<td>{escape(str(match['date']) or 'n/a')}</td>"
+            f"<td>{escape(str(match['opponent']))}</td>"
+            f"<td>{escape(score_text)}</td>"
+            f"<td>{_form_badge_html(str(match['result']), pill=True)}</td>"
+            "</tr>"
+        )
+    st.markdown(
+        '<div class="h2h-table-wrap"><table class="h2h-table">'
+        "<thead><tr><th>Date</th><th>Opponent</th><th>Score</th><th>Result</th></tr></thead>"
+        f"<tbody>{''.join(rows_html)}</tbody></table></div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_form_stats_subbox(stats: dict[str, float]) -> None:
+    """Compact sub-box with Avg Goals Scored / Avg Goals Conceded / Clean
+    Sheets over the last N games, styled as small WayneLab metric cards."""
+    st.markdown(
+        '<div class="form-stats-box">'
+        '<div class="form-stats-item"><div class="form-stats-label">Avg Scored</div>'
+        f'<div class="form-stats-value">{stats["avg_scored"]:.2f}</div></div>'
+        '<div class="form-stats-item"><div class="form-stats-label">Avg Conceded</div>'
+        f'<div class="form-stats-value">{stats["avg_conceded"]:.2f}</div></div>'
+        '<div class="form-stats-item"><div class="form-stats-label">Clean Sheets</div>'
+        f'<div class="form-stats-value">{int(stats["clean_sheets"])}/{int(stats["count"])}</div></div>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_team_form_tab(league: str, home: str, away: str) -> None:
+    """📊 Team Form & H2H tab: last-5-games tables and form summary stats
+    for both Home and Away teams, built from the same Football-Data.org
+    fixtures already fetched by fetch_team_live_stats (cached) — a
+    read-only view, no impact on the simulation engine."""
+    st.markdown(
+        "### 📊 Team Form & Head-to-Head\n"
+        "Last 5 played matches for each team, sourced live from "
+        "Football-Data.org — the same data feeding the Time-Decay / Form "
+        "Factor component of the Dixon-Coles engine."
+    )
+
+    col_home, col_away = st.columns(2)
+
+    with col_home:
+        st.markdown(f"##### 🏠 {home} · Last 5 Matches")
+        try:
+            home_stats = fetch_team_live_stats(league, home)
+            render_recent_matches_table(home, home_stats.recent_matches)
+            render_form_stats_subbox(compute_form_summary_stats(home_stats.recent_matches))
+        except FootballDataError as error:
+            st.warning(f"Recent form unavailable for {home}: {error}")
+
+    with col_away:
+        st.markdown(f"##### ✈️ {away} · Last 5 Matches")
+        try:
+            away_stats = fetch_team_live_stats(league, away)
+            render_recent_matches_table(away, away_stats.recent_matches)
+            render_form_stats_subbox(compute_form_summary_stats(away_stats.recent_matches))
+        except FootballDataError as error:
+            st.warning(f"Recent form unavailable for {away}: {error}")
+
+    st.caption(
+        "W = Win · D = Draw · L = Loss. Clean Sheets counts matches where the team conceded 0 goals."
+    )
 
 
 def render_multi_esito_tab(model: MatchModel, home: str, away: str) -> None:
@@ -3392,13 +3518,29 @@ def render_match_banner_compact(league: str, home: str, away: str, crests: dict[
     )
 
 
-def render_pre_match_stats_hud(model: MatchModel, home: str, away: str) -> None:
+def _form_badge_html(result_letter: str, *, pill: bool = False) -> str:
+    """Renders a single colored W/D/L badge: green 'W' (win), grey 'D'
+    (draw), red 'L' (loss). `pill=True` produces the wider rounded-pill
+    variant used in the Team Form & H2H tables; the default compact square
+    variant is used in the Monte Carlo Pre-Match HUD strip."""
+    css_class = {"W": "form-badge-w", "D": "form-badge-d", "L": "form-badge-l"}.get(result_letter, "form-badge-d")
+    shape_class = "h2h-result-pill" if pill else "form-badge"
+    return f'<span class="{shape_class} {css_class}">{escape(result_letter)}</span>'
+
+
+def render_pre_match_stats_hud(
+    model: MatchModel,
+    home: str,
+    away: str,
+    home_form: tuple[str, ...] = (),
+    away_form: tuple[str, ...] = (),
+) -> None:
     """🛰️ Pre-Match Stats & Parameters HUD: a compact WayneLab panel shown
-    right above the Run button with each team's expected goals (xG) and a
-    row of status badges for the engine parameters actually in play for
-    this MatchModel (model name, iteration count, home advantage, and any
-    manual/fatigue/early-season adjustment already applied). Every value is
-    read directly off the already-computed MatchModel — no new calculation,
+    right above the Run button with each team's expected goals (xG), a row
+    of status badges for the engine parameters actually in play for this
+    MatchModel, and a Recent Form (Last 5 Games) strip with colored W/D/L
+    badges for both teams. Every value is read directly off the
+    already-computed MatchModel / LiveTeamStats — no new calculation,
     purely a compact display layer so the pre-simulation screen carries
     real analytical content instead of empty space."""
     badges = ["Model: Dixon-Coles", "Iterations: 10,000", "Home Factor: Active"]
@@ -3410,6 +3552,9 @@ def render_pre_match_stats_hud(model: MatchModel, home: str, away: str) -> None:
         badges.append("Early Season Mode: Active")
     badges_html = "".join(f'<span class="mc-prematch-badge">{escape(badge)}</span>' for badge in badges)
 
+    home_form_html = "".join(_form_badge_html(letter) for letter in home_form) or '<span class="form-strip-label">n/a</span>'
+    away_form_html = "".join(_form_badge_html(letter) for letter in away_form) or '<span class="form-strip-label">n/a</span>'
+
     st.markdown(
         '<div class="mc-prematch-hud">'
         '<div class="mc-prematch-xg-row">'
@@ -3420,6 +3565,16 @@ def render_pre_match_stats_hud(model: MatchModel, home: str, away: str) -> None:
         f'<div class="mc-prematch-xg-value">{model.away_lambda:.2f}</div></div>'
         '</div>'
         f'<div class="mc-prematch-badges">{badges_html}</div>'
+        '<div class="form-strip-row">'
+        '<div class="form-strip-team">'
+        f'<div class="form-strip-label">{escape(home)} · Last 5</div>'
+        f'<div class="form-strip-badges">{home_form_html}</div>'
+        '</div>'
+        '<div class="form-strip-team">'
+        f'<div class="form-strip-label">{escape(away)} · Last 5</div>'
+        f'<div class="form-strip-badges">{away_form_html}</div>'
+        '</div>'
+        '</div>'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -4282,6 +4437,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
 
     (
         tab_poisson,
+        tab_team_form,
         tab_goal_markets,
         tab_charts_dashboard,
         tab_multi_esito,
@@ -4291,6 +4447,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
     ) = st.tabs(
         [
             "Odds & Probability Analysis (Poisson)",
+            "📊 Team Form & H2H",
             "📊 Goal Stats & Markets",
             "📊 Charts Dashboard & Micro-Events",
             "🎯 Multi-Outcome & Value Bet Analyzer",
@@ -4329,6 +4486,9 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
             "historical data, Early Season Mode and manual sliders applied "
             "upstream, and Dixon-Coles correction on draws/low scores."
         )
+
+    with tab_team_form:
+        render_team_form_tab(league, home, away)
 
     with tab_goal_markets:
         st.markdown(
@@ -4395,7 +4555,15 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
         )
 
         render_match_banner_compact(league, home, away, crests)
-        render_pre_match_stats_hud(model, home, away)
+        try:
+            home_form = fetch_team_live_stats(league, home).recent_form
+        except FootballDataError:
+            home_form = ()
+        try:
+            away_form = fetch_team_live_stats(league, away).recent_form
+        except FootballDataError:
+            away_form = ()
+        render_pre_match_stats_hud(model, home, away, home_form=home_form, away_form=away_form)
 
         if st.session_state.get("montecarlo_teams") != (home, away):
             # Selected teams changed: the previous simulation is no longer
@@ -5030,6 +5198,146 @@ td, th {
     color: #00e5ff;
     background: rgba(0, 229, 255, 0.08);
     white-space: nowrap;
+}
+
+/* --------------------------------------------------------------------
+   Recent Form badges (W/D/L) — compact strip for the Monte Carlo
+   Pre-Match HUD, and reused (larger) in the Team Form & H2H tab tables.
+   -------------------------------------------------------------------- */
+.form-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+    font-size: 0.62rem;
+    font-weight: 900;
+    font-family: "Courier New", monospace;
+    flex: 0 0 auto;
+}
+
+.form-badge-w {
+    background: rgba(0, 255, 135, 0.16);
+    color: #00ff87;
+    border: 1px solid rgba(0, 255, 135, 0.5);
+}
+
+.form-badge-d {
+    background: rgba(154, 160, 166, 0.16);
+    color: #9aa0a6;
+    border: 1px solid rgba(154, 160, 166, 0.5);
+}
+
+.form-badge-l {
+    background: rgba(255, 77, 79, 0.16);
+    color: #ff4d4f;
+    border: 1px solid rgba(255, 77, 79, 0.5);
+}
+
+.form-strip-row {
+    display: flex;
+    justify-content: space-around;
+    align-items: flex-start;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed rgba(0, 229, 255, 0.2);
+}
+
+.form-strip-team {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    align-items: center;
+}
+
+.form-strip-label {
+    font-family: "Courier New", monospace;
+    font-size: 0.58rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #9aa0a6;
+}
+
+.form-strip-badges {
+    display: flex;
+    gap: 3px;
+}
+
+/* --------------------------------------------------------------------
+   Team Form & H2H tab · compact WayneLab tables and stats sub-box
+   -------------------------------------------------------------------- */
+.h2h-table-wrap {
+    overflow-x: auto;
+    border-radius: 12px;
+    border: 1px solid rgba(0, 229, 255, 0.25);
+    background: #050505;
+}
+
+.h2h-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.h2h-table th {
+    background: #0d0d0d;
+    color: #00e5ff;
+    text-transform: uppercase;
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    padding: 8px 10px;
+    text-align: left;
+    font-weight: 800;
+}
+
+.h2h-table td {
+    padding: 7px 10px;
+    font-size: 0.85rem;
+    color: var(--clab-text);
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.h2h-result-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 24px;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-weight: 800;
+    font-size: 0.72rem;
+    font-family: "Courier New", monospace;
+}
+
+.form-stats-box {
+    display: flex;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.form-stats-item {
+    flex: 1;
+    background: var(--clab-card);
+    border: 1px solid rgba(0, 229, 255, 0.2);
+    border-radius: 10px;
+    padding: 8px 10px;
+    text-align: center;
+    backdrop-filter: blur(8px);
+}
+
+.form-stats-label {
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    color: #9aa0a6;
+    letter-spacing: 0.05em;
+    margin-bottom: 2px;
+}
+
+.form-stats-value {
+    font-size: 1.15rem;
+    font-weight: 900;
+    color: #00e5ff;
+    font-variant-numeric: tabular-nums;
 }
 
 /* --------------------------------------------------------------------
