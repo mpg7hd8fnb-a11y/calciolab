@@ -532,17 +532,35 @@ del blend (vedi _shrink_to_mean), è la doppia barriera che impedisce a
 2-3 risultati estremi di un club di fascia media di sbilanciare il rating
 sopra quello di una big con un campione più ampio e affidabile."""
 
-REGRESSION_TO_MEAN_SAMPLE_SIZE = 12.0
+REGRESSION_TO_MEAN_SAMPLE_SIZE = 6.0
 """Numero di partite (pesate) oltre il quale un moltiplicatore Attacco/
 Difesa calcolato dalle statistiche osservate viene usato al 100% del suo
 valore grezzo. Con un campione più piccolo, il moltiplicatore viene
 'ristretto' (shrinkage Bayesiano) verso 1.0 (la media di lega) in proporzione
-al campione disponibile — vedi _shrink_to_mean. Questo è un livello di
-protezione SEPARATO e complementare al Dynamic Decay Tier/Stats: quello
-sfuma fra il rating di Fascia e quello reale; questo attenua il rating
-reale stesso quando è ancora statisticamente inaffidabile (es. 2-3 partite
-di un neopromosso con un filotto di vittorie non devono produrre un
-moltiplicatore Attacco vicino al tetto di 3.0)."""
+al campione disponibile — vedi _shrink_to_mean. Abbassato da 12 a 6: un
+campione di 1-3 partite (es. il caso limite di una neopromossa con un
+filotto iniziale) resta fortemente attenuato, ma una squadra con già 6+
+partite reali mantiene la sua vera identità qualitativa invece di essere
+livellata verso la media di lega per gran parte della stagione — questo è
+il fix per l'eccessivo appiattimento delle fasce medio/alte segnalato dopo
+il precedente irrigidimento. Complementare al Dynamic Decay Tier/Stats:
+quello sfuma fra il rating di Fascia e quello reale; questo attenua il
+rating reale stesso quando è ancora statisticamente inaffidabile."""
+
+ATTACK_DEFENSE_SPREAD_AMPLIFIER = 1.25
+"""Fattore di amplificazione dello scarto qualitativo Attacco/Difesa reale
+(applicato ai moltiplicatori Attacco/Difesa DOPO lo shrinkage, sullo scarto
+rispetto a 1.0): un moltiplicatore osservato di 1.20 diventa
+1.0 + (1.20-1.0)×1.25 = 1.25. Aumenta la sensibilità del Global Power
+Rating nella conversione in Expected Goals, così che uno scarto di
+Tier/qualità reale fra due squadre produca una differenza di xG più
+marcata prima di applicare la Poisson — contrastando la tendenza dei
+pareggi 'piatti' (es. 1-1 sempre in cima alle simulazioni Monte Carlo)
+quando le due squadre non sono realmente equivalenti. Applicato DOPO lo
+shrinkage (non prima): un campione piccolo viene prima ricondotto vicino
+a 1.0 (protezione anti-bias) e SOLO l'eventuale scarto residuo, già
+ridimensionato, viene amplificato — quindi non riapre la vulnerabilità a
+2-3 risultati anomali isolati."""
 
 CLUB_MATCH_LOOKBACK = 15
 """Massimo numero di partite recenti (per stagione corrente e per stagione
@@ -564,12 +582,26 @@ INJURY_FACTOR_BOUNDS = (-0.30, 0.30)
 """Range consentito per lo slider 'Impatto Infortuni / Titolari Assenti'
 (-30% / +30%)."""
 
+# --- Forma recente come moltiplicatore dinamico (Form Amplifier) -------------
+FORM_DEFENSE_TRANSFER = 0.6
+"""Quota dell'effetto Form Factor trasferita anche alla Difesa (in direzione
+opposta): una squadra in ottima forma (Form Factor > 1.0) migliora anche la
+propria fase difensiva, ma in misura più contenuta rispetto all'attacco —
+vedi l'applicazione in build_match_model, che moltiplica direttamente
+Attacco_Finale per il Form Factor e Difesa_Finale per un fattore simmetrico
+smorzato da questo coefficiente."""
+
 # --- Correzione Dixon-Coles -----------------------------------------------------
-DIXON_COLES_RHO = -0.13
+DIXON_COLES_RHO = -0.09
 """Parametro ρ di Dixon-Coles (Dixon & Coles, 1997): corregge la Poisson
 bivariata indipendente sui 4 risultati a basso punteggio (0-0, 1-0, 0-1, 1-1),
 dove nella realtà i pareggi/risultati bassi sono leggermente più frequenti di
-quanto preveda il semplice prodotto di due Poisson indipendenti."""
+quanto preveda il semplice prodotto di due Poisson indipendenti. Ridotto in
+magnitudine da -0.13 a -0.09 (resta nel range tipico della letteratura,
+-0.08/-0.20): il boost su τ(1,1) passa da ×1.13 a ×1.09, riducendo la
+tendenza del modello ad 'attirare' verso l'1-1 i risultati quando gli xG
+delle due squadre sono vicini, senza eliminare la correzione Dixon-Coles
+(che resta scientificamente corretta e necessaria)."""
 
 
 # --- 1. DIZIONARIO FASCE DI FORZA (TEAM TIERS) --------------------------------
@@ -711,6 +743,19 @@ def _shrink_to_mean(
     themselves while they are still statistically unreliable."""
     confidence = clamp(sample_size / max(full_confidence_n, 1e-9), 0.0, 1.0)
     return 1.0 + (multiplier - 1.0) * confidence
+
+
+def _amplify_spread(multiplier: float, amplifier: float = ATTACK_DEFENSE_SPREAD_AMPLIFIER) -> float:
+    """Stretches a per-match Attack/Defense multiplier away from the
+    league-average of 1.0 by `amplifier`, applied AFTER _shrink_to_mean —
+    so a small, unreliable sample is first pulled close to 1.0 (protecting
+    against the 2-3-match overreaction bug) and only the remaining,
+    already-tempered deviation gets amplified. This increases the Global
+    Power Rating's sensitivity when converting real quality differences
+    into Expected Goals, counteracting an excessive leveling of mid/top
+    tier teams toward a flat, draw-prone 1-1 equilibrium. Result is
+    re-clamped to the same [0.3, 3.0] bounds as the raw multiplier."""
+    return clamp(1.0 + (multiplier - 1.0) * amplifier, 0.3, 3.0)
 
 
 def is_top_tier(team: str) -> bool:
@@ -1494,10 +1539,10 @@ def build_match_model(
     home_sample_size = home_stats.home_matches if home_stats.home_matches else home_stats.matches
     away_sample_size = away_stats.away_matches if away_stats.away_matches else away_stats.matches
 
-    home_stats_attack = _shrink_to_mean(_stats_multiplier(home_goal_for), home_sample_size)
-    home_stats_defense = _shrink_to_mean(_stats_multiplier(home_goal_against), home_sample_size)
-    away_stats_attack = _shrink_to_mean(_stats_multiplier(away_goal_for), away_sample_size)
-    away_stats_defense = _shrink_to_mean(_stats_multiplier(away_goal_against), away_sample_size)
+    home_stats_attack = _amplify_spread(_shrink_to_mean(_stats_multiplier(home_goal_for), home_sample_size))
+    home_stats_defense = _amplify_spread(_shrink_to_mean(_stats_multiplier(home_goal_against), home_sample_size))
+    away_stats_attack = _amplify_spread(_shrink_to_mean(_stats_multiplier(away_goal_for), away_sample_size))
+    away_stats_defense = _amplify_spread(_shrink_to_mean(_stats_multiplier(away_goal_against), away_sample_size))
     home_stats_rating = _stats_rating(home_stats_attack, home_stats_defense)
     away_stats_rating = _stats_rating(away_stats_attack, away_stats_defense)
 
@@ -1507,6 +1552,26 @@ def build_match_model(
     difesa_finale_home = home_tier["defense"] * home_tier_weight + home_stats_defense * home_stats_weight
     attacco_finale_away = away_tier["attack"] * away_tier_weight + away_stats_attack * away_stats_weight
     difesa_finale_away = away_tier["defense"] * away_tier_weight + away_stats_defense * away_stats_weight
+
+    # --- 2b. Form Amplifier: la Forma Recente (ultime 5 partite, già
+    # calcolata da compute_form_factor come moltiplicatore 0.85-1.15) agisce
+    # ora come vero moltiplicatore dinamico su Attacco_Finale — e, smorzato
+    # da FORM_DEFENSE_TRANSFER, anche su Difesa_Finale — così una squadra in
+    # striscia positiva ottiene un boost concreto che aiuta a rompere
+    # l'equilibrio 'piatto' verso l'1-1 quando le due squadre non sono
+    # realmente equivalenti. In precedenza il Form Factor veniva calcolato
+    # e mostrato nei badge W/D/L ma non incideva mai sul calcolo di xG.
+    home_defense_form_factor = 1.0 + (1.0 - home_stats.form_factor) * FORM_DEFENSE_TRANSFER
+    away_defense_form_factor = 1.0 + (1.0 - away_stats.form_factor) * FORM_DEFENSE_TRANSFER
+    attacco_finale_home *= home_stats.form_factor
+    difesa_finale_home *= home_defense_form_factor
+    attacco_finale_away *= away_stats.form_factor
+    difesa_finale_away *= away_defense_form_factor
+    # Keep the displayed Global Power Rating consistent with the same Form
+    # Amplifier signal driving Attacco/Difesa_Finale above (same pattern
+    # already used for manual sliders/fatigue further below).
+    rating_finale_home += (home_stats.form_factor - 1.0) * RATING_SCALE
+    rating_finale_away += (away_stats.form_factor - 1.0) * RATING_SCALE
 
     # --- 3. Slider manuali (Mercato/Infortuni) + Indice di Affaticamento &
     # Turnover (Fase 2), SOMMATI fra loro (nessuno sovrascrive l'altro) e
