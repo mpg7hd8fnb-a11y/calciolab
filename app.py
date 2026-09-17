@@ -501,7 +501,28 @@ that baseline — it never multiplies the *rating gap* between the teams."""
 RATING_LAMBDA_SENSITIVITY = 0.0022
 """Quanto un punto di differenza di rating ELO sposta, in scala esponenziale,
 tiri/corner/cartellini rispetto alla media osservata. I gol attesi derivano
-invece direttamente da Attacco_Finale/Difesa_Finale (vedi build_match_model)."""
+invece direttamente da Attacco_Finale/Difesa_Finale (vedi build_match_model),
+oltre alla correzione diretta di XG_RATING_SPREAD_DAMPING qui sotto."""
+
+XG_RATING_SPREAD_DAMPING = 1.4
+"""NEW (xG Spread Fix): amplificazione diretta, sul differenziale di rating
+ELO (rating_diff, fattore campo incluso), applicata DIRETTAMENTE a
+home_lambda/away_lambda — non solo a tiri/corner/cartellini. Prima
+dell'introduzione di questo fattore, due squadre di Fascia/rating simile (il
+caso più comune per i match di metà classifica) producevano lambda_home e
+lambda_away entrambi compressi nella fascia 1.10-1.30, che con la Poisson
+rende l'1-1 quasi sempre il risultato esatto più probabile — un effetto
+statisticamente corretto ma visivamente monotono su tante simulazioni
+consecutive. Con damping > 1 (contro lo 0.7 usato per i tiri, intenzionalmente
+più smorzato) l'effetto del gap di rating sui gol attesi è MAGGIORE di
+quello sui tiri, cosa corretta perché il numero di gol dipende dalla
+qualità/Power Rating complessiva (attacco E difesa) più del numero grezzo di
+conclusioni. Applicato DOPO il calcolo di Attacco_Finale × Difesa_Finale
+(che già include Fasce di Forza, Time-Decay, Form Factor e slider manuali),
+quindi non sostituisce quel calcolo ma lo amplifica in base al Global Power
+Rating finale delle due squadre — esattamente il segnale richiesto
+(Power Rating + Forma Recente, già incorporata nel rating tramite il Form
+Amplifier) per allargare lo spread degli xG invece di lasciarlo collassare."""
 
 SHOT_RATING_DAMPING = 0.7
 """I tiri (fatti/in porta) seguono il gap di rating con un'intensità inferiore
@@ -772,8 +793,12 @@ def elo_expected_score(rating_a: float, rating_b: float) -> float:
 def rating_scaling_factors(rating_diff: float, damping: float = 1.0) -> tuple[float, float]:
     """Converte un differenziale di rating ELO (squadra A meno squadra B) in
     una coppia di moltiplicatori continui (boost per A, suppressione per B)
-    da applicare a tiri/corner/cartellini. `damping` attenua l'effetto per le
-    metriche meno legate al puro gap di qualità (es. corner)."""
+    da applicare a tiri/corner/cartellini (e, tramite XG_RATING_SPREAD_DAMPING,
+    anche direttamente agli xG). `damping` attenua o amplifica l'effetto a
+    seconda della metrica: < 1.0 per metriche meno legate al puro gap di
+    qualità (es. corner), > 1.0 per metriche che devono essere PIÙ sensibili
+    al gap di rating rispetto ai tiri (es. i gol attesi, vedi
+    XG_RATING_SPREAD_DAMPING)."""
     exponent = RATING_LAMBDA_SENSITIVITY * damping * rating_diff
     boost = clamp(math.exp(exponent), 0.4, 2.6)
     suppression = clamp(math.exp(-exponent), 0.38, 2.5)
@@ -1609,6 +1634,24 @@ def build_match_model(
     )
 
     rating_diff = (rating_finale_home + HOME_ADVANTAGE_RATING) - rating_finale_away
+
+    # --- 4b. xG SPREAD FIX (Diversificazione degli Expected Goals) ------------
+    # Applica DIRETTAMENTE al lambda di gol (non solo a tiri/corner/cartellini)
+    # un'ulteriore correzione esponenziale basata sul gap di Global Power
+    # Rating finale (rating_finale_home/away, che già incorpora Fasce di
+    # Forza, Time-Decay, Form Factor e slider manuali). Senza questa
+    # correzione, due squadre di Fascia/rating simile (il caso più comune per
+    # i match di metà classifica) producevano lambda_home e lambda_away
+    # entrambi compressi in una fascia stretta (circa 1.10-1.30), che con la
+    # Poisson genera quasi sempre l'1-1 come risultato esatto più probabile —
+    # statisticamente corretto ma visivamente monotono su tante simulazioni
+    # consecutive. `damping` > 1 (contro lo 0.7 usato per i tiri) rende
+    # l'effetto del gap di rating sui gol attesi PIÙ marcato di quello sui
+    # tiri, coerente col fatto che i gol dipendono dal Power Rating
+    # complessivo (attacco E difesa), non solo dal volume di conclusioni.
+    xg_rating_boost, xg_rating_suppress = rating_scaling_factors(rating_diff, damping=XG_RATING_SPREAD_DAMPING)
+    home_lambda = clamp(home_lambda * xg_rating_boost, 0.05, 5.5)
+    away_lambda = clamp(away_lambda * xg_rating_suppress, 0.05, 5.0)
 
     # --- 5. Tiri totali/in porta: stessa Transizione Dinamica (baseline di
     # Fascia derivata dall'Attacco di Tier, mescolata alle statistiche reali),
@@ -3991,20 +4034,12 @@ def run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, 
     for h_goal, a_goal, weight in zip(home_goals.tolist(), away_goals.tolist(), weights.tolist()):
         key = (h_goal, a_goal)
         weighted_scores[key] = weighted_scores.get(key, 0.0) + weight
-    top_scores = sorted(weighted_scores.items(), key=lambda item: item[1], reverse=True)[:5]
-    score_rows = [
-        {
-            "Exact Score": f"{h_goal}-{a_goal}",
-            "Simulations": int(round(weight)),
-            "Probability": weight / total_weight,
-        }
-        for (h_goal, a_goal), weight in top_scores
-    ]
 
-    # Frequenze 1X2 (pesate Dixon-Coles) osservate nelle 10.000 simulazioni:
+    # --- Frequenze 1X2 (pesate Dixon-Coles) osservate nelle 10.000 simulazioni:
     # servono a validare che la probabilità analitica (Poisson bivariata +
     # Dixon-Coles) e quella simulata dal motore Monte Carlo raccontino lo
-    # stesso match.
+    # stesso match, E a determinare l'esito macro (1/X/2) dominante per la
+    # selezione "Smart Display" del Top Result qui sotto.
     home_win_mask = home_goals > away_goals
     draw_mask = home_goals == away_goals
     away_win_mask = home_goals < away_goals
@@ -4015,6 +4050,55 @@ def run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, 
         {"Outcome": "1 (home win)", "Simulations": int(round(home_wins)), "Probability": home_wins / total_weight},
         {"Outcome": "X (draw)", "Simulations": int(round(draws)), "Probability": draws / total_weight},
         {"Outcome": "2 (away win)", "Simulations": int(round(away_wins)), "Probability": away_wins / total_weight},
+    ]
+
+    # --- SMART DISPLAY: il "Top Result" mostrato nell'HUD principale deve
+    # essere COERENTE con l'esito macro 1X2 dominante (quello con la
+    # probabilità più alta fra Vittoria Casa/Pareggio/Vittoria Trasferta),
+    # non semplicemente il punteggio esatto più probabile in assoluto. Con
+    # xG_home e xG_away vicini (match di metà classifica), l'1-1 è spesso il
+    # singolo punteggio più probabile pur essendo, ad es., la Vittoria Casa
+    # l'esito macro dominante — mostrare comunque l'1-1 come "Top Result" è
+    # fuorviante e rende le simulazioni monotone sui social. Qui si filtra
+    # weighted_scores al solo gruppo di punteggi coerenti con l'esito
+    # dominante e si sceglie, all'interno di quel gruppo, il più probabile.
+    if home_wins >= draws and home_wins >= away_wins:
+        dominant_outcome_filter = lambda h, a: h > a
+    elif away_wins > home_wins and away_wins >= draws:
+        dominant_outcome_filter = lambda h, a: h < a
+    else:
+        dominant_outcome_filter = lambda h, a: h == a
+
+    dominant_group_scores = {
+        score: weight for score, weight in weighted_scores.items() if dominant_outcome_filter(*score)
+    }
+    if dominant_group_scores:
+        top_result_score, top_result_weight = max(dominant_group_scores.items(), key=lambda item: item[1])
+    else:
+        # Fallback di sicurezza (non dovrebbe mai accadere con 10,000 path):
+        # nessun punteggio simulato ricade nel gruppo dominante, si ripiega
+        # sul punteggio esatto assoluto più probabile.
+        top_result_score, top_result_weight = max(weighted_scores.items(), key=lambda item: item[1])
+
+    top_result = {
+        "Exact Score": f"{top_result_score[0]}-{top_result_score[1]}",
+        "Simulations": int(round(top_result_weight)),
+        "Probability": top_result_weight / total_weight,
+    }
+
+    # Elenco (più ampio del solo Top 5) degli altri punteggi esatti più
+    # frequenti in assoluto, usato per le "Alternative Frequencies": include
+    # deliberatamente anche punteggi fuori dal gruppo dominante (es. l'1-1
+    # quando la Vittoria Casa è l'esito scelto come Top Result) così restano
+    # visibili come frequenze secondarie invece di sparire dall'HUD.
+    top_scores = sorted(weighted_scores.items(), key=lambda item: item[1], reverse=True)[:8]
+    score_rows = [
+        {
+            "Exact Score": f"{h_goal}-{a_goal}",
+            "Simulations": int(round(weight)),
+            "Probability": weight / total_weight,
+        }
+        for (h_goal, a_goal), weight in top_scores
     ]
 
     key_events = [
@@ -4037,6 +4121,7 @@ def run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, 
 
     return {
         "scores": pd.DataFrame(score_rows),
+        "top_result": top_result,
         "outcomes": pd.DataFrame(outcome_rows),
         "events": pd.DataFrame(event_rows),
         "raw": {
@@ -4892,7 +4977,12 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
             outcome_probabilities = {
                 str(row["Outcome"]): float(row["Probability"]) for _, row in outcome_frame.iterrows()
             }
-            top_score_row = score_frame.iloc[0]
+            # SMART DISPLAY: the Top Result shown in the hero card is the
+            # exact score already selected (in run_simulation) to be
+            # coherent with the dominant 1X2 outcome — not necessarily the
+            # single most frequent exact score overall (which, for
+            # evenly-matched teams, is very often a flat 1-1).
+            top_score_row = simulation["top_result"]
             intel = compute_micro_events_intel(raw, outcome_probabilities)
 
             # --- Single-Screen HUD: 3 columns, all post-simulation data ----
@@ -4910,8 +5000,15 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
 
             with col_alt_frequencies:
                 st.markdown('<div class="mc-col-title">📊 ALTERNATIVE FREQUENCIES</div>', unsafe_allow_html=True)
+                # Exclude the score already shown as the Top Result so it is
+                # not duplicated here — any other frequent score (including
+                # a 1-1 that was not chosen as the dominant-outcome Top
+                # Result) still surfaces as a secondary frequency.
+                alt_score_frame = score_frame[
+                    score_frame["Exact Score"] != top_score_row["Exact Score"]
+                ].reset_index(drop=True)
                 render_score_frequency_ranking(
-                    score_frame.iloc[1:],
+                    alt_score_frame.head(5),
                     reference_probability=float(top_score_row["Probability"]),
                     start_rank=2,
                 )
