@@ -524,6 +524,42 @@ Rating finale delle due squadre — esattamente il segnale richiesto
 (Power Rating + Forma Recente, già incorporata nel rating tramite il Form
 Amplifier) per allargare lo spread degli xG invece di lasciarlo collassare."""
 
+XG_HARD_CAP = 2.75
+"""REALISM CAP & SOFT TRUNCATION: tetto massimo assoluto per home_lambda/
+away_lambda, applicato come ULTIMO step del calcolo (dopo Fasce di Forza,
+Time-Decay, Form Amplifier, slider manuali, Affaticamento e XG_RATING_
+SPREAD_DAMPING), qualunque sia il gap fra le due squadre — anche la prima
+contro l'ultima in classifica. Con questo tetto, anche un lambda "di libro"
+molto alto smette di produrre code di Poisson realisticamente impossibili
+per il calcio (4-0, 5-0, 6-0): i punteggi netti restano nell'intervallo
+credibile 2-0/3-0/3-1/2-1. Il valore (2.75, nel range 2.65-2.80 richiesto)
+è comunque ben sopra la media di lega (LEAGUE_AVERAGE_GOALS_PER_TEAM=1.35),
+quindi un netto vantaggio di qualità resta pienamente visibile nelle
+probabilità 1X2/Over-Under, solo senza produrre lambda da videogioco."""
+
+XG_HARD_FLOOR = 0.15
+"""Pavimento minimo per home_lambda/away_lambda dopo tutte le correzioni —
+coerente col precedente 0.05 ma leggermente alzato per evitare lambda
+quasi nulli (0-0 quasi certo) altrettanto irrealistici quanto i tennistici,
+specie ora che XG_HARD_CAP comprime la coda superiore della distribuzione."""
+
+TIER_CONVERGENCE_FACTOR = 0.45
+"""TIER MATCHING (bilanciamento fra squadre della stessa Fascia): quando
+home e away si risolvono nello STESSO Tier (Big vs Big, oppure due squadre
+di metà/bassa classifica fra loro — vedi lookup_team_tier), questo fattore
+tira home_lambda e away_lambda verso la loro media condivisa, restringendo
+la forbice residua fra i due (es. un 1.55 vs 1.15 "di libro" diventa un più
+realistico ~1.37 vs ~1.33 con fattore 0.45, sempre nella forbice stretta
+1.20-1.35 indicata). Applicato DOPO XG_RATING_SPREAD_DAMPING (quindi un
+divario di forma/momentum reale fra due squadre pari-Fascia — vedi
+FORM_FACTOR_MIN/MAX — è già stato conteggiato e non viene azzerato, solo
+attenuato) e PRIMA del tetto XG_HARD_CAP. Non si applica a matchup fra
+Fasce diverse: un Tier 1 contro un Tier 5 resta pienamente divergente. Lo
+scopo è restituire al Pareggio (X) e ai punteggi bassi in parità (1-1, 2-2)
+una probabilità concreta quando le due squadre sono realmente equivalenti,
+senza però eliminare la possibilità di un risultato netto se la Forma
+Recente le ha nel frattempo allontanate."""
+
 SHOT_RATING_DAMPING = 0.7
 """I tiri (fatti/in porta) seguono il gap di rating con un'intensità inferiore
 ai gol (che dipendono anche da efficienza/episodi), da qui lo smorzamento."""
@@ -604,13 +640,16 @@ INJURY_FACTOR_BOUNDS = (-0.30, 0.30)
 (-30% / +30%)."""
 
 # --- Forma recente come moltiplicatore dinamico (Form Amplifier) -------------
-FORM_DEFENSE_TRANSFER = 0.6
+FORM_DEFENSE_TRANSFER = 0.7
 """Quota dell'effetto Form Factor trasferita anche alla Difesa (in direzione
 opposta): una squadra in ottima forma (Form Factor > 1.0) migliora anche la
 propria fase difensiva, ma in misura più contenuta rispetto all'attacco —
 vedi l'applicazione in build_match_model, che moltiplica direttamente
 Attacco_Finale per il Form Factor e Difesa_Finale per un fattore simmetrico
-smorzato da questo coefficiente."""
+smorzato da questo coefficiente. Alzato da 0.6 a 0.7 (DYNAMIC FORM &
+MOMENTUM): la fase difensiva deve risentire quasi quanto l'attacco del
+momento di forma, così una Big in crisi concede di più oltre a segnare
+meno, invece di restare quasi impermeabile solo perché di Fascia alta."""
 
 # --- Correzione Dixon-Coles -----------------------------------------------------
 DIXON_COLES_RHO = -0.09
@@ -1410,8 +1449,20 @@ FORM_RECENCY_WEIGHTS: tuple[float, ...] = (1.0, 0.85, 0.7, 0.55, 0.4)
 """Peso decrescente per ciascuna delle ultime FORM_MATCHES_WINDOW partite,
 dalla più recente alla meno recente."""
 
-FORM_FACTOR_MIN = 0.85
-FORM_FACTOR_MAX = 1.15
+FORM_FACTOR_MIN = 0.72
+FORM_FACTOR_MAX = 1.28
+"""DYNAMIC FORM & MOMENTUM: range allargato da 0.85-1.15 a 0.72-1.28 — il
+momento di forma recente (ultime FORM_MATCHES_WINDOW partite, tipicamente
+5-8) deve poter pesare più del solo nome/blasone della squadra. Una Big in
+crisi di risultati (striscia di sconfitte/pareggi, xG realizzato basso)
+subisce ora una penalizzazione di Attacco/Difesa (e, tramite l'aggiornamento
+di rating_finale in build_match_model, anche del Global Power Rating
+mostrato in UI) fino al 28% invece del 15% precedente — abbastanza da farla
+scendere realisticamente di una Fascia effettiva contro un avversario in
+salute. Simmetricamente, una squadra di media/bassa classifica in un momento
+di grande forma vede il proprio moltiplicatore di Attacco/Difesa crescere
+fino al 28%, rendendola competitiva o perfino favorita (1-0, 2-1, pareggio)
+contro una Big appannata."""
 
 
 def compute_form_factor(
@@ -1653,6 +1704,30 @@ def build_match_model(
     home_lambda = clamp(home_lambda * xg_rating_boost, 0.05, 5.5)
     away_lambda = clamp(away_lambda * xg_rating_suppress, 0.05, 5.0)
 
+    # --- 4c. TIER MATCHING (bilanciamento fra squadre della stessa Fascia) ----
+    # Se home e away si risolvono nello STESSO Tier (Big vs Big, o due
+    # squadre di metà/bassa classifica fra loro), la forbice fra i due lambda
+    # viene ristretta tirandoli verso la loro media condivisa — vedi
+    # TIER_CONVERGENCE_FACTOR. Un eventuale divario reale di Forma/Momentum
+    # (già applicato sopra via Form Amplifier + xG Rating Spread Fix) non
+    # viene azzerato, solo attenuato: due squadre pari-Fascia ma con Forma
+    # opposta restano distinguibili, solo non estreme quanto un mismatch di
+    # Fascia vero e proprio. Fuori da un matchup di pari Fascia il gap non
+    # viene toccato.
+    home_tier_number = lookup_team_tier(home)
+    away_tier_number = lookup_team_tier(away)
+    if home_tier_number == away_tier_number:
+        tier_average_lambda = (home_lambda + away_lambda) / 2
+        home_lambda = home_lambda + (tier_average_lambda - home_lambda) * TIER_CONVERGENCE_FACTOR
+        away_lambda = away_lambda + (tier_average_lambda - away_lambda) * TIER_CONVERGENCE_FACTOR
+
+    # --- 4d. REALISM CAP & SOFT TRUNCATION -------------------------------------
+    # Tetto/pavimento assoluti sui gol attesi, applicati per ULTIMI (dopo ogni
+    # altra correzione), a garanzia che nessun lambda produca code di Poisson
+    # irrealistiche per il calcio (4-0, 5-0, 6-0) — vedi XG_HARD_CAP/FLOOR.
+    home_lambda = clamp(home_lambda, XG_HARD_FLOOR, XG_HARD_CAP)
+    away_lambda = clamp(away_lambda, XG_HARD_FLOOR, XG_HARD_CAP)
+
     # --- 5. Tiri totali/in porta: stessa Transizione Dinamica (baseline di
     # Fascia derivata dall'Attacco di Tier, mescolata alle statistiche reali),
     # poi slider manuali e infine il gap di rating (smorzato). -----------------
@@ -1703,8 +1778,6 @@ def build_match_model(
     # Monte Carlo, cosicché ogni vista dell'app racconti lo stesso match.
     home_win_prob, draw_prob, away_win_prob = match_outcome_probabilities(home_lambda, away_lambda)
 
-    home_tier_number = lookup_team_tier(home)
-    away_tier_number = lookup_team_tier(away)
     engine_note = (
         f"{TEAM_TIER_LABELS[home_tier_number]} ({home}, rating {rating_finale_home:.0f}) "
         f"vs {TEAM_TIER_LABELS[away_tier_number]} ({away}, rating {rating_finale_away:.0f}) · "
@@ -1736,6 +1809,10 @@ def build_match_model(
             f"real matches, {away} {away_stats.current_season_matches} real matches "
             f"(full-confidence threshold: {EARLY_SEASON_MATCHDAY_THRESHOLD})"
         )
+    if home_tier_number == away_tier_number:
+        engine_note += f" · 🤝 Tier Matching: same-Tier convergence applied ({TEAM_TIER_LABELS[home_tier_number]})"
+    if home_lambda >= XG_HARD_CAP or away_lambda >= XG_HARD_CAP:
+        engine_note += f" · 🧢 xG Realism Cap active (max {XG_HARD_CAP:.2f} xG/team)"
 
     return MatchModel(
         home_lambda=home_lambda,
