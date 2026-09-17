@@ -486,79 +486,103 @@ NOTE: this is added only to the *local* rating_diff used for shots/corners/
 cards scaling — it is never added to rating_finale_home/away themselves, so
 it cannot inflate the Power Rating shown in the UI."""
 
-HOME_ADVANTAGE_GOAL_MULTIPLIER = 1.15
-"""Direct multiplier on the home team's expected goals (xG), calibrated to
-a MODERATE, verified home-advantage bump of +0.20/+0.25 expected goals for
-a league-average matchup (never a disproportionate multiplier of team
-strength): at LEAGUE_AVERAGE_GOALS_PER_TEAM (1.35) with average attack/
-defense multipliers of 1.0 each, home_lambda_base = 1.35 × 1.15 = 1.5525,
-i.e. a +0.2025 xG bump — squarely inside the requested +0.20/+0.25 window.
-The bump scales proportionally with the match's baseline lambda (stronger
-attacks get a slightly larger absolute bump, weaker ones a smaller one),
-which is standard Dixon-Coles practice, but always stays a fixed +15% of
-that baseline — it never multiplies the *rating gap* between the teams."""
-
 RATING_LAMBDA_SENSITIVITY = 0.0022
 """Quanto un punto di differenza di rating ELO sposta, in scala esponenziale,
-tiri/corner/cartellini rispetto alla media osservata. I gol attesi derivano
-invece direttamente da Attacco_Finale/Difesa_Finale (vedi build_match_model),
-oltre alla correzione diretta di XG_RATING_SPREAD_DAMPING qui sotto."""
+tiri/corner/cartellini rispetto alla media osservata (vedi
+rating_scaling_factors). I gol attesi (xG) NON passano più da questa
+funzione: dalla Weighted Rating Engine (vedi BASE_RATING_WEIGHT/
+FORM_RATING_WEIGHT più sotto) sono generati direttamente dalla curva di
+conversione Rating→xG in build_match_model (SUPREMACY_RATING_SENSITIVITY/
+BASE_TOTAL_EXPECTED_GOALS/XG_HARD_CAP/XG_HARD_FLOOR)."""
 
-XG_RATING_SPREAD_DAMPING = 1.4
-"""NEW (xG Spread Fix): amplificazione diretta, sul differenziale di rating
-ELO (rating_diff, fattore campo incluso), applicata DIRETTAMENTE a
-home_lambda/away_lambda — non solo a tiri/corner/cartellini. Prima
-dell'introduzione di questo fattore, due squadre di Fascia/rating simile (il
-caso più comune per i match di metà classifica) producevano lambda_home e
-lambda_away entrambi compressi nella fascia 1.10-1.30, che con la Poisson
-rende l'1-1 quasi sempre il risultato esatto più probabile — un effetto
-statisticamente corretto ma visivamente monotono su tante simulazioni
-consecutive. Con damping > 1 (contro lo 0.7 usato per i tiri, intenzionalmente
-più smorzato) l'effetto del gap di rating sui gol attesi è MAGGIORE di
-quello sui tiri, cosa corretta perché il numero di gol dipende dalla
-qualità/Power Rating complessiva (attacco E difesa) più del numero grezzo di
-conclusioni. Applicato DOPO il calcolo di Attacco_Finale × Difesa_Finale
-(che già include Fasce di Forza, Time-Decay, Form Factor e slider manuali),
-quindi non sostituisce quel calcolo ma lo amplifica in base al Global Power
-Rating finale delle due squadre — esattamente il segnale richiesto
-(Power Rating + Forma Recente, già incorporata nel rating tramite il Form
-Amplifier) per allargare lo spread degli xG invece di lasciarlo collassare."""
+# ==============================================================================
+# WEIGHTED RATING ENGINE (70/30 MODEL) — Base Rating + Current Form Rating
+# ==============================================================================
+# Architettura a due componenti, sostituisce integralmente il vecchio motore
+# Attacco_Finale × Difesa_Finale:
+#   RATING FINALE = BASE_RATING_WEIGHT × Base Rating + FORM_RATING_WEIGHT × Current Form Rating
+# Il BASE RATING (70-75%) riflette il blasone storico e SOPRATTUTTO la
+# posizione/punti di campionato ottenuti nella STAGIONE PRECEDENTE (2025/26,
+# vedi resolve_base_rating/fetch_previous_season_standings) — una big
+# arrivata 6ª parte da una base da corsa Champions, non da Scudetto; una
+# squadra salvatasi all'ultima giornata parte da una base di metà/bassa
+# classifica, a prescindere dal blasone storico.
+# Il CURRENT FORM RATING (25-30%) riflette ESCLUSIVAMENTE le partite della
+# STAGIONE ATTUALE (2026/27, vedi compute_current_form_rating): nessun dato
+# della stagione precedente vi confluisce — quel segnale vive solo nel Base
+# Rating, tramite la classifica finale, mai nelle statistiche partita per
+# partita usate per la Forma.
+BASE_RATING_WEIGHT = 0.72
+"""Peso del Base Rating (blasone + stagione precedente) sul Rating finale —
+nel range 70-75% richiesto."""
 
-XG_HARD_CAP = 2.75
-"""REALISM CAP & SOFT TRUNCATION: tetto massimo assoluto per home_lambda/
-away_lambda, applicato come ULTIMO step del calcolo (dopo Fasce di Forza,
-Time-Decay, Form Amplifier, slider manuali, Affaticamento e XG_RATING_
-SPREAD_DAMPING), qualunque sia il gap fra le due squadre — anche la prima
-contro l'ultima in classifica. Con questo tetto, anche un lambda "di libro"
-molto alto smette di produrre code di Poisson realisticamente impossibili
-per il calcio (4-0, 5-0, 6-0): i punteggi netti restano nell'intervallo
-credibile 2-0/3-0/3-1/2-1. Il valore (2.75, nel range 2.65-2.80 richiesto)
-è comunque ben sopra la media di lega (LEAGUE_AVERAGE_GOALS_PER_TEAM=1.35),
-quindi un netto vantaggio di qualità resta pienamente visibile nelle
-probabilità 1X2/Over-Under, solo senza produrre lambda da videogioco."""
+FORM_RATING_WEIGHT = 1.0 - BASE_RATING_WEIGHT
+"""Peso del Current Form Rating (sola stagione 2026/27) sul Rating finale —
+complementare a BASE_RATING_WEIGHT, quindi nel range 25-30% richiesto."""
 
-XG_HARD_FLOOR = 0.15
-"""Pavimento minimo per home_lambda/away_lambda dopo tutte le correzioni —
-coerente col precedente 0.05 ma leggermente alzato per evitare lambda
-quasi nulli (0-0 quasi certo) altrettanto irrealistici quanto i tennistici,
-specie ora che XG_HARD_CAP comprime la coda superiore della distribuzione."""
+BLASONE_WEIGHT_IN_BASE = 0.30
+"""Quota del blasone storico (Team Tier dictionary) DENTRO il Base Rating."""
 
-TIER_CONVERGENCE_FACTOR = 0.45
-"""TIER MATCHING (bilanciamento fra squadre della stessa Fascia): quando
-home e away si risolvono nello STESSO Tier (Big vs Big, oppure due squadre
-di metà/bassa classifica fra loro — vedi lookup_team_tier), questo fattore
-tira home_lambda e away_lambda verso la loro media condivisa, restringendo
-la forbice residua fra i due (es. un 1.55 vs 1.15 "di libro" diventa un più
-realistico ~1.37 vs ~1.33 con fattore 0.45, sempre nella forbice stretta
-1.20-1.35 indicata). Applicato DOPO XG_RATING_SPREAD_DAMPING (quindi un
-divario di forma/momentum reale fra due squadre pari-Fascia — vedi
-FORM_FACTOR_MIN/MAX — è già stato conteggiato e non viene azzerato, solo
-attenuato) e PRIMA del tetto XG_HARD_CAP. Non si applica a matchup fra
-Fasce diverse: un Tier 1 contro un Tier 5 resta pienamente divergente. Lo
-scopo è restituire al Pareggio (X) e ai punteggi bassi in parità (1-1, 2-2)
-una probabilità concreta quando le due squadre sono realmente equivalenti,
-senza però eliminare la possibilità di un risultato netto se la Forma
-Recente le ha nel frattempo allontanate."""
+PREVIOUS_SEASON_WEIGHT_IN_BASE = 1.0 - BLASONE_WEIGHT_IN_BASE
+"""Quota della posizione/punti di classifica 2025/26 DENTRO il Base Rating —
+la componente DOMINANTE (70%) come richiesto ('SOPRATTUTTO la posizione
+ottenuta nella stagione precedente'), quando la classifica finale è
+disponibile per quella squadra in quella competizione (vedi
+resolve_base_rating: altrimenti si ripiega sul solo blasone)."""
+
+# --- xG GENERATION: curva di conversione Rating → Expected Goals ------------
+XG_HARD_CAP = 2.50
+"""Tetto massimo assoluto per home_lambda/away_lambda, applicato come ULTIMO
+step della curva di conversione (dopo Base Rating, Current Form Rating,
+slider manuali e Affaticamento), qualunque sia il gap fra le due squadre —
+anche la prima contro l'ultima in classifica. Elimina matematicamente le
+code di Poisson irrealistiche per il calcio (4-0, 5-0, 6-0): i punteggi
+netti restano nell'intervallo credibile 2-0/3-0/3-1/2-1."""
+
+XG_HARD_FLOOR = 0.40
+"""Pavimento minimo per home_lambda/away_lambda, stesso step di XG_HARD_CAP:
+nessuna squadra scende sotto 0.40 xG attesi, per evitare 0-0 quasi certi
+altrettanto irrealistici quanto le goleade tennistiche."""
+
+BASE_TOTAL_EXPECTED_GOALS = 2.45
+"""Gol totali di partita 'di libro' (somma home_lambda + away_lambda) per un
+match perfettamente equilibrato (Rating identico, solo il fattore campo a
+fare la differenza) — coerente con la media empirica del calcio europeo."""
+
+TOTAL_GOALS_MISMATCH_BONUS = 0.30
+"""Incremento massimo (fino a +0.30) dei gol totali attesi in funzione del
+gap qualitativo fra le due squadre (vedi pct_rating_distance in
+build_match_model): un mismatch netto produce in media qualche gol in più
+nel computo complessivo (la difesa più debole concede di più), fino a un
+totale 'di libro' di BASE_TOTAL_EXPECTED_GOALS + TOTAL_GOALS_MISMATCH_BONUS."""
+
+SUPREMACY_RATING_SENSITIVITY = 0.0025
+"""Converte linearmente il differenziale di Rating (fattore campo incluso)
+in 'supremazia' di gol (quanto home_lambda supera away_lambda prima del
+tetto/pavimento): supremacy = SUPREMACY_RATING_SENSITIVITY × rating_diff.
+Calibrato così che un semplice vantaggio del fattore campo fra due squadre
+di Rating identico (rating_diff ≈ HOME_ADVANTAGE_RATING = 60) produca una
+supremazia contenuta (~0.15, es. 1.30 vs 1.15), mentre un vero mismatch di
+Fascia (rating_diff dell'ordine di 300-500 punti) produce xG realistici da
+squadra favorita (~1.90-2.20 contro ~0.60) ancora PRIMA che intervenga
+XG_HARD_CAP/FLOOR — il tetto/pavimento restano una rete di sicurezza per i
+casi più estremi (es. una Big in gran forma contro una neopromossa in
+crisi), non il meccanismo primario di controllo dello spread."""
+
+BALANCED_MATCH_RATING_DISTANCE_THRESHOLD = 0.08
+"""Soglia (8%) di distanza percentuale fra i Rating finali (SENZA fattore
+campo) di home e away sotto la quale il match è considerato 'Scontro tra
+pari livello' (vedi pct_rating_distance in build_match_model): al di sotto
+di questa soglia si applica un'ulteriore compressione della supremazia
+(BALANCED_MATCH_SUPREMACY_DAMPING), per restituire al Pareggio (X) e ai
+punteggi di misura (1-1, 1-0, 2-1) una probabilità concreta quando le due
+squadre sono realmente equivalenti."""
+
+BALANCED_MATCH_SUPREMACY_DAMPING = 0.70
+"""Fattore di smorzamento aggiuntivo applicato alla 'supremazia' di gol
+(vedi SUPREMACY_RATING_SENSITIVITY) quando il match ricade sotto
+BALANCED_MATCH_RATING_DISTANCE_THRESHOLD, per contenere ulteriormente lo
+scarto di xG fra le due squadre nei confronti realmente equilibrati."""
 
 SHOT_RATING_DAMPING = 0.7
 """I tiri (fatti/in porta) seguono il gap di rating con un'intensità inferiore
@@ -572,64 +596,50 @@ CARD_UNDERDOG_BONUS = 0.25
 """Quota aggiuntiva di cartellini per la squadra più debole, che difende più
 a lungo e commette più falli tattici contro un avversario superiore."""
 
-# --- Time-Decay per i dati storici -------------------------------------------
-PREVIOUS_SEASON_MAX_WEIGHT = 0.35
-"""Peso massimo (35%) assegnato alle partite della STAGIONE PRECEDENTE nel
-calcolo delle medie (tiri, xG, forma). Le partite della stagione corrente
-valgono sempre il 100% (peso 1.0)."""
-
+# --- Time-Decay per i dati storici (ora usato SOLO dallo shrinkage del
+# Current Form Rating e dal blend Tier/Stats di tiri-corner-cartellini: i
+# dati della stagione precedente NON confluiscono più nelle statistiche
+# partita per partita — vivono solo nel Base Rating, vedi
+# resolve_base_rating/fetch_previous_season_standings) --------------------
 EARLY_SEASON_MATCHDAY_THRESHOLD = 10
 """Dalla Giornata 10 (N partite REALI giocate nella stagione corrente, un
 campione minimo di 10-15 partite come richiesto) si usa il 100% dei dati/
-statistiche reali. Sotto questa soglia si applica la Transizione Dinamica
-(Dynamic Decay, vedi dynamic_decay_weights), che pesa progressivamente di
-più il rating di Fascia man mano che il campione reale è piccolo — questo,
-insieme allo shrinkage di REGRESSION_TO_MEAN_SAMPLE_SIZE applicato PRIMA
-del blend (vedi _shrink_to_mean), è la doppia barriera che impedisce a
-2-3 risultati estremi di un club di fascia media di sbilanciare il rating
-sopra quello di una big con un campione più ampio e affidabile."""
+statistiche reali per il blend Tier/Stats di tiri-corner-cartellini (vedi
+dynamic_decay_weights) — questo, insieme allo shrinkage di REGRESSION_TO_
+MEAN_SAMPLE_SIZE applicato al Current Form Rating (vedi _shrink_to_mean),
+è la doppia barriera che impedisce a 2-3 risultati estremi di sbilanciare
+il Rating sopra quello di una big con un campione più ampio e affidabile."""
 
 REGRESSION_TO_MEAN_SAMPLE_SIZE = 6.0
-"""Numero di partite (pesate) oltre il quale un moltiplicatore Attacco/
-Difesa calcolato dalle statistiche osservate viene usato al 100% del suo
-valore grezzo. Con un campione più piccolo, il moltiplicatore viene
-'ristretto' (shrinkage Bayesiano) verso 1.0 (la media di lega) in proporzione
-al campione disponibile — vedi _shrink_to_mean. Abbassato da 12 a 6: un
-campione di 1-3 partite (es. il caso limite di una neopromossa con un
-filotto iniziale) resta fortemente attenuato, ma una squadra con già 6+
-partite reali mantiene la sua vera identità qualitativa invece di essere
-livellata verso la media di lega per gran parte della stagione — questo è
-il fix per l'eccessivo appiattimento delle fasce medio/alte segnalato dopo
-il precedente irrigidimento. Complementare al Dynamic Decay Tier/Stats:
-quello sfuma fra il rating di Fascia e quello reale; questo attenua il
-rating reale stesso quando è ancora statisticamente inaffidabile."""
-
-ATTACK_DEFENSE_SPREAD_AMPLIFIER = 1.25
-"""Fattore di amplificazione dello scarto qualitativo Attacco/Difesa reale
-(applicato ai moltiplicatori Attacco/Difesa DOPO lo shrinkage, sullo scarto
-rispetto a 1.0): un moltiplicatore osservato di 1.20 diventa
-1.0 + (1.20-1.0)×1.25 = 1.25. Aumenta la sensibilità del Global Power
-Rating nella conversione in Expected Goals, così che uno scarto di
-Tier/qualità reale fra due squadre produca una differenza di xG più
-marcata prima di applicare la Poisson — contrastando la tendenza dei
-pareggi 'piatti' (es. 1-1 sempre in cima alle simulazioni Monte Carlo)
-quando le due squadre non sono realmente equivalenti. Applicato DOPO lo
-shrinkage (non prima): un campione piccolo viene prima ricondotto vicino
-a 1.0 (protezione anti-bias) e SOLO l'eventuale scarto residuo, già
-ridimensionato, viene amplificato — quindi non riapre la vulnerabilità a
-2-3 risultati anomali isolati."""
+"""Numero di partite (stagione corrente) oltre il quale il moltiplicatore
+Attacco/Difesa del Current Form Rating, calcolato dalle statistiche
+osservate, viene usato al 100% del suo valore grezzo. Con un campione più
+piccolo, il moltiplicatore viene 'ristretto' (shrinkage Bayesiano) verso
+1.0 (la media di lega) in proporzione al campione disponibile — vedi
+_shrink_to_mean. Con zero partite giocate quest'anno lo shrinkage riporta
+il moltiplicatore esattamente a 1.0, così il Current Form Rating collassa
+sul rating neutro di lega (BASE_RATING=1500) e il Rating finale coincide
+di fatto col solo Base Rating (Fascia/stagione precedente) — esattamente
+il comportamento atteso prima che una squadra abbia giocato."""
 
 CLUB_MATCH_LOOKBACK = 15
-"""Massimo numero di partite recenti (per stagione corrente e per stagione
-precedente separatamente) recuperate per ogni squadra di club — alzato da 8
-a 15 per garantire un campione minimo di 10-15 partite come richiesto,
-riducendo ulteriormente la sensibilità del rating a 2-3 risultati anomali
-isolati (si veda anche REGRESSION_TO_MEAN_SAMPLE_SIZE, che agisce sullo
-stesso problema da un angolo complementare)."""
+"""Massimo numero di partite CORRENTI (stagione 2026/27) recuperate per
+ogni squadra di club, usate esclusivamente per il Current Form Rating e le
+statistiche di tiri/corner/cartellini — alzato da 8 a 15 per garantire un
+campione minimo di 10-15 partite come richiesto, riducendo ulteriormente
+la sensibilità del rating a 2-3 risultati anomali isolati (si veda anche
+REGRESSION_TO_MEAN_SAMPLE_SIZE, che agisce sullo stesso problema da un
+angolo complementare). La stagione precedente non usa più questo lookback
+per le statistiche: la sua unica fonte è ora la classifica finale (vedi
+fetch_previous_season_standings), letta per intero."""
 
 LEAGUE_AVERAGE_GOALS_PER_TEAM = 1.35
 """Gol attesi 'di libro' per una squadra media in una singola partita di
-massima serie: fattore di scala del modello Attacco_Finale × Difesa_Finale."""
+massima serie: fattore di normalizzazione del moltiplicatore Attacco/Difesa
+usato dal Current Form Rating (vedi _stats_multiplier/compute_current_
+form_rating) — i gol attesi finali (xG) sono generati dalla curva Rating→
+xG (BASE_TOTAL_EXPECTED_GOALS/SUPREMACY_RATING_SENSITIVITY), non più da un
+prodotto diretto Attacco×Difesa."""
 
 # --- Slider manuali "Impatto Mercato" e "Impatto Infortuni" -------------------
 MARKET_FACTOR_BOUNDS = (-0.20, 0.20)
@@ -805,17 +815,19 @@ def _shrink_to_mean(
     return 1.0 + (multiplier - 1.0) * confidence
 
 
-def _amplify_spread(multiplier: float, amplifier: float = ATTACK_DEFENSE_SPREAD_AMPLIFIER) -> float:
-    """Stretches a per-match Attack/Defense multiplier away from the
-    league-average of 1.0 by `amplifier`, applied AFTER _shrink_to_mean —
-    so a small, unreliable sample is first pulled close to 1.0 (protecting
-    against the 2-3-match overreaction bug) and only the remaining,
-    already-tempered deviation gets amplified. This increases the Global
-    Power Rating's sensitivity when converting real quality differences
-    into Expected Goals, counteracting an excessive leveling of mid/top
-    tier teams toward a flat, draw-prone 1-1 equilibrium. Result is
-    re-clamped to the same [0.3, 3.0] bounds as the raw multiplier."""
-    return clamp(1.0 + (multiplier - 1.0) * amplifier, 0.3, 3.0)
+def _stats_multiplier(value_per_match: float) -> float:
+    """Converts a raw per-match value (goals scored or conceded per game)
+    into a multiplier relative to the league average
+    (LEAGUE_AVERAGE_GOALS_PER_TEAM), clamped to a sane [0.3, 3.0] range."""
+    return clamp(value_per_match / LEAGUE_AVERAGE_GOALS_PER_TEAM, 0.3, 3.0)
+
+
+def _stats_rating(attack_mult: float, defense_mult: float) -> float:
+    """Converts an Attack/Defense multiplier pair into an absolute rating
+    centered on BASE_RATING (the league average, 1500) — used by
+    compute_current_form_rating so the Current Form Rating reflects only
+    this season's on-pitch output, independent of blasone or Base Rating."""
+    return BASE_RATING + (RATING_SCALE / 2) * (attack_mult - 1.0) - (RATING_SCALE / 2) * (defense_mult - 1.0)
 
 
 def is_top_tier(team: str) -> bool:
@@ -832,12 +844,11 @@ def elo_expected_score(rating_a: float, rating_b: float) -> float:
 def rating_scaling_factors(rating_diff: float, damping: float = 1.0) -> tuple[float, float]:
     """Converte un differenziale di rating ELO (squadra A meno squadra B) in
     una coppia di moltiplicatori continui (boost per A, suppressione per B)
-    da applicare a tiri/corner/cartellini (e, tramite XG_RATING_SPREAD_DAMPING,
-    anche direttamente agli xG). `damping` attenua o amplifica l'effetto a
+    da applicare a tiri/corner/cartellini. `damping` attenua l'effetto a
     seconda della metrica: < 1.0 per metriche meno legate al puro gap di
-    qualità (es. corner), > 1.0 per metriche che devono essere PIÙ sensibili
-    al gap di rating rispetto ai tiri (es. i gol attesi, vedi
-    XG_RATING_SPREAD_DAMPING)."""
+    qualità (es. corner). I gol attesi (xG) non passano da questa funzione:
+    sono generati dalla curva di conversione Rating→xG in build_match_model
+    (vedi SUPREMACY_RATING_SENSITIVITY)."""
     exponent = RATING_LAMBDA_SENSITIVITY * damping * rating_diff
     boost = clamp(math.exp(exponent), 0.4, 2.6)
     suppression = clamp(math.exp(-exponent), 0.38, 2.5)
@@ -1189,6 +1200,18 @@ def _average(total: float, count: float, label: str, team_name: str) -> float:
     return total / count
 
 
+def _safe_average(total: float, count: float, fallback: float = 0.0) -> float:
+    """Like _average, but returns `fallback` instead of raising when count
+    is zero — used for the shots/corners/cards/fouls Tier/Stats blend
+    (dynamic_decay_weights), where a team with zero current-season matches
+    simply gets 0% weight on the raw stats side (100% Tier baseline), so
+    the exact raw value is irrelevant as long as computing it doesn't
+    crash the whole match analysis."""
+    if count <= 0:
+        return fallback
+    return total / count
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_league_matches(league: str) -> tuple[dict[str, object], ...]:
     return fetch_competition_snapshot(league)[2]
@@ -1262,6 +1285,16 @@ def fetch_team_recent_matches_extended(
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
+    """CURRENT-SEASON-ONLY statistics for `team_name`: goals, the shots/
+    corners/cards/fouls baseline, Recent Form and the Current Form Rating
+    input are all derived EXCLUSIVELY from 2026/27 FINISHED fixtures — see
+    the Weighted Rating Engine notes above BASE_RATING_WEIGHT/
+    FORM_RATING_WEIGHT. The previous season's signal (2025/26) is no
+    longer blended into these match-level statistics at all: it flows
+    only into the Base Rating, via the final league standings (see
+    resolve_base_rating/fetch_previous_season_standings), keeping the two
+    data-frames — 'last season's final table' and 'this season's games' —
+    strictly separate, as required."""
     team_map = dict(fetch_league_teams(league))
     team_id = next((id_ for id_, name in team_map.items() if name == team_name), None)
     if team_id is None:
@@ -1286,47 +1319,30 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
         # National teams play far fewer matches per year than clubs, and a
         # single tournament's own fixture list can be near-empty between
         # windows. Pull the team's recent matches across ALL competitions
-        # instead, all weighted equally — there is no clean "current vs
-        # previous season" boundary for a national side, so the club-league
-        # Time-Decay previous-season discount does not apply here.
+        # instead — still exclusively "current" fixtures (qualifiers,
+        # finals, Nations League, friendlies already played), never a
+        # blend with a "previous campaign" concept that doesn't cleanly
+        # exist for national sides.
         try:
             extended_matches = fetch_team_recent_matches_extended(league, team_name)
             current_fixtures = _team_fixtures(extended_matches)[:NATIONAL_TEAM_MATCH_WINDOW]
         except FootballDataError:
             current_fixtures = _team_fixtures(fetch_league_matches(league))[:NATIONAL_TEAM_MATCH_WINDOW]
-        previous_fixtures: list[dict[str, object]] = []
     else:
         current_fixtures = _team_fixtures(fetch_league_matches(league))[:CLUB_MATCH_LOOKBACK]
-        try:
-            previous_fixtures = _team_fixtures(fetch_previous_season_matches(league))[:CLUB_MATCH_LOOKBACK]
-        except FootballDataError:
-            previous_fixtures = []
 
-    # Partite REALI (non pesate) disputate nella stagione in corso: base per
-    # la Modalità Inizio Stagione (vedi EARLY_SEASON_MATCHDAY_THRESHOLD).
-    # dynamic_decay_weights() clamps this internally to
-    # [0, EARLY_SEASON_MATCHDAY_THRESHOLD], so the same formula is correct
-    # whether current_fixtures came from a club season or the national-team
-    # extended lookback above.
+    # Partite REALI disputate nella stagione in corso: base per la Modalità
+    # Inizio Stagione (vedi EARLY_SEASON_MATCHDAY_THRESHOLD) e per lo
+    # shrinkage del Current Form Rating (vedi REGRESSION_TO_MEAN_SAMPLE_SIZE).
     current_season_matches = len(current_fixtures)
 
-    # --- Time-Decay: stagione corrente peso 1.0, precedente al massimo
-    # PREVIOUS_SEASON_MAX_WEIGHT (35%). La stagione corrente viene prima nel
-    # pool, così ha sempre la priorità anche nel calcolo del Form Factor.
-    weighted_pool: list[tuple[dict[str, object], float]] = [
-        (fixture, 1.0) for fixture in current_fixtures
-    ] + [(fixture, PREVIOUS_SEASON_MAX_WEIGHT) for fixture in previous_fixtures]
-
     goals_for = goals_against = 0.0
-    home_goals_for = home_goals_against = 0.0
-    away_goals_for = away_goals_against = 0.0
     home_matches = away_matches = 0.0
     recent_results: list[str] = []
     recent_points: list[int] = []
-    recent_weights: list[float] = []
     recent_match_details: list[dict[str, object]] = []
 
-    for fixture_item, weight in weighted_pool:
+    for fixture_item in current_fixtures:
         home_data = fixture_item.get("homeTeam", {})
         away_data = fixture_item.get("awayTeam", {})
         score = fixture_item.get("score", {})
@@ -1337,21 +1353,15 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
         if scored is None or conceded is None:
             continue
 
-        goals_for += scored * weight
-        goals_against += conceded * weight
+        goals_for += scored
+        goals_against += conceded
         if is_home:
-            home_matches += weight
-            home_goals_for += scored * weight
-            home_goals_against += conceded * weight
+            home_matches += 1
         else:
-            away_matches += weight
-            away_goals_for += scored * weight
-            away_goals_against += conceded * weight
+            away_matches += 1
 
-        # Form Factor: le prime FORM_MATCHES_WINDOW partite del pool (la
-        # stagione corrente è in testa, quindi ha sempre la priorità; la
-        # stagione precedente riempie la finestra solo a inizio stagione, con
-        # peso ridotto tramite recent_weights).
+        # Form Factor: le prime FORM_MATCHES_WINDOW partite (la lista è già
+        # ordinata dalla più recente), tutte di stagione corrente.
         if len(recent_points) < FORM_MATCHES_WINDOW:
             if scored > conceded:
                 recent_results.append("W")
@@ -1362,7 +1372,6 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
             else:
                 recent_results.append("L")
                 recent_points.append(0)
-            recent_weights.append(weight)
             opponent_name = str((away_data if is_home else home_data).get("name", "Unknown"))
             recent_match_details.append(
                 {
@@ -1375,39 +1384,15 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
             )
 
     matches = home_matches + away_matches
-    if matches == 0:
-        # Nessuna partita utilizzabile né in stagione corrente né in quella
-        # precedente per questa squadra: fallback estremo sulla media di
-        # tutte le partite della stagione precedente nel campionato.
-        previous_matches = fetch_previous_season_matches(league)
-        scored_values: list[float] = []
-        for match in previous_matches:
-            score = match.get("score", {})
-            full_time = score.get("fullTime", {}) if isinstance(score, dict) else {}
-            scored = _number(full_time.get("home"))
-            conceded = _number(full_time.get("away"))
-            if scored is not None and conceded is not None:
-                scored_values.extend((scored, conceded))
-        if not scored_values:
-            raise FootballDataError(
-                f"Football-Data.org has no usable historical data for {team_name}."
-            )
-        neutral_average = sum(scored_values) / len(scored_values)
-        matches = 8.0
-        home_matches = away_matches = 4.0
-        goals_for = goals_against = neutral_average * matches
-        home_goals_for = away_goals_for = neutral_average * 4
-        home_goals_against = away_goals_against = neutral_average * 4
-        recent_results = []
-        recent_points = []
-        recent_weights = []
-        recent_match_details = []
 
     baseline = MICRO_EVENT_BASELINES[FOOTBALL_DATA_COMPETITIONS[league]]
     # The provider has no micro-event endpoint. Scale the transparent baseline
     # slightly with recent scoring, while keeping the source distinction clear.
-    scoring_factor = clamp(0.88 + (goals_for / matches) * 0.08, 0.88, 1.12)
-    form_factor = compute_form_factor(recent_points, recent_weights)
+    # With zero matches played yet this season, keep the baseline unscaled
+    # (scoring_factor=1.0) rather than dividing by zero — the Dynamic Decay
+    # Tier/Stats blend downstream gives this raw value 0% weight anyway.
+    scoring_factor = clamp(0.88 + (goals_for / matches) * 0.08, 0.88, 1.12) if matches > 0 else 1.0
+    form_factor = compute_form_factor(recent_points)
 
     return LiveTeamStats(
         team_id=team_id,
@@ -1417,10 +1402,10 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
         away_matches=away_matches,
         goals_for=goals_for,
         goals_against=goals_against,
-        home_goals_for=home_goals_for,
-        home_goals_against=home_goals_against,
-        away_goals_for=away_goals_for,
-        away_goals_against=away_goals_against,
+        home_goals_for=0.0,
+        home_goals_against=0.0,
+        away_goals_for=0.0,
+        away_goals_against=0.0,
         total_shots=baseline["shots"] * scoring_factor * matches,
         shots_on_target=baseline["shots_on_target"] * scoring_factor * matches,
         corners=baseline["corners"] * matches,
@@ -1431,6 +1416,139 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
         form_factor=form_factor,
         current_season_matches=current_season_matches,
     )
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_previous_season_standings(league: str) -> dict[str, dict[str, float]]:
+    """Fetches the FINAL league table of the PREVIOUS season (2025/26) via
+    Football-Data.org's dedicated /standings endpoint (the overall 'TOTAL'
+    table) — the dominant signal for each team's Base Rating (see
+    resolve_base_rating). Returns {team_name: {"position", "points",
+    "played", "total_teams"}}. Raises FootballDataError if the API/tier
+    cannot provide it (season not covered on the plan in use, or a network
+    failure) — callers fall back gracefully to the pure blasone (Team
+    Tier) rating in that case, exactly like every other data source in
+    this app."""
+    competition_code = FOOTBALL_DATA_COMPETITIONS[league]
+    previous_season = current_season_start() - 1
+    payload = _football_data_request(
+        f"/competitions/{competition_code}/standings",
+        {"season": previous_season},
+    )
+    standings = payload.get("standings", [])
+    if not isinstance(standings, list):
+        raise FootballDataError(f"No previous-season standings available for {league}.")
+
+    table_rows: list[dict[str, object]] = []
+    for group in standings:
+        if not isinstance(group, dict):
+            continue
+        # "TOTAL" is the overall regular-season table; HOME/AWAY splits (and
+        # any per-group tables in cup-style competitions) are skipped in
+        # favor of the single overall final ranking.
+        if group.get("type") != "TOTAL":
+            continue
+        for row in group.get("table", []) or []:
+            if not isinstance(row, dict):
+                continue
+            team = row.get("team", {})
+            team_name = team.get("name") if isinstance(team, dict) else None
+            position = row.get("position")
+            points = row.get("points")
+            played = row.get("playedGames")
+            if isinstance(team_name, str) and isinstance(position, int):
+                table_rows.append(
+                    {
+                        "name": team_name,
+                        "position": position,
+                        "points": float(points) if isinstance(points, (int, float)) else 0.0,
+                        "played": int(played) if isinstance(played, int) else 0,
+                    }
+                )
+
+    if not table_rows:
+        raise FootballDataError(f"Previous-season table is empty for {league}.")
+
+    total_teams = len(table_rows)
+    return {
+        row["name"]: {
+            "position": row["position"],
+            "points": row["points"],
+            "played": row["played"],
+            "total_teams": total_teams,
+        }
+        for row in table_rows
+    }
+
+
+def previous_season_position_rating(position: int, total_teams: int) -> float:
+    """Maps a previous-season FINAL league position to a rating on the same
+    1280-1750 scale as TEAM_TIER_PROFILES (1st place → ~1750, last place →
+    ~1280) via linear interpolation on finishing-position percentile. This
+    is the DOMINANT signal inside a team's Base Rating (see
+    resolve_base_rating): a club that actually finished mid-table last
+    season starts this season with a mid-table Base Rating regardless of
+    historical blasone — e.g. a team finishing 6th gets a Champions-
+    contention Base Rating rather than a title-race one; a team that
+    survived on the final matchday gets a bottom-half Base Rating."""
+    if total_teams <= 1:
+        return TEAM_TIER_PROFILES[TEAM_TIER_DEFAULT]["rating"]
+    percentile = clamp((position - 1) / (total_teams - 1), 0.0, 1.0)  # 0 = 1st place, 1 = last
+    top_rating = TEAM_TIER_PROFILES[1]["rating"]
+    bottom_rating = TEAM_TIER_PROFILES[5]["rating"]
+    return top_rating - (top_rating - bottom_rating) * percentile
+
+
+def resolve_base_rating(league: str, team: str) -> tuple[float, str]:
+    """BASE RATING (BASE_RATING_WEIGHT, 70-75% of the final Weighted
+    Rating): blends the team's historical blasone (Team Tier dictionary,
+    lookup_team_tier) with its PREVIOUS-SEASON (2025/26) final league
+    position — the DOMINANT component inside the Base Rating
+    (PREVIOUS_SEASON_WEIGHT_IN_BASE, 70% of it) whenever that final table
+    is available for this team in this competition. Falls back to pure
+    blasone when it isn't (promoted from a division/league not tracked
+    here, national-team competition, or an API/tier limitation) — in that
+    fallback case the Base Rating is, appropriately, exactly the old Team
+    Tier rating. Returns (base_rating, source_label) for transparency in
+    the engine note."""
+    blasone_rating = team_tier_profile(team)["rating"]
+    if is_national_team_competition(league):
+        return blasone_rating, "blasone only (national team)"
+    try:
+        standings = fetch_previous_season_standings(league)
+    except FootballDataError:
+        return blasone_rating, "blasone only (2025/26 table unavailable)"
+    row = standings.get(team)
+    if row is None:
+        return blasone_rating, "blasone only (not in 2025/26 table)"
+    previous_season_rating = previous_season_position_rating(int(row["position"]), int(row["total_teams"]))
+    base_rating = (
+        BLASONE_WEIGHT_IN_BASE * blasone_rating
+        + PREVIOUS_SEASON_WEIGHT_IN_BASE * previous_season_rating
+    )
+    return base_rating, f"2025/26 finish {int(row['position'])}/{int(row['total_teams'])}"
+
+
+def compute_current_form_rating(stats: "LiveTeamStats") -> float:
+    """CURRENT FORM RATING (FORM_RATING_WEIGHT, 25-30% of the final
+    Weighted Rating): reflects EXCLUSIVELY the team's on-pitch output in
+    the CURRENT season (2026/27) — goals scored/conceded per match this
+    season, converted into a rating centered on the league average
+    (BASE_RATING=1500), completely independent of blasone or of last
+    season's standing (that signal lives only in the Base Rating — see
+    resolve_base_rating). With a small sample of matches played so far,
+    the estimate is shrunk toward the neutral league average via
+    _shrink_to_mean (same Bayesian-style safeguard used elsewhere in the
+    engine), so 1-2 flukey results early in the season cannot swing
+    25-30% of a team's rating; with zero matches played, the Form
+    component is fully neutral (1500) and the Weighted Rating collapses
+    onto the Base Rating alone — exactly the intended behaviour before a
+    team has played a single game this season."""
+    if stats.matches <= 0:
+        return BASE_RATING
+    attack_multiplier = _shrink_to_mean(_stats_multiplier(stats.goals_for / stats.matches), stats.matches)
+    defense_multiplier = _shrink_to_mean(_stats_multiplier(stats.goals_against / stats.matches), stats.matches)
+    return _stats_rating(attack_multiplier, defense_multiplier)
 
 
 def clamp(value: float, minimum: float, maximum: float) -> float:
@@ -1470,12 +1588,14 @@ def compute_form_factor(
 ) -> float:
     """Form Factor dinamico: calcola un moltiplicatore intorno a 1.0 pesando
     i punti (Vittoria=3, Pareggio=1, Sconfitta=0) delle ultime partite con
-    FORM_RECENCY_WEIGHTS, ulteriormente moltiplicati per `season_weights`
-    (Time-Decay: 1.0 per la stagione corrente, PREVIOUS_SEASON_MAX_WEIGHT per
-    la precedente), così un risultato della scorsa stagione pesa meno di uno
-    di questa. Una squadra in ottima forma recente arriva fino a
-    FORM_FACTOR_MAX, una in crisi di risultati scende fino a FORM_FACTOR_MIN.
-    Senza dati recenti restituisce 1.0 (nessuna correzione)."""
+    FORM_RECENCY_WEIGHTS. `season_weights` è mantenuto per compatibilità di
+    firma ma nella pipeline attuale riceve sempre None (default: peso 1.0
+    per ogni partita): fetch_team_live_stats alimenta questa funzione
+    esclusivamente con le ultime partite della STAGIONE CORRENTE, mai con
+    un blend con la stagione precedente (quel segnale vive solo nel Base
+    Rating — vedi resolve_base_rating). Una squadra in ottima forma recente
+    arriva fino a FORM_FACTOR_MAX, una in crisi di risultati scende fino a
+    FORM_FACTOR_MIN. Senza dati recenti restituisce 1.0 (nessuna correzione)."""
     if not recent_points:
         return 1.0
     recency_weights = FORM_RECENCY_WEIGHTS[: len(recent_points)]
@@ -1538,195 +1658,81 @@ def build_match_model(
     fatigue_attack_malus_away = float(fatigue_away.get("attack_malus", 0.0))
     fatigue_defense_malus_away = float(fatigue_away.get("defense_malus", 0.0))
 
-    # --- 1. Statistiche osservate, già pesate con Time-Decay in
-    # fetch_team_live_stats: stagione corrente 100%, precedente al massimo
-    # PREVIOUS_SEASON_MAX_WEIGHT. -------------------------------------------
-    home_goal_for = (
-        _average(home_stats.home_goals_for, home_stats.home_matches, "goals scored at home", home)
-        if home_stats.home_matches
-        else _average(home_stats.goals_for, home_stats.matches, "goals scored", home)
-    )
-    home_goal_against = (
-        _average(
-            home_stats.home_goals_against,
-            home_stats.home_matches,
-            "goals conceded at home",
-            home,
-        )
-        if home_stats.home_matches
-        else _average(home_stats.goals_against, home_stats.matches, "goals conceded", home)
-    )
-    away_goal_for = (
-        _average(away_stats.away_goals_for, away_stats.away_matches, "goals scored away", away)
-        if away_stats.away_matches
-        else _average(away_stats.goals_for, away_stats.matches, "goals scored", away)
-    )
-    away_goal_against = (
-        _average(
-            away_stats.away_goals_against,
-            away_stats.away_matches,
-            "goals conceded away",
-            away,
-        )
-        if away_stats.away_matches
-        else _average(away_stats.goals_against, away_stats.matches, "goals conceded", away)
-    )
-    home_sot_raw = _average(home_stats.shots_on_target, home_stats.matches, "shots on target", home)
-    away_sot_raw = _average(away_stats.shots_on_target, away_stats.matches, "shots on target", away)
-    home_shots_raw = _average(home_stats.total_shots, home_stats.matches, "total shots", home)
-    away_shots_raw = _average(away_stats.total_shots, away_stats.matches, "total shots", away)
-    home_corners_raw = _average(home_stats.corners, home_stats.matches, "corners", home)
-    away_corners_raw = _average(away_stats.corners, away_stats.matches, "corners", away)
-    home_cards_raw = _average(home_stats.cards, home_stats.matches, "cards", home)
-    away_cards_raw = _average(away_stats.cards, away_stats.matches, "cards", away)
-    fouls = _average(home_stats.fouls, home_stats.matches, "fouls", home)
-    fouls += _average(away_stats.fouls, away_stats.matches, "fouls", away)
+    # --- 1. Statistiche grezze di stagione corrente (tiri, corner, cartellini,
+    # falli). I gol per/contro NON alimentano più questo step: confluiscono
+    # ora esclusivamente nel Current Form Rating (vedi
+    # compute_current_form_rating, chiamato più sotto), che legge
+    # home_stats/away_stats direttamente. _safe_average evita un crash se
+    # una squadra non ha ancora giocato nessuna partita in questa stagione
+    # (early preseason): i tiri/tiri in porta ricevono comunque peso 0% nel
+    # blend di Fascia più sotto, corner/cartellini/falli usano la baseline
+    # di lega come fallback realistico. -----------------------------------
+    micro_baseline_for_fallback = MICRO_EVENT_BASELINES[FOOTBALL_DATA_COMPETITIONS[league]]
+    home_sot_raw = _safe_average(home_stats.shots_on_target, home_stats.matches)
+    away_sot_raw = _safe_average(away_stats.shots_on_target, away_stats.matches)
+    home_shots_raw = _safe_average(home_stats.total_shots, home_stats.matches)
+    away_shots_raw = _safe_average(away_stats.total_shots, away_stats.matches)
+    home_corners_raw = _safe_average(home_stats.corners, home_stats.matches, fallback=micro_baseline_for_fallback["corners"])
+    away_corners_raw = _safe_average(away_stats.corners, away_stats.matches, fallback=micro_baseline_for_fallback["corners"])
+    home_cards_raw = _safe_average(home_stats.cards, home_stats.matches, fallback=micro_baseline_for_fallback["cards"])
+    away_cards_raw = _safe_average(away_stats.cards, away_stats.matches, fallback=micro_baseline_for_fallback["cards"])
+    fouls = _safe_average(home_stats.fouls, home_stats.matches, fallback=micro_baseline_for_fallback["fouls"])
+    fouls += _safe_average(away_stats.fouls, away_stats.matches, fallback=micro_baseline_for_fallback["fouls"])
 
-    # --- 2. DIZIONARIO FASCE DI FORZA + TRANSIZIONE DINAMICA (Dynamic Decay) --
-    # Ogni squadra viene risolta in una Fascia di Forza tramite fuzzy matching
-    # (lookup_team_tier), con fallback esplicito a Tier 3 — mai un default
-    # piatto. Le statistiche osservate vengono convertite in moltiplicatori
-    # Attacco/Difesa relativi alla media di lega, poi mescolate con quelle di
-    # Fascia secondo N = partite reali giocate nella stagione corrente:
-    #   N < 5  → Peso_Fascia=(5-N)/5, Peso_Stats=N/5
-    #   N >= 5 → 100% statistiche reali (Peso_Fascia=0)
+    # --- 2. WEIGHTED RATING ENGINE (70/30 MODEL) -------------------------------
+    # RATING FINALE = BASE_RATING_WEIGHT x Base Rating (blasone + classifica
+    # finale 2025/26, dominata da quest'ultima) + FORM_RATING_WEIGHT x
+    # Current Form Rating (sola stagione 2026/27) — vedi resolve_base_rating
+    # / compute_current_form_rating e le relative costanti di peso.
     early_season = is_early_season_match(home_stats, away_stats)
 
     home_tier = team_tier_profile(home)
     away_tier = team_tier_profile(away)
+    home_tier_number = lookup_team_tier(home)
+    away_tier_number = lookup_team_tier(away)
     home_tier_weight, home_stats_weight = dynamic_decay_weights(home_stats.current_season_matches)
     away_tier_weight, away_stats_weight = dynamic_decay_weights(away_stats.current_season_matches)
 
-    def _stats_multiplier(value_per_match: float) -> float:
-        return clamp(value_per_match / LEAGUE_AVERAGE_GOALS_PER_TEAM, 0.3, 3.0)
+    home_base_rating, home_base_source = resolve_base_rating(league, home)
+    away_base_rating, away_base_source = resolve_base_rating(league, away)
+    home_form_rating = compute_current_form_rating(home_stats)
+    away_form_rating = compute_current_form_rating(away_stats)
 
-    def _stats_rating(attack_mult: float, defense_mult: float) -> float:
-        return BASE_RATING + (RATING_SCALE / 2) * (attack_mult - 1.0) - (RATING_SCALE / 2) * (defense_mult - 1.0)
-
-    # --- Regression to the Mean (shrinkage) --------------------------------
-    # home_goal_for/home_goal_against (and their away counterparts) are each
-    # backed by a specific number of matches — home_matches/away_matches
-    # when the home-/away-specific split was used, or the full `matches`
-    # count in the small-sample fallback. Shrinking with THAT exact sample
-    # size (not a coarser proxy) ensures a side with only 2-3 home matches
-    # this season — even a hot streak — gets pulled hard back toward the
-    # league-average multiplier of 1.0, so it cannot outweigh a Big club's
-    # larger, more reliable sample. See REGRESSION_TO_MEAN_SAMPLE_SIZE.
-    home_sample_size = home_stats.home_matches if home_stats.home_matches else home_stats.matches
-    away_sample_size = away_stats.away_matches if away_stats.away_matches else away_stats.matches
-
-    home_stats_attack = _amplify_spread(_shrink_to_mean(_stats_multiplier(home_goal_for), home_sample_size))
-    home_stats_defense = _amplify_spread(_shrink_to_mean(_stats_multiplier(home_goal_against), home_sample_size))
-    away_stats_attack = _amplify_spread(_shrink_to_mean(_stats_multiplier(away_goal_for), away_sample_size))
-    away_stats_defense = _amplify_spread(_shrink_to_mean(_stats_multiplier(away_goal_against), away_sample_size))
-    home_stats_rating = _stats_rating(home_stats_attack, home_stats_defense)
-    away_stats_rating = _stats_rating(away_stats_attack, away_stats_defense)
-
-    rating_finale_home = home_tier["rating"] * home_tier_weight + home_stats_rating * home_stats_weight
-    rating_finale_away = away_tier["rating"] * away_tier_weight + away_stats_rating * away_stats_weight
-    attacco_finale_home = home_tier["attack"] * home_tier_weight + home_stats_attack * home_stats_weight
-    difesa_finale_home = home_tier["defense"] * home_tier_weight + home_stats_defense * home_stats_weight
-    attacco_finale_away = away_tier["attack"] * away_tier_weight + away_stats_attack * away_stats_weight
-    difesa_finale_away = away_tier["defense"] * away_tier_weight + away_stats_defense * away_stats_weight
-
-    # --- 2b. Form Amplifier: la Forma Recente (ultime 5 partite, già
-    # calcolata da compute_form_factor come moltiplicatore 0.85-1.15) agisce
-    # ora come vero moltiplicatore dinamico su Attacco_Finale — e, smorzato
-    # da FORM_DEFENSE_TRANSFER, anche su Difesa_Finale — così una squadra in
-    # striscia positiva ottiene un boost concreto che aiuta a rompere
-    # l'equilibrio 'piatto' verso l'1-1 quando le due squadre non sono
-    # realmente equivalenti. In precedenza il Form Factor veniva calcolato
-    # e mostrato nei badge W/D/L ma non incideva mai sul calcolo di xG.
-    home_defense_form_factor = 1.0 + (1.0 - home_stats.form_factor) * FORM_DEFENSE_TRANSFER
-    away_defense_form_factor = 1.0 + (1.0 - away_stats.form_factor) * FORM_DEFENSE_TRANSFER
-    attacco_finale_home *= home_stats.form_factor
-    difesa_finale_home *= home_defense_form_factor
-    attacco_finale_away *= away_stats.form_factor
-    difesa_finale_away *= away_defense_form_factor
-    # Keep the displayed Global Power Rating consistent with the same Form
-    # Amplifier signal driving Attacco/Difesa_Finale above (same pattern
-    # already used for manual sliders/fatigue further below).
-    rating_finale_home += (home_stats.form_factor - 1.0) * RATING_SCALE
-    rating_finale_away += (away_stats.form_factor - 1.0) * RATING_SCALE
+    rating_finale_home = BASE_RATING_WEIGHT * home_base_rating + FORM_RATING_WEIGHT * home_form_rating
+    rating_finale_away = BASE_RATING_WEIGHT * away_base_rating + FORM_RATING_WEIGHT * away_form_rating
 
     # --- 3. Slider manuali (Mercato/Infortuni) + Indice di Affaticamento &
     # Turnover (Fase 2), SOMMATI fra loro (nessuno sovrascrive l'altro) e
-    # applicati DIRETTAMENTE su Attacco_Finale/Difesa_Finale (e sul Rating_
-    # Finale per coerenza con tiri/corner/cartellini), PRIMA del calcolo
-    # della matrice Dixon-Coles/Monte Carlo. -----------------------------------
-    attacco_finale_home = clamp(
-        attacco_finale_home * (1 + manual_factor_home + fatigue_attack_malus_home), 0.25, 2.6
-    )
-    difesa_finale_home = clamp(
-        difesa_finale_home * (1 - manual_factor_home + fatigue_defense_malus_home), 0.25, 2.6
-    )
-    attacco_finale_away = clamp(
-        attacco_finale_away * (1 + manual_factor_away + fatigue_attack_malus_away), 0.25, 2.6
-    )
-    difesa_finale_away = clamp(
-        difesa_finale_away * (1 - manual_factor_away + fatigue_defense_malus_away), 0.25, 2.6
-    )
-    rating_finale_home += (manual_factor_home + fatigue_attack_malus_home) * RATING_SCALE
-    rating_finale_away += (manual_factor_away + fatigue_attack_malus_away) * RATING_SCALE
+    # collassati in un UNICO shift di Rating (positivo = squadra rinforzata
+    # su entrambe le fasi, negativo = indebolita su entrambe) — coerente col
+    # fatto che il nuovo motore genera gli xG da un singolo Rating anziché
+    # da moltiplicatori separati di Attacco/Difesa come in passato. --------
+    combined_adjustment_home = manual_factor_home + (fatigue_attack_malus_home - fatigue_defense_malus_home) / 2
+    combined_adjustment_away = manual_factor_away + (fatigue_attack_malus_away - fatigue_defense_malus_away) / 2
+    rating_finale_home += combined_adjustment_home * RATING_SCALE
+    rating_finale_away += combined_adjustment_away * RATING_SCALE
 
-    # --- 4. Gol attesi (xG) dal modello Attacco × Difesa avversaria ------------
-    # (parametrizzazione classica alla Dixon-Coles: λ_casa = lega × Attacco_
-    # casa × Difesa_ospite × fattore campo; λ_trasferta speculare, senza
-    # fattore campo).
-    home_lambda = clamp(
-        LEAGUE_AVERAGE_GOALS_PER_TEAM * attacco_finale_home * difesa_finale_away * HOME_ADVANTAGE_GOAL_MULTIPLIER,
-        0.05,
-        5.5,
-    )
-    away_lambda = clamp(
-        LEAGUE_AVERAGE_GOALS_PER_TEAM * attacco_finale_away * difesa_finale_home,
-        0.05,
-        5.0,
-    )
-
+    # --- 4. xG GENERATION: curva di conversione Rating -> Expected Goals ------
+    # rating_diff include il fattore campo (HOME_ADVANTAGE_RATING) SOLO per
+    # calcolare la 'supremazia' di gol fra le due squadre; pct_rating_distance
+    # (usata per classificare uno 'Scontro tra pari livello') si basa invece
+    # sui Rating grezzi, SENZA fattore campo, per riflettere il solo gap di
+    # qualità reale fra le due squadre — vedi BALANCED_MATCH_RATING_DISTANCE_
+    # THRESHOLD/BALANCED_MATCH_SUPREMACY_DAMPING/SUPREMACY_RATING_SENSITIVITY/
+    # BASE_TOTAL_EXPECTED_GOALS/TOTAL_GOALS_MISMATCH_BONUS/XG_HARD_CAP/FLOOR.
     rating_diff = (rating_finale_home + HOME_ADVANTAGE_RATING) - rating_finale_away
+    average_rating = max((rating_finale_home + rating_finale_away) / 2, 1.0)
+    pct_rating_distance = clamp(abs(rating_finale_home - rating_finale_away) / average_rating, 0.0, 1.0)
+    is_balanced_matchup = pct_rating_distance < BALANCED_MATCH_RATING_DISTANCE_THRESHOLD
 
-    # --- 4b. xG SPREAD FIX (Diversificazione degli Expected Goals) ------------
-    # Applica DIRETTAMENTE al lambda di gol (non solo a tiri/corner/cartellini)
-    # un'ulteriore correzione esponenziale basata sul gap di Global Power
-    # Rating finale (rating_finale_home/away, che già incorpora Fasce di
-    # Forza, Time-Decay, Form Factor e slider manuali). Senza questa
-    # correzione, due squadre di Fascia/rating simile (il caso più comune per
-    # i match di metà classifica) producevano lambda_home e lambda_away
-    # entrambi compressi in una fascia stretta (circa 1.10-1.30), che con la
-    # Poisson genera quasi sempre l'1-1 come risultato esatto più probabile —
-    # statisticamente corretto ma visivamente monotono su tante simulazioni
-    # consecutive. `damping` > 1 (contro lo 0.7 usato per i tiri) rende
-    # l'effetto del gap di rating sui gol attesi PIÙ marcato di quello sui
-    # tiri, coerente col fatto che i gol dipendono dal Power Rating
-    # complessivo (attacco E difesa), non solo dal volume di conclusioni.
-    xg_rating_boost, xg_rating_suppress = rating_scaling_factors(rating_diff, damping=XG_RATING_SPREAD_DAMPING)
-    home_lambda = clamp(home_lambda * xg_rating_boost, 0.05, 5.5)
-    away_lambda = clamp(away_lambda * xg_rating_suppress, 0.05, 5.0)
+    supremacy = SUPREMACY_RATING_SENSITIVITY * rating_diff
+    if is_balanced_matchup:
+        supremacy *= BALANCED_MATCH_SUPREMACY_DAMPING
 
-    # --- 4c. TIER MATCHING (bilanciamento fra squadre della stessa Fascia) ----
-    # Se home e away si risolvono nello STESSO Tier (Big vs Big, o due
-    # squadre di metà/bassa classifica fra loro), la forbice fra i due lambda
-    # viene ristretta tirandoli verso la loro media condivisa — vedi
-    # TIER_CONVERGENCE_FACTOR. Un eventuale divario reale di Forma/Momentum
-    # (già applicato sopra via Form Amplifier + xG Rating Spread Fix) non
-    # viene azzerato, solo attenuato: due squadre pari-Fascia ma con Forma
-    # opposta restano distinguibili, solo non estreme quanto un mismatch di
-    # Fascia vero e proprio. Fuori da un matchup di pari Fascia il gap non
-    # viene toccato.
-    home_tier_number = lookup_team_tier(home)
-    away_tier_number = lookup_team_tier(away)
-    if home_tier_number == away_tier_number:
-        tier_average_lambda = (home_lambda + away_lambda) / 2
-        home_lambda = home_lambda + (tier_average_lambda - home_lambda) * TIER_CONVERGENCE_FACTOR
-        away_lambda = away_lambda + (tier_average_lambda - away_lambda) * TIER_CONVERGENCE_FACTOR
+    total_expected_goals = BASE_TOTAL_EXPECTED_GOALS + TOTAL_GOALS_MISMATCH_BONUS * pct_rating_distance
 
-    # --- 4d. REALISM CAP & SOFT TRUNCATION -------------------------------------
-    # Tetto/pavimento assoluti sui gol attesi, applicati per ULTIMI (dopo ogni
-    # altra correzione), a garanzia che nessun lambda produca code di Poisson
-    # irrealistiche per il calcio (4-0, 5-0, 6-0) — vedi XG_HARD_CAP/FLOOR.
-    home_lambda = clamp(home_lambda, XG_HARD_FLOOR, XG_HARD_CAP)
-    away_lambda = clamp(away_lambda, XG_HARD_FLOOR, XG_HARD_CAP)
+    home_lambda = clamp(total_expected_goals / 2 + supremacy / 2, XG_HARD_FLOOR, XG_HARD_CAP)
+    away_lambda = clamp(total_expected_goals / 2 - supremacy / 2, XG_HARD_FLOOR, XG_HARD_CAP)
 
     # --- 5. Tiri totali/in porta: stessa Transizione Dinamica (baseline di
     # Fascia derivata dall'Attacco di Tier, mescolata alle statistiche reali),
@@ -1809,10 +1815,17 @@ def build_match_model(
             f"real matches, {away} {away_stats.current_season_matches} real matches "
             f"(full-confidence threshold: {EARLY_SEASON_MATCHDAY_THRESHOLD})"
         )
-    if home_tier_number == away_tier_number:
-        engine_note += f" · 🤝 Tier Matching: same-Tier convergence applied ({TEAM_TIER_LABELS[home_tier_number]})"
+    engine_note += (
+        f" · Weighted Rating: {home} Base {home_base_rating:.0f}/Form {home_form_rating:.0f} "
+        f"({home_base_source}), {away} Base {away_base_rating:.0f}/Form {away_form_rating:.0f} "
+        f"({away_base_source})"
+    )
+    if is_balanced_matchup:
+        engine_note += f" · 🤝 Balanced Matchup: Rating gap {pct_rating_distance:.1%} (<{BALANCED_MATCH_RATING_DISTANCE_THRESHOLD:.0%})"
     if home_lambda >= XG_HARD_CAP or away_lambda >= XG_HARD_CAP:
         engine_note += f" · 🧢 xG Realism Cap active (max {XG_HARD_CAP:.2f} xG/team)"
+    if home_lambda <= XG_HARD_FLOOR or away_lambda <= XG_HARD_FLOOR:
+        engine_note += f" · 🧊 xG Realism Floor active (min {XG_HARD_FLOOR:.2f} xG/team)"
 
     return MatchModel(
         home_lambda=home_lambda,
