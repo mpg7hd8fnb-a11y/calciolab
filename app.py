@@ -544,48 +544,120 @@ XG_HARD_FLOOR = 0.40
 nessuna squadra scende sotto 0.40 xG attesi, per evitare 0-0 quasi certi
 altrettanto irrealistici quanto le goleade tennistiche."""
 
-BASE_TOTAL_EXPECTED_GOALS = 2.45
+BASE_TOTAL_EXPECTED_GOALS = 2.60
 """Gol totali di partita 'di libro' (somma home_lambda + away_lambda) per un
-match perfettamente equilibrato (Rating identico, solo il fattore campo a
-fare la differenza) — coerente con la media empirica del calcio europeo."""
+match STANDARD (nessuno dei tre Match Profile sotto si applica — vedi
+classify_match_profile) — coerente con la media empirica del calcio
+europeo. Alzato da 2.45 a 2.60: con il precedente valore la maggior parte
+dei match 'ordinari' collassava su xG compressi fra 1.00 e 1.30 a testa,
+rendendo l'1-0 il risultato Monte Carlo quasi sistematico anche per
+confronti reali fra squadre di medio livello — questo valore riporta la
+gamma di risultati verso la varietà realistica del calcio (0-0, 1-0, 1-1,
+2-0, 2-1...) senza sconfinare nelle bande dedicate a Tactical/Big Match."""
 
 TOTAL_GOALS_MISMATCH_BONUS = 0.30
 """Incremento massimo (fino a +0.30) dei gol totali attesi in funzione del
 gap qualitativo fra le due squadre (vedi pct_rating_distance in
-build_match_model): un mismatch netto produce in media qualche gol in più
-nel computo complessivo (la difesa più debole concede di più), fino a un
-totale 'di libro' di BASE_TOTAL_EXPECTED_GOALS + TOTAL_GOALS_MISMATCH_BONUS."""
+build_match_model), applicato SOLO al profilo STANDARD (i profili
+Tactical/Big Match/Mismatch hanno le proprie bande fisse dedicate — vedi
+sotto): un mismatch che non raggiunge la soglia MISMATCH_RATING_DISTANCE_
+THRESHOLD produce comunque in media qualche gol in più nel computo
+complessivo (la difesa più debole concede di più), fino a un totale 'di
+libro' di BASE_TOTAL_EXPECTED_GOALS + TOTAL_GOALS_MISMATCH_BONUS."""
 
 SUPREMACY_RATING_SENSITIVITY = 0.0025
 """Converte linearmente il differenziale di Rating (fattore campo incluso)
-in 'supremazia' di gol (quanto home_lambda supera away_lambda prima del
-tetto/pavimento): supremacy = SUPREMACY_RATING_SENSITIVITY × rating_diff.
-Calibrato così che un semplice vantaggio del fattore campo fra due squadre
-di Rating identico (rating_diff ≈ HOME_ADVANTAGE_RATING = 60) produca una
-supremazia contenuta (~0.15, es. 1.30 vs 1.15), mentre un vero mismatch di
-Fascia (rating_diff dell'ordine di 300-500 punti) produce xG realistici da
-squadra favorita (~1.90-2.20 contro ~0.60) ancora PRIMA che intervenga
-XG_HARD_CAP/FLOOR — il tetto/pavimento restano una rete di sicurezza per i
-casi più estremi (es. una Big in gran forma contro una neopromossa in
-crisi), non il meccanismo primario di controllo dello spread."""
+in 'supremazia' di gol (quanto home_lambda supera away_lambda prima delle
+bande/tetto/pavimento specifici del Match Profile): supremacy =
+SUPREMACY_RATING_SENSITIVITY × rating_diff. Usata da tutti e 4 i profili
+(STANDARD, Tactical, Big Match) per ripartire il totale di gol atteso fra
+le due squadre — il profilo Mismatch usa invece una propria interpolazione
+diretta (vedi MISMATCH_FAVORITE_XG_*/MISMATCH_UNDERDOG_XG_*), perché lì lo
+scarto assoluto richiesto è troppo ampio per una singola sensibilità
+lineare condivisa con gli altri profili."""
 
 BALANCED_MATCH_RATING_DISTANCE_THRESHOLD = 0.08
 """Soglia (8%) di distanza percentuale fra i Rating finali (SENZA fattore
-campo) di home e away sotto la quale il match è considerato 'Scontro tra
-pari livello' (vedi pct_rating_distance in build_match_model): al di sotto
-di questa soglia si applica un'ulteriore compressione della supremazia
-(BALANCED_MATCH_SUPREMACY_DAMPING), per restituire al Pareggio (X) e ai
-punteggi di misura (1-1, 1-0, 2-1) una probabilità concreta quando le due
-squadre sono realmente equivalenti."""
+campo) di home e away sotto la quale il match STANDARD è considerato
+'Scontro tra pari livello' (vedi pct_rating_distance in build_match_model):
+al di sotto di questa soglia si applica un'ulteriore compressione della
+supremazia (BALANCED_MATCH_SUPREMACY_DAMPING), per restituire al Pareggio
+(X) e ai punteggi di misura (1-1, 1-0, 2-1) una probabilità concreta
+quando le due squadre sono realmente equivalenti. Non si applica ai
+profili Tactical/Big Match/Mismatch, che hanno le proprie bande dedicate."""
 
 BALANCED_MATCH_SUPREMACY_DAMPING = 0.70
 """Fattore di smorzamento aggiuntivo applicato alla 'supremazia' di gol
-(vedi SUPREMACY_RATING_SENSITIVITY) quando il match ricade sotto
+(vedi SUPREMACY_RATING_SENSITIVITY) quando un match STANDARD ricade sotto
 BALANCED_MATCH_RATING_DISTANCE_THRESHOLD, per contenere ulteriormente lo
 scarto di xG fra le due squadre nei confronti realmente equilibrati."""
 
+# ==============================================================================
+# DYNAMIC MATCH PROFILES — 3 curve di conversione Rating→xG dedicate
+# ==============================================================================
+# Oltre al profilo STANDARD (i quattro parametri sopra), il motore riconosce
+# 3 tipologie di confronto esplicite, ciascuna con la propria banda di xG per
+# squadra, così lo spettro di risultati Monte Carlo varia realisticamente in
+# base al TIPO di partita invece di restare sempre compresso in un'unica
+# fascia stretta — vedi classify_match_profile in build_match_model.
+BIG_MATCH_RATING_THRESHOLD = 1580.0
+"""Entrambi i Rating (SENZA fattore campo) devono superare questa soglia
+perché il match sia classificato HIGH-PROFILE BIG MATCH (Profilo B) — il
+controllo è INDIVIDUALE su home E away (non sulla media), così un solo top
+club abbinato a una squadra debole non genera falsamente un 'big match'."""
+
+TACTICAL_SCORING_TEMPO_THRESHOLD = 1.10
+"""Media gol segnati a partita nella stagione corrente (2026/27, sola
+Current Form — vedi LiveTeamStats.goals_for/matches): se ENTRAMBE le
+squadre sono a questa soglia o sotto, il match è classificato LOW-SCORING/
+TACTICAL (Profilo A). Con zero partite giocate quest'anno si usa
+LEAGUE_AVERAGE_GOALS_PER_TEAM come tempo neutro (né basso né alto), così
+una squadra non ancora scesa in campo non attiva falsamente il profilo."""
+
+MISMATCH_RATING_DISTANCE_THRESHOLD = 0.20
+"""Distanza percentuale di Rating (stessa metrica di pct_rating_distance,
+SENZA fattore campo) oltre la quale il match è classificato MISMATCHED /
+HIGH-TIER VS LOW-TIER (Profilo C) — controllato PRIMA degli altri due
+profili: un vero scontro impari prevale sempre sulla classificazione
+'Big Match' o 'Tactical', qualunque sia il tempo di gioco o il Rating
+assoluto delle due squadre."""
+
+MISMATCH_MAX_INTENSITY_DISTANCE = 0.45
+"""Distanza di Rating oltre la quale l'intensità del Mismatch (vedi
+MISMATCH_RATING_DISTANCE_THRESHOLD) è considerata 'massima' (100%): fra la
+soglia di ingresso e questo valore, il tetto della favorita e il pavimento
+della sfavorita scalano linearmente dai bordi più miti ai più estremi delle
+rispettive forbici (vedi MISMATCH_FAVORITE_XG_*/MISMATCH_UNDERDOG_XG_*)."""
+
+# --- Bande di xG per-squadra specifiche di ciascun Match Profile -----------
+TACTICAL_XG_MIN = 0.70
+TACTICAL_XG_MAX = 0.95
+TACTICAL_TOTAL_EXPECTED_GOALS = 1.70
+"""Profilo A (Low-Scoring/Tactical, es. Parma vs Monza): xG per squadra
+contenuti in [0.70, 0.95], totale 'di libro' 1.70 — fa emergere con
+naturalezza 0-0, 1-0, 1-1 senza bisogno di forzature a valle."""
+
+BIG_MATCH_XG_MIN = 1.75
+BIG_MATCH_XG_MAX = 2.20
+BIG_MATCH_TOTAL_EXPECTED_GOALS = 3.90
+"""Profilo B (High-Profile Big Match, es. Barcelona vs Real Madrid): xG
+per squadra alzati in [1.75, 2.20], totale 'di libro' 3.90 — favorisce
+simulazioni spettacolari (2-2, 2-1, 3-2, 3-1) fra due Top Team."""
+
+MISMATCH_FAVORITE_XG_MIN = 2.65
+MISMATCH_FAVORITE_XG_MAX = 2.85
+MISMATCH_UNDERDOG_XG_MIN = 0.45
+MISMATCH_UNDERDOG_XG_MAX = 0.65
+"""Profilo C (Mismatched / High-Tier vs Low-Tier, es. Inter vs Monza,
+Arsenal vs Coventry): tetto della favorita in [2.65, 2.85] (interpolato
+sull'intensità del gap, vedi MISMATCH_MAX_INTENSITY_DISTANCE), sfavorita
+tenuta bassa in [0.45, 0.65] — sposta il risultato Monte Carlo più
+probabile su esiti netti e realistici (3-0, 3-1, 2-0), MAI su un 1-0
+risicato né su goleade tennistiche tipo 5-0/6-0."""
+
 SHOT_RATING_DAMPING = 0.7
 """I tiri (fatti/in porta) seguono il gap di rating con un'intensità inferiore
+
 ai gol (che dipendono anche da efficienza/episodi), da qui lo smorzamento."""
 
 CORNER_RATING_DAMPING = 0.35
@@ -1551,6 +1623,50 @@ def compute_current_form_rating(stats: "LiveTeamStats") -> float:
     return _stats_rating(attack_multiplier, defense_multiplier)
 
 
+def team_current_scoring_tempo(stats: "LiveTeamStats") -> float:
+    """Current-season (2026/27 only) goals-scored-per-match tempo for a
+    team, used exclusively to classify the LOW-SCORING/TACTICAL Match
+    Profile (see classify_match_profile). Falls back to the neutral league
+    average when the team hasn't played yet this season, so an empty
+    sample never falsely looks 'defensive'."""
+    if stats.matches <= 0:
+        return LEAGUE_AVERAGE_GOALS_PER_TEAM
+    return stats.goals_for / stats.matches
+
+
+def classify_match_profile(
+    rating_home: float,
+    rating_away: float,
+    pct_rating_distance: float,
+    home_scoring_tempo: float,
+    away_scoring_tempo: float,
+) -> str:
+    """DYNAMIC MATCH PROFILES: classifies the fixture into one of the three
+    dedicated xG bands (see the constants above BIG_MATCH_RATING_THRESHOLD)
+    plus a 'standard' fallback, so the Rating->xG curve stops averaging
+    every kind of match toward the same narrow band. Checked in priority
+    order:
+    1) 'mismatch' — a real quality gap (>= MISMATCH_RATING_DISTANCE_
+       THRESHOLD) between the two Ratings takes precedence over the other
+       profiles: a lopsided Big-vs-minnow fixture should never come out
+       tactically tight nor an open shootout on both ends.
+    2) 'big_match' — both Ratings individually clear BIG_MATCH_RATING_
+       THRESHOLD (checked on EACH side, not the average, so one strong
+       team paired with a weak one cannot masquerade as two Big teams).
+    3) 'tactical' — both teams' actual current-season scoring tempo sits
+       at or below TACTICAL_SCORING_TEMPO_THRESHOLD goals/game.
+    4) 'standard' — none of the above; the general-purpose curve applies
+       (BASE_TOTAL_EXPECTED_GOALS, TOTAL_GOALS_MISMATCH_BONUS,
+       BALANCED_MATCH_RATING_DISTANCE_THRESHOLD/SUPREMACY_DAMPING)."""
+    if pct_rating_distance >= MISMATCH_RATING_DISTANCE_THRESHOLD:
+        return "mismatch"
+    if rating_home >= BIG_MATCH_RATING_THRESHOLD and rating_away >= BIG_MATCH_RATING_THRESHOLD:
+        return "big_match"
+    if home_scoring_tempo <= TACTICAL_SCORING_TEMPO_THRESHOLD and away_scoring_tempo <= TACTICAL_SCORING_TEMPO_THRESHOLD:
+        return "tactical"
+    return "standard"
+
+
 def clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(value, maximum))
 
@@ -1715,24 +1831,69 @@ def build_match_model(
     # --- 4. xG GENERATION: curva di conversione Rating -> Expected Goals ------
     # rating_diff include il fattore campo (HOME_ADVANTAGE_RATING) SOLO per
     # calcolare la 'supremazia' di gol fra le due squadre; pct_rating_distance
-    # (usata per classificare uno 'Scontro tra pari livello') si basa invece
-    # sui Rating grezzi, SENZA fattore campo, per riflettere il solo gap di
-    # qualità reale fra le due squadre — vedi BALANCED_MATCH_RATING_DISTANCE_
-    # THRESHOLD/BALANCED_MATCH_SUPREMACY_DAMPING/SUPREMACY_RATING_SENSITIVITY/
-    # BASE_TOTAL_EXPECTED_GOALS/TOTAL_GOALS_MISMATCH_BONUS/XG_HARD_CAP/FLOOR.
+    # (usata sia per classificare uno 'Scontro tra pari livello' nel profilo
+    # STANDARD sia per il profilo MISMATCH) si basa invece sui Rating grezzi,
+    # SENZA fattore campo, per riflettere il solo gap di qualità reale fra le
+    # due squadre.
     rating_diff = (rating_finale_home + HOME_ADVANTAGE_RATING) - rating_finale_away
     average_rating = max((rating_finale_home + rating_finale_away) / 2, 1.0)
     pct_rating_distance = clamp(abs(rating_finale_home - rating_finale_away) / average_rating, 0.0, 1.0)
-    is_balanced_matchup = pct_rating_distance < BALANCED_MATCH_RATING_DISTANCE_THRESHOLD
-
     supremacy = SUPREMACY_RATING_SENSITIVITY * rating_diff
-    if is_balanced_matchup:
-        supremacy *= BALANCED_MATCH_SUPREMACY_DAMPING
 
-    total_expected_goals = BASE_TOTAL_EXPECTED_GOALS + TOTAL_GOALS_MISMATCH_BONUS * pct_rating_distance
+    # DYNAMIC MATCH PROFILES (vedi classify_match_profile): sceglie quale
+    # delle 3 bande dedicate — Tactical (A), Big Match (B), Mismatch (C) —
+    # applicare, con un profilo STANDARD di ripiego per tutto il resto.
+    home_scoring_tempo = team_current_scoring_tempo(home_stats)
+    away_scoring_tempo = team_current_scoring_tempo(away_stats)
+    match_profile = classify_match_profile(
+        rating_finale_home, rating_finale_away, pct_rating_distance, home_scoring_tempo, away_scoring_tempo
+    )
 
-    home_lambda = clamp(total_expected_goals / 2 + supremacy / 2, XG_HARD_FLOOR, XG_HARD_CAP)
-    away_lambda = clamp(total_expected_goals / 2 - supremacy / 2, XG_HARD_FLOOR, XG_HARD_CAP)
+    if match_profile == "tactical":
+        # Profilo A — LOW-SCORING/TACTICAL (es. Parma vs Monza): xG per
+        # squadra contenuti in [0.70, 0.95], per far emergere con
+        # naturalezza 0-0/1-0/1-1.
+        total_expected_goals = TACTICAL_TOTAL_EXPECTED_GOALS
+        home_lambda = clamp(total_expected_goals / 2 + supremacy / 2, TACTICAL_XG_MIN, TACTICAL_XG_MAX)
+        away_lambda = clamp(total_expected_goals / 2 - supremacy / 2, TACTICAL_XG_MIN, TACTICAL_XG_MAX)
+    elif match_profile == "big_match":
+        # Profilo B — HIGH-PROFILE BIG MATCH (es. Barcelona vs Real
+        # Madrid): xG per squadra alzati in [1.75, 2.20], per favorire
+        # simulazioni spettacolari (2-2, 2-1, 3-2, 3-1).
+        total_expected_goals = BIG_MATCH_TOTAL_EXPECTED_GOALS
+        home_lambda = clamp(total_expected_goals / 2 + supremacy / 2, BIG_MATCH_XG_MIN, BIG_MATCH_XG_MAX)
+        away_lambda = clamp(total_expected_goals / 2 - supremacy / 2, BIG_MATCH_XG_MIN, BIG_MATCH_XG_MAX)
+    elif match_profile == "mismatch":
+        # Profilo C — MISMATCHED / HIGH-TIER VS LOW-TIER (es. Inter vs
+        # Monza, Arsenal vs Coventry): tetto della favorita in
+        # [2.65, 2.85], sfavorita in [0.45, 0.65], interpolati linearmente
+        # sull'intensità del gap fra MISMATCH_RATING_DISTANCE_THRESHOLD (il
+        # bordo più mite di ciascuna forbice) e MISMATCH_MAX_INTENSITY_
+        # DISTANCE (il bordo più estremo) — indipendente dal totale/
+        # supremacy condivisi con gli altri profili, perché lo scarto
+        # assoluto richiesto qui è troppo ampio per la stessa sensibilità
+        # lineare.
+        intensity_span = max(MISMATCH_MAX_INTENSITY_DISTANCE - MISMATCH_RATING_DISTANCE_THRESHOLD, 1e-9)
+        mismatch_intensity = clamp(
+            (pct_rating_distance - MISMATCH_RATING_DISTANCE_THRESHOLD) / intensity_span, 0.0, 1.0
+        )
+        favorite_lambda = MISMATCH_FAVORITE_XG_MIN + (MISMATCH_FAVORITE_XG_MAX - MISMATCH_FAVORITE_XG_MIN) * mismatch_intensity
+        underdog_lambda = MISMATCH_UNDERDOG_XG_MAX - (MISMATCH_UNDERDOG_XG_MAX - MISMATCH_UNDERDOG_XG_MIN) * mismatch_intensity
+        if rating_diff >= 0:
+            home_lambda, away_lambda = favorite_lambda, underdog_lambda
+        else:
+            home_lambda, away_lambda = underdog_lambda, favorite_lambda
+    else:
+        # Profilo STANDARD (ripiego): curva generale già in uso, con lo
+        # smorzamento aggiuntivo per gli 'Scontri tra pari livello'.
+        is_balanced_matchup = pct_rating_distance < BALANCED_MATCH_RATING_DISTANCE_THRESHOLD
+        if is_balanced_matchup:
+            supremacy *= BALANCED_MATCH_SUPREMACY_DAMPING
+        total_expected_goals = BASE_TOTAL_EXPECTED_GOALS + TOTAL_GOALS_MISMATCH_BONUS * pct_rating_distance
+        home_lambda = clamp(total_expected_goals / 2 + supremacy / 2, XG_HARD_FLOOR, XG_HARD_CAP)
+        away_lambda = clamp(total_expected_goals / 2 - supremacy / 2, XG_HARD_FLOOR, XG_HARD_CAP)
+
+    is_balanced_matchup = match_profile == "standard" and pct_rating_distance < BALANCED_MATCH_RATING_DISTANCE_THRESHOLD
 
     # --- 5. Tiri totali/in porta: stessa Transizione Dinamica (baseline di
     # Fascia derivata dall'Attacco di Tier, mescolata alle statistiche reali),
@@ -1820,11 +1981,18 @@ def build_match_model(
         f"({home_base_source}), {away} Base {away_base_rating:.0f}/Form {away_form_rating:.0f} "
         f"({away_base_source})"
     )
+    match_profile_labels = {
+        "tactical": "🔒 Low-Scoring/Tactical",
+        "big_match": "🔥 High-Profile Big Match",
+        "mismatch": "⚔️ Mismatched (High-Tier vs Low-Tier)",
+        "standard": "⚖️ Standard",
+    }
+    engine_note += f" · Match Profile: {match_profile_labels.get(match_profile, match_profile.title())}"
     if is_balanced_matchup:
         engine_note += f" · 🤝 Balanced Matchup: Rating gap {pct_rating_distance:.1%} (<{BALANCED_MATCH_RATING_DISTANCE_THRESHOLD:.0%})"
-    if home_lambda >= XG_HARD_CAP or away_lambda >= XG_HARD_CAP:
+    if match_profile == "standard" and (home_lambda >= XG_HARD_CAP or away_lambda >= XG_HARD_CAP):
         engine_note += f" · 🧢 xG Realism Cap active (max {XG_HARD_CAP:.2f} xG/team)"
-    if home_lambda <= XG_HARD_FLOOR or away_lambda <= XG_HARD_FLOOR:
+    if match_profile == "standard" and (home_lambda <= XG_HARD_FLOOR or away_lambda <= XG_HARD_FLOOR):
         engine_note += f" · 🧊 xG Realism Floor active (min {XG_HARD_FLOOR:.2f} xG/team)"
 
     return MatchModel(
