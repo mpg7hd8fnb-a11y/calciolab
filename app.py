@@ -592,6 +592,22 @@ BALANCED_MATCH_SUPREMACY_DAMPING = 0.70
 BALANCED_MATCH_RATING_DISTANCE_THRESHOLD, per contenere ulteriormente lo
 scarto di xG fra le due squadre nei confronti realmente equilibrati."""
 
+BALANCED_MATCH_TOTAL_EXPECTED_GOALS = 1.95
+"""Gol totali di partita 'di libro' usati SOLO per i match STANDARD
+considerati 'Scontro tra pari livello' (pct_rating_distance sotto
+BALANCED_MATCH_RATING_DISTANCE_THRESHOLD), al posto di
+BASE_TOTAL_EXPECTED_GOALS. Con la matematica di Poisson, il Pareggio (X)
+smette di essere un esito macro davvero competitivo non appena i lambda di
+entrambe le squadre superano ~1.0 xG a testa — BASE_TOTAL_EXPECTED_GOALS
+(2.60, ≈1.30 a testa) supera sistematicamente quella soglia, così anche
+due squadre di Rating IDENTICO finivano quasi sempre con una vittoria
+(casa o trasferta) come esito Monte Carlo più frequente, mai il Pareggio.
+Con questo totale più basso (≈0.95-1.05 a testa dopo il fattore campo), il
+Pareggio torna a essere uno degli esiti macro (1X2) principali — non
+necessariamente sempre il più probabile, ma sempre competitivo — e 0-0/1-1
+tornano a figurare fra i risultati esatti più frequenti in assoluto, non
+solo all'interno del gruppo dominante."""
+
 # ==============================================================================
 # DYNAMIC MATCH PROFILES — 3 curve di conversione Rating→xG dedicate
 # ==============================================================================
@@ -1884,12 +1900,18 @@ def build_match_model(
         else:
             home_lambda, away_lambda = underdog_lambda, favorite_lambda
     else:
-        # Profilo STANDARD (ripiego): curva generale già in uso, con lo
-        # smorzamento aggiuntivo per gli 'Scontri tra pari livello'.
+        # Profilo STANDARD (ripiego): curva generale già in uso, ma con un
+        # totale gol dedicato e più basso per gli 'Scontri tra pari livello'
+        # (vedi BALANCED_MATCH_TOTAL_EXPECTED_GOALS) — non solo supremacy
+        # smorzata sopra un totale comunque alto, che altrimenti manteneva
+        # entrambi i lambda sopra la soglia ~1.0 dove il Pareggio smette di
+        # essere un esito macro competitivo con la Poisson.
         is_balanced_matchup = pct_rating_distance < BALANCED_MATCH_RATING_DISTANCE_THRESHOLD
         if is_balanced_matchup:
             supremacy *= BALANCED_MATCH_SUPREMACY_DAMPING
-        total_expected_goals = BASE_TOTAL_EXPECTED_GOALS + TOTAL_GOALS_MISMATCH_BONUS * pct_rating_distance
+            total_expected_goals = BALANCED_MATCH_TOTAL_EXPECTED_GOALS
+        else:
+            total_expected_goals = BASE_TOTAL_EXPECTED_GOALS + TOTAL_GOALS_MISMATCH_BONUS * pct_rating_distance
         home_lambda = clamp(total_expected_goals / 2 + supremacy / 2, XG_HARD_FLOOR, XG_HARD_CAP)
         away_lambda = clamp(total_expected_goals / 2 - supremacy / 2, XG_HARD_FLOOR, XG_HARD_CAP)
 
@@ -4264,6 +4286,21 @@ def render_monte_carlo_computing_hud(total_paths: int = 10_000, duration_seconds
     placeholder.empty()
 
 
+TOP_RESULT_DOMINANCE_MARGIN = 0.05
+"""Soglia (5 punti percentuali) di margine fra l'esito macro 1X2 più
+probabile e il secondo classificato, oltre la quale il Monte Carlo 'Top
+Result' (vedi run_simulation) viene forzato a un punteggio esatto coerente
+con quell'esito macro (Smart Display) anche se non è il punteggio esatto
+più frequente in assoluto. SOTTO questa soglia — cioè in un match
+genuinamente equilibrato, dove Casa/Pareggio/Trasferta sono vicini fra
+loro — si mostra invece il punteggio esatto realmente più frequente senza
+alcuna forzatura: per un match equilibrato questo è spesso 0-0 o 1-1, ed è
+esattamente il comportamento realistico richiesto (il Pareggio deve poter
+emergere come Top Result quando lo è davvero, non essere sistematicamente
+scavalcato da un risultato di Vittoria Casa/Trasferta che vince il 'voto'
+macro per una manciata di decimi di punto percentuale)."""
+
+
 def run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, object]:
     rng = np.random.default_rng()
     home_goals = rng.poisson(model.home_lambda, n_simulations)
@@ -4311,32 +4348,59 @@ def run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, 
     ]
 
     # --- SMART DISPLAY: il "Top Result" mostrato nell'HUD principale deve
-    # essere COERENTE con l'esito macro 1X2 dominante (quello con la
-    # probabilità più alta fra Vittoria Casa/Pareggio/Vittoria Trasferta),
-    # non semplicemente il punteggio esatto più probabile in assoluto. Con
-    # xG_home e xG_away vicini (match di metà classifica), l'1-1 è spesso il
-    # singolo punteggio più probabile pur essendo, ad es., la Vittoria Casa
-    # l'esito macro dominante — mostrare comunque l'1-1 come "Top Result" è
-    # fuorviante e rende le simulazioni monotone sui social. Qui si filtra
-    # weighted_scores al solo gruppo di punteggi coerenti con l'esito
-    # dominante e si sceglie, all'interno di quel gruppo, il più probabile.
-    if home_wins >= draws and home_wins >= away_wins:
-        dominant_outcome_filter = lambda h, a: h > a
-    elif away_wins > home_wins and away_wins >= draws:
-        dominant_outcome_filter = lambda h, a: h < a
-    else:
-        dominant_outcome_filter = lambda h, a: h == a
+    # essere COERENTE con l'esito macro 1X2 dominante SOLO quando quell'esito
+    # è DAVVERO dominante (margine >= TOP_RESULT_DOMINANCE_MARGIN sul secondo
+    # classificato) — es. una Vittoria Casa al 55% contro un Pareggio al 25%,
+    # dove il singolo punteggio esatto più probabile in assoluto può comunque
+    # risultare un 1-1 per pura frammentazione statistica dei tanti punteggi
+    # di Vittoria Casa (1-0, 2-0, 2-1, 3-1...) — mostrare comunque l'1-1 come
+    # "Top Result" in quel caso sarebbe fuorviante. In un match GENUINAMENTE
+    # equilibrato (Casa/Pareggio/Trasferta vicini fra loro, margine sotto la
+    # soglia) si mostra invece il punteggio esatto realmente più frequente
+    # SENZA alcuna forzatura: per un match equilibrato questo è spesso 0-0 o
+    # 1-1, ed è esattamente il comportamento richiesto — il Pareggio deve
+    # poter emergere come Top Result quando lo è davvero, non essere
+    # sistematicamente scavalcato da una Vittoria che vince il 'voto' macro
+    # per una manciata di decimi di punto percentuale.
+    top_score_overall, top_weight_overall = max(weighted_scores.items(), key=lambda item: item[1])
 
-    dominant_group_scores = {
-        score: weight for score, weight in weighted_scores.items() if dominant_outcome_filter(*score)
-    }
-    if dominant_group_scores:
-        top_result_score, top_result_weight = max(dominant_group_scores.items(), key=lambda item: item[1])
+    macro_outcome_weights = {"home": home_wins, "draw": draws, "away": away_wins}
+    dominant_macro_outcome = max(macro_outcome_weights, key=macro_outcome_weights.get)
+    sorted_macro_weights = sorted(macro_outcome_weights.values(), reverse=True)
+    dominant_macro_margin = (sorted_macro_weights[0] - sorted_macro_weights[1]) / total_weight
+
+    def _score_matches_macro_outcome(score: tuple[int, int], macro_outcome: str) -> bool:
+        h_goal, a_goal = score
+        if macro_outcome == "home":
+            return h_goal > a_goal
+        if macro_outcome == "away":
+            return h_goal < a_goal
+        return h_goal == a_goal
+
+    if dominant_macro_margin < TOP_RESULT_DOMINANCE_MARGIN or _score_matches_macro_outcome(
+        top_score_overall, dominant_macro_outcome
+    ):
+        # Match equilibrato (nessun esito macro chiaramente dominante), o il
+        # punteggio esatto più frequente in assoluto è già coerente con
+        # l'esito macro dominante: nessuna forzatura necessaria, si mostra
+        # il vero Top Result.
+        top_result_score, top_result_weight = top_score_overall, top_weight_overall
     else:
-        # Fallback di sicurezza (non dovrebbe mai accadere con 10,000 path):
-        # nessun punteggio simulato ricade nel gruppo dominante, si ripiega
-        # sul punteggio esatto assoluto più probabile.
-        top_result_score, top_result_weight = max(weighted_scores.items(), key=lambda item: item[1])
+        # Un esito macro è chiaramente dominante (>= 5pp) ma il punteggio
+        # esatto più frequente in assoluto appartiene a un gruppo diverso
+        # (frammentazione): si sceglie il punteggio più probabile ALL'INTERNO
+        # del gruppo dominante, per un Top Result coerente col pronostico.
+        dominant_group_scores = {
+            score: weight
+            for score, weight in weighted_scores.items()
+            if _score_matches_macro_outcome(score, dominant_macro_outcome)
+        }
+        if dominant_group_scores:
+            top_result_score, top_result_weight = max(dominant_group_scores.items(), key=lambda item: item[1])
+        else:
+            # Fallback di sicurezza (non dovrebbe mai accadere con 10,000
+            # path): nessun punteggio simulato ricade nel gruppo dominante.
+            top_result_score, top_result_weight = top_score_overall, top_weight_overall
 
     top_result = {
         "Exact Score": f"{top_result_score[0]}-{top_result_score[1]}",
