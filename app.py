@@ -355,18 +355,18 @@ NATIONAL_TEAM_COMPETITIONS: set[str] = {
     "International · UEFA Nations League",
     "International · Friendlies",
 }
-"""League display names treated as national-team competitions: matches team
-xG estimation to a broader, cross-competition lookback (see
-fetch_team_recent_matches_extended) instead of the single-competition
-current/previous-season split used for club leagues, since national sides
-play far fewer fixtures per year and a strict season boundary does not
-apply to them."""
+# League display names treated as national-team competitions: matches team
+# xG estimation to a broader, cross-competition lookback (see
+# fetch_team_recent_matches_extended) instead of the single-competition
+# current/previous-season split used for club leagues, since national sides
+# play far fewer fixtures per year and a strict season boundary does not
+# apply to them.
 
 NATIONAL_TEAM_MATCH_WINDOW = 10
-"""How many of a national team's most recent FINISHED matches (across ALL
-competitions — qualifiers, finals, Nations League, friendlies) to pull for
-Attack/Defense (alpha/beta) estimation, wider than the club-league lookback
-(8) to compensate for national teams' sparser annual fixture list."""
+# How many of a national team's most recent FINISHED matches (across ALL
+# competitions — qualifiers, finals, Nations League, friendlies) to pull for
+# Attack/Defense (alpha/beta) estimation, wider than the club-league lookback
+# (8) to compensate for national teams' sparser annual fixture list.
 
 
 def is_national_team_competition(league: str) -> bool:
@@ -473,27 +473,27 @@ PROMOTED_TEAMS = {
 # matching sul nome, con un fallback esplicito a Tier 3 (mai un default
 # piatto arbitrario).
 BASE_RATING = 1500.0
-"""Rating ELO di riferimento (centro scala), usato come ancoraggio per
-elo_expected_score e per i moltiplicatori derivati dal rating diff."""
+# Rating ELO di riferimento (centro scala), usato come ancoraggio per
+# elo_expected_score e per i moltiplicatori derivati dal rating diff.
 
 RATING_SCALE = 400.0
-"""Base della formula ELO standard (400 punti = fattore 10x nelle quote attese)."""
+# Base della formula ELO standard (400 punti = fattore 10x nelle quote attese).
 
 HOME_ADVANTAGE_RATING = 60.0
-"""Bonus di rating ELO per il fattore campo, usato per differenziare
-tiri/corner/cartellini in base al gap di rating (vedi rating_scaling_factors).
-NOTE: this is added only to the *local* rating_diff used for shots/corners/
-cards scaling — it is never added to rating_finale_home/away themselves, so
-it cannot inflate the Power Rating shown in the UI."""
+# Bonus di rating ELO per il fattore campo, usato per differenziare
+# tiri/corner/cartellini in base al gap di rating (vedi rating_scaling_factors).
+# NOTE: this is added only to the *local* rating_diff used for shots/corners/
+# cards scaling — it is never added to rating_finale_home/away themselves, so
+# it cannot inflate the Power Rating shown in the UI.
 
 RATING_LAMBDA_SENSITIVITY = 0.0022
-"""Quanto un punto di differenza di rating ELO sposta, in scala esponenziale,
-tiri/corner/cartellini rispetto alla media osservata (vedi
-rating_scaling_factors). I gol attesi (xG) NON passano più da questa
-funzione: dalla Weighted Rating Engine (vedi BASE_RATING_WEIGHT/
-FORM_RATING_WEIGHT più sotto) sono generati direttamente dalla curva di
-conversione Rating→xG in build_match_model (SUPREMACY_RATING_SENSITIVITY/
-BASE_TOTAL_EXPECTED_GOALS/XG_HARD_CAP/XG_HARD_FLOOR)."""
+# Quanto un punto di differenza di rating ELO sposta, in scala esponenziale,
+# tiri/corner/cartellini rispetto alla media osservata (vedi
+# rating_scaling_factors). I gol attesi (xG) NON passano più da questa
+# funzione: dalla Weighted Rating Engine (vedi BASE_RATING_WEIGHT/
+# FORM_RATING_WEIGHT più sotto) sono generati direttamente dalla curva di
+# conversione Rating→xG in build_match_model (SUPREMACY_RATING_SENSITIVITY/
+# BASE_TOTAL_EXPECTED_GOALS/XG_HARD_CAP/XG_HARD_FLOOR).
 
 # ==============================================================================
 # WEIGHTED RATING ENGINE (70/30 MODEL) — Base Rating + Current Form Rating
@@ -513,100 +513,100 @@ BASE_TOTAL_EXPECTED_GOALS/XG_HARD_CAP/XG_HARD_FLOOR)."""
 # Rating, tramite la classifica finale, mai nelle statistiche partita per
 # partita usate per la Forma.
 BASE_RATING_WEIGHT = 0.72
-"""Peso del Base Rating (blasone + stagione precedente) sul Rating finale —
-nel range 70-75% richiesto."""
+# Peso del Base Rating (blasone + stagione precedente) sul Rating finale —
+# nel range 70-75% richiesto.
 
 FORM_RATING_WEIGHT = 1.0 - BASE_RATING_WEIGHT
-"""Peso del Current Form Rating (sola stagione 2026/27) sul Rating finale —
-complementare a BASE_RATING_WEIGHT, quindi nel range 25-30% richiesto."""
+# Peso del Current Form Rating (sola stagione 2026/27) sul Rating finale —
+# complementare a BASE_RATING_WEIGHT, quindi nel range 25-30% richiesto.
 
 BLASONE_WEIGHT_IN_BASE = 0.30
-"""Quota del blasone storico (Team Tier dictionary) DENTRO il Base Rating."""
+# Quota del blasone storico (Team Tier dictionary) DENTRO il Base Rating.
 
 PREVIOUS_SEASON_WEIGHT_IN_BASE = 1.0 - BLASONE_WEIGHT_IN_BASE
-"""Quota della posizione/punti di classifica 2025/26 DENTRO il Base Rating —
-la componente DOMINANTE (70%) come richiesto ('SOPRATTUTTO la posizione
-ottenuta nella stagione precedente'), quando la classifica finale è
-disponibile per quella squadra in quella competizione (vedi
-resolve_base_rating: altrimenti si ripiega sul solo blasone)."""
+# Quota della posizione/punti di classifica 2025/26 DENTRO il Base Rating —
+# la componente DOMINANTE (70%) come richiesto ('SOPRATTUTTO la posizione
+# ottenuta nella stagione precedente'), quando la classifica finale è
+# disponibile per quella squadra in quella competizione (vedi
+# resolve_base_rating: altrimenti si ripiega sul solo blasone).
 
 # --- xG GENERATION: curva di conversione Rating → Expected Goals ------------
 XG_HARD_CAP = 2.50
-"""Tetto massimo assoluto per home_lambda/away_lambda, applicato come ULTIMO
-step della curva di conversione (dopo Base Rating, Current Form Rating,
-slider manuali e Affaticamento), qualunque sia il gap fra le due squadre —
-anche la prima contro l'ultima in classifica. Elimina matematicamente le
-code di Poisson irrealistiche per il calcio (4-0, 5-0, 6-0): i punteggi
-netti restano nell'intervallo credibile 2-0/3-0/3-1/2-1."""
+# Tetto massimo assoluto per home_lambda/away_lambda, applicato come ULTIMO
+# step della curva di conversione (dopo Base Rating, Current Form Rating,
+# slider manuali e Affaticamento), qualunque sia il gap fra le due squadre —
+# anche la prima contro l'ultima in classifica. Elimina matematicamente le
+# code di Poisson irrealistiche per il calcio (4-0, 5-0, 6-0): i punteggi
+# netti restano nell'intervallo credibile 2-0/3-0/3-1/2-1.
 
 XG_HARD_FLOOR = 0.40
-"""Pavimento minimo per home_lambda/away_lambda, stesso step di XG_HARD_CAP:
-nessuna squadra scende sotto 0.40 xG attesi, per evitare 0-0 quasi certi
-altrettanto irrealistici quanto le goleade tennistiche."""
+# Pavimento minimo per home_lambda/away_lambda, stesso step di XG_HARD_CAP:
+# nessuna squadra scende sotto 0.40 xG attesi, per evitare 0-0 quasi certi
+# altrettanto irrealistici quanto le goleade tennistiche.
 
 BASE_TOTAL_EXPECTED_GOALS = 2.60
-"""Gol totali di partita 'di libro' (somma home_lambda + away_lambda) per un
-match STANDARD (nessuno dei tre Match Profile sotto si applica — vedi
-classify_match_profile) — coerente con la media empirica del calcio
-europeo. Alzato da 2.45 a 2.60: con il precedente valore la maggior parte
-dei match 'ordinari' collassava su xG compressi fra 1.00 e 1.30 a testa,
-rendendo l'1-0 il risultato Monte Carlo quasi sistematico anche per
-confronti reali fra squadre di medio livello — questo valore riporta la
-gamma di risultati verso la varietà realistica del calcio (0-0, 1-0, 1-1,
-2-0, 2-1...) senza sconfinare nelle bande dedicate a Tactical/Big Match."""
+# Gol totali di partita 'di libro' (somma home_lambda + away_lambda) per un
+# match STANDARD (nessuno dei tre Match Profile sotto si applica — vedi
+# classify_match_profile) — coerente con la media empirica del calcio
+# europeo. Alzato da 2.45 a 2.60: con il precedente valore la maggior parte
+# dei match 'ordinari' collassava su xG compressi fra 1.00 e 1.30 a testa,
+# rendendo l'1-0 il risultato Monte Carlo quasi sistematico anche per
+# confronti reali fra squadre di medio livello — questo valore riporta la
+# gamma di risultati verso la varietà realistica del calcio (0-0, 1-0, 1-1,
+# 2-0, 2-1...) senza sconfinare nelle bande dedicate a Tactical/Big Match.
 
 TOTAL_GOALS_MISMATCH_BONUS = 0.30
-"""Incremento massimo (fino a +0.30) dei gol totali attesi in funzione del
-gap qualitativo fra le due squadre (vedi pct_rating_distance in
-build_match_model), applicato SOLO al profilo STANDARD (i profili
-Tactical/Big Match/Mismatch hanno le proprie bande fisse dedicate — vedi
-sotto): un mismatch che non raggiunge la soglia MISMATCH_RATING_DISTANCE_
-THRESHOLD produce comunque in media qualche gol in più nel computo
-complessivo (la difesa più debole concede di più), fino a un totale 'di
-libro' di BASE_TOTAL_EXPECTED_GOALS + TOTAL_GOALS_MISMATCH_BONUS."""
+# Incremento massimo (fino a +0.30) dei gol totali attesi in funzione del
+# gap qualitativo fra le due squadre (vedi pct_rating_distance in
+# build_match_model), applicato SOLO al profilo STANDARD (i profili
+# Tactical/Big Match/Mismatch hanno le proprie bande fisse dedicate — vedi
+# sotto): un mismatch che non raggiunge la soglia MISMATCH_RATING_DISTANCE_
+# THRESHOLD produce comunque in media qualche gol in più nel computo
+# complessivo (la difesa più debole concede di più), fino a un totale 'di
+# libro' di BASE_TOTAL_EXPECTED_GOALS + TOTAL_GOALS_MISMATCH_BONUS.
 
 SUPREMACY_RATING_SENSITIVITY = 0.0025
-"""Converte linearmente il differenziale di Rating (fattore campo incluso)
-in 'supremazia' di gol (quanto home_lambda supera away_lambda prima delle
-bande/tetto/pavimento specifici del Match Profile): supremacy =
-SUPREMACY_RATING_SENSITIVITY × rating_diff. Usata da tutti e 4 i profili
-(STANDARD, Tactical, Big Match) per ripartire il totale di gol atteso fra
-le due squadre — il profilo Mismatch usa invece una propria interpolazione
-diretta (vedi MISMATCH_FAVORITE_XG_*/MISMATCH_UNDERDOG_XG_*), perché lì lo
-scarto assoluto richiesto è troppo ampio per una singola sensibilità
-lineare condivisa con gli altri profili."""
+# Converte linearmente il differenziale di Rating (fattore campo incluso)
+# in 'supremazia' di gol (quanto home_lambda supera away_lambda prima delle
+# bande/tetto/pavimento specifici del Match Profile): supremacy =
+# SUPREMACY_RATING_SENSITIVITY × rating_diff. Usata da tutti e 4 i profili
+# (STANDARD, Tactical, Big Match) per ripartire il totale di gol atteso fra
+# le due squadre — il profilo Mismatch usa invece una propria interpolazione
+# diretta (vedi MISMATCH_FAVORITE_XG_*/MISMATCH_UNDERDOG_XG_*), perché lì lo
+# scarto assoluto richiesto è troppo ampio per una singola sensibilità
+# lineare condivisa con gli altri profili.
 
 BALANCED_MATCH_RATING_DISTANCE_THRESHOLD = 0.08
-"""Soglia (8%) di distanza percentuale fra i Rating finali (SENZA fattore
-campo) di home e away sotto la quale il match STANDARD è considerato
-'Scontro tra pari livello' (vedi pct_rating_distance in build_match_model):
-al di sotto di questa soglia si applica un'ulteriore compressione della
-supremazia (BALANCED_MATCH_SUPREMACY_DAMPING), per restituire al Pareggio
-(X) e ai punteggi di misura (1-1, 1-0, 2-1) una probabilità concreta
-quando le due squadre sono realmente equivalenti. Non si applica ai
-profili Tactical/Big Match/Mismatch, che hanno le proprie bande dedicate."""
+# Soglia (8%) di distanza percentuale fra i Rating finali (SENZA fattore
+# campo) di home e away sotto la quale il match STANDARD è considerato
+# 'Scontro tra pari livello' (vedi pct_rating_distance in build_match_model):
+# al di sotto di questa soglia si applica un'ulteriore compressione della
+# supremazia (BALANCED_MATCH_SUPREMACY_DAMPING), per restituire al Pareggio
+# (X) e ai punteggi di misura (1-1, 1-0, 2-1) una probabilità concreta
+# quando le due squadre sono realmente equivalenti. Non si applica ai
+# profili Tactical/Big Match/Mismatch, che hanno le proprie bande dedicate.
 
 BALANCED_MATCH_SUPREMACY_DAMPING = 0.70
-"""Fattore di smorzamento aggiuntivo applicato alla 'supremazia' di gol
-(vedi SUPREMACY_RATING_SENSITIVITY) quando un match STANDARD ricade sotto
-BALANCED_MATCH_RATING_DISTANCE_THRESHOLD, per contenere ulteriormente lo
-scarto di xG fra le due squadre nei confronti realmente equilibrati."""
+# Fattore di smorzamento aggiuntivo applicato alla 'supremazia' di gol
+# (vedi SUPREMACY_RATING_SENSITIVITY) quando un match STANDARD ricade sotto
+# BALANCED_MATCH_RATING_DISTANCE_THRESHOLD, per contenere ulteriormente lo
+# scarto di xG fra le due squadre nei confronti realmente equilibrati.
 
 BALANCED_MATCH_TOTAL_EXPECTED_GOALS = 1.95
-"""Gol totali di partita 'di libro' usati SOLO per i match STANDARD
-considerati 'Scontro tra pari livello' (pct_rating_distance sotto
-BALANCED_MATCH_RATING_DISTANCE_THRESHOLD), al posto di
-BASE_TOTAL_EXPECTED_GOALS. Con la matematica di Poisson, il Pareggio (X)
-smette di essere un esito macro davvero competitivo non appena i lambda di
-entrambe le squadre superano ~1.0 xG a testa — BASE_TOTAL_EXPECTED_GOALS
-(2.60, ≈1.30 a testa) supera sistematicamente quella soglia, così anche
-due squadre di Rating IDENTICO finivano quasi sempre con una vittoria
-(casa o trasferta) come esito Monte Carlo più frequente, mai il Pareggio.
-Con questo totale più basso (≈0.95-1.05 a testa dopo il fattore campo), il
-Pareggio torna a essere uno degli esiti macro (1X2) principali — non
-necessariamente sempre il più probabile, ma sempre competitivo — e 0-0/1-1
-tornano a figurare fra i risultati esatti più frequenti in assoluto, non
-solo all'interno del gruppo dominante."""
+# Gol totali di partita 'di libro' usati SOLO per i match STANDARD
+# considerati 'Scontro tra pari livello' (pct_rating_distance sotto
+# BALANCED_MATCH_RATING_DISTANCE_THRESHOLD), al posto di
+# BASE_TOTAL_EXPECTED_GOALS. Con la matematica di Poisson, il Pareggio (X)
+# smette di essere un esito macro davvero competitivo non appena i lambda di
+# entrambe le squadre superano ~1.0 xG a testa — BASE_TOTAL_EXPECTED_GOALS
+# (2.60, ≈1.30 a testa) supera sistematicamente quella soglia, così anche
+# due squadre di Rating IDENTICO finivano quasi sempre con una vittoria
+# (casa o trasferta) come esito Monte Carlo più frequente, mai il Pareggio.
+# Con questo totale più basso (≈0.95-1.05 a testa dopo il fattore campo), il
+# Pareggio torna a essere uno degli esiti macro (1X2) principali — non
+# necessariamente sempre il più probabile, ma sempre competitivo — e 0-0/1-1
+# tornano a figurare fra i risultati esatti più frequenti in assoluto, non
+# solo all'interno del gruppo dominante.
 
 # ==============================================================================
 # DYNAMIC MATCH PROFILES — 3 curve di conversione Rating→xG dedicate
@@ -617,72 +617,72 @@ solo all'interno del gruppo dominante."""
 # base al TIPO di partita invece di restare sempre compresso in un'unica
 # fascia stretta — vedi classify_match_profile in build_match_model.
 BIG_MATCH_RATING_THRESHOLD = 1580.0
-"""Entrambi i Rating (SENZA fattore campo) devono superare questa soglia
-perché il match sia classificato HIGH-PROFILE BIG MATCH (Profilo B) — il
-controllo è INDIVIDUALE su home E away (non sulla media), così un solo top
-club abbinato a una squadra debole non genera falsamente un 'big match'."""
+# Entrambi i Rating (SENZA fattore campo) devono superare questa soglia
+# perché il match sia classificato HIGH-PROFILE BIG MATCH (Profilo B) — il
+# controllo è INDIVIDUALE su home E away (non sulla media), così un solo top
+# club abbinato a una squadra debole non genera falsamente un 'big match'.
 
 TACTICAL_SCORING_TEMPO_THRESHOLD = 1.10
-"""Media gol segnati a partita nella stagione corrente (2026/27, sola
-Current Form — vedi LiveTeamStats.goals_for/matches): se ENTRAMBE le
-squadre sono a questa soglia o sotto, il match è classificato LOW-SCORING/
-TACTICAL (Profilo A). Con zero partite giocate quest'anno si usa
-LEAGUE_AVERAGE_GOALS_PER_TEAM come tempo neutro (né basso né alto), così
-una squadra non ancora scesa in campo non attiva falsamente il profilo."""
+# Media gol segnati a partita nella stagione corrente (2026/27, sola
+# Current Form — vedi LiveTeamStats.goals_for/matches): se ENTRAMBE le
+# squadre sono a questa soglia o sotto, il match è classificato LOW-SCORING/
+# TACTICAL (Profilo A). Con zero partite giocate quest'anno si usa
+# LEAGUE_AVERAGE_GOALS_PER_TEAM come tempo neutro (né basso né alto), così
+# una squadra non ancora scesa in campo non attiva falsamente il profilo.
 
 MISMATCH_RATING_DISTANCE_THRESHOLD = 0.20
-"""Distanza percentuale di Rating (stessa metrica di pct_rating_distance,
-SENZA fattore campo) oltre la quale il match è classificato MISMATCHED /
-HIGH-TIER VS LOW-TIER (Profilo C) — controllato PRIMA degli altri due
-profili: un vero scontro impari prevale sempre sulla classificazione
-'Big Match' o 'Tactical', qualunque sia il tempo di gioco o il Rating
-assoluto delle due squadre."""
+# Distanza percentuale di Rating (stessa metrica di pct_rating_distance,
+# SENZA fattore campo) oltre la quale il match è classificato MISMATCHED /
+# HIGH-TIER VS LOW-TIER (Profilo C) — controllato PRIMA degli altri due
+# profili: un vero scontro impari prevale sempre sulla classificazione
+# 'Big Match' o 'Tactical', qualunque sia il tempo di gioco o il Rating
+# assoluto delle due squadre.
 
 MISMATCH_MAX_INTENSITY_DISTANCE = 0.45
-"""Distanza di Rating oltre la quale l'intensità del Mismatch (vedi
-MISMATCH_RATING_DISTANCE_THRESHOLD) è considerata 'massima' (100%): fra la
-soglia di ingresso e questo valore, il tetto della favorita e il pavimento
-della sfavorita scalano linearmente dai bordi più miti ai più estremi delle
-rispettive forbici (vedi MISMATCH_FAVORITE_XG_*/MISMATCH_UNDERDOG_XG_*)."""
+# Distanza di Rating oltre la quale l'intensità del Mismatch (vedi
+# MISMATCH_RATING_DISTANCE_THRESHOLD) è considerata 'massima' (100%): fra la
+# soglia di ingresso e questo valore, il tetto della favorita e il pavimento
+# della sfavorita scalano linearmente dai bordi più miti ai più estremi delle
+# rispettive forbici (vedi MISMATCH_FAVORITE_XG_*/MISMATCH_UNDERDOG_XG_*).
 
 # --- Bande di xG per-squadra specifiche di ciascun Match Profile -----------
 TACTICAL_XG_MIN = 0.70
 TACTICAL_XG_MAX = 0.95
 TACTICAL_TOTAL_EXPECTED_GOALS = 1.70
-"""Profilo A (Low-Scoring/Tactical, es. Parma vs Monza): xG per squadra
-contenuti in [0.70, 0.95], totale 'di libro' 1.70 — fa emergere con
-naturalezza 0-0, 1-0, 1-1 senza bisogno di forzature a valle."""
+# Profilo A (Low-Scoring/Tactical, es. Parma vs Monza): xG per squadra
+# contenuti in [0.70, 0.95], totale 'di libro' 1.70 — fa emergere con
+# naturalezza 0-0, 1-0, 1-1 senza bisogno di forzature a valle.
 
 BIG_MATCH_XG_MIN = 1.75
 BIG_MATCH_XG_MAX = 2.20
 BIG_MATCH_TOTAL_EXPECTED_GOALS = 3.90
-"""Profilo B (High-Profile Big Match, es. Barcelona vs Real Madrid): xG
-per squadra alzati in [1.75, 2.20], totale 'di libro' 3.90 — favorisce
-simulazioni spettacolari (2-2, 2-1, 3-2, 3-1) fra due Top Team."""
+# Profilo B (High-Profile Big Match, es. Barcelona vs Real Madrid): xG
+# per squadra alzati in [1.75, 2.20], totale 'di libro' 3.90 — favorisce
+# simulazioni spettacolari (2-2, 2-1, 3-2, 3-1) fra due Top Team.
 
 MISMATCH_FAVORITE_XG_MIN = 2.65
 MISMATCH_FAVORITE_XG_MAX = 2.85
 MISMATCH_UNDERDOG_XG_MIN = 0.45
 MISMATCH_UNDERDOG_XG_MAX = 0.65
-"""Profilo C (Mismatched / High-Tier vs Low-Tier, es. Inter vs Monza,
-Arsenal vs Coventry): tetto della favorita in [2.65, 2.85] (interpolato
-sull'intensità del gap, vedi MISMATCH_MAX_INTENSITY_DISTANCE), sfavorita
-tenuta bassa in [0.45, 0.65] — sposta il risultato Monte Carlo più
-probabile su esiti netti e realistici (3-0, 3-1, 2-0), MAI su un 1-0
-risicato né su goleade tennistiche tipo 5-0/6-0."""
+# Profilo C (Mismatched / High-Tier vs Low-Tier, es. Inter vs Monza,
+# Arsenal vs Coventry): tetto della favorita in [2.65, 2.85] (interpolato
+# sull'intensità del gap, vedi MISMATCH_MAX_INTENSITY_DISTANCE), sfavorita
+# tenuta bassa in [0.45, 0.65] — sposta il risultato Monte Carlo più
+# probabile su esiti netti e realistici (3-0, 3-1, 2-0), MAI su un 1-0
+# risicato né su goleade tennistiche tipo 5-0/6-0.
 
 SHOT_RATING_DAMPING = 0.7
-"""I tiri (fatti/in porta) seguono il gap di rating con un'intensità inferiore
-
-ai gol (che dipendono anche da efficienza/episodi), da qui lo smorzamento."""
+# I tiri (fatti/in porta) seguono il gap di rating con un'intensità inferiore
+#
+# ai gol (che dipendono anche da efficienza/episodi), da qui lo smorzamento.
 
 CORNER_RATING_DAMPING = 0.35
-"""I corner sono più legati al possesso palla che al gap di qualità puro:
-smorzamento più marcato rispetto ai tiri."""
+# I corner sono più legati al possesso palla che al gap di qualità puro:
+# smorzamento più marcato rispetto ai tiri.
 
 CARD_UNDERDOG_BONUS = 0.25
-"""Quota aggiuntiva di cartellini per la squadra più debole, che difende più
-a lungo e commette più falli tattici contro un avversario superiore."""
+# Quota aggiuntiva di cartellini per la squadra più debole, che difende più
+# a lungo e commette più falli tattici contro un avversario superiore.
 
 # --- Time-Decay per i dati storici (ora usato SOLO dallo shrinkage del
 # Current Form Rating e dal blend Tier/Stats di tiri-corner-cartellini: i
@@ -690,76 +690,76 @@ a lungo e commette più falli tattici contro un avversario superiore."""
 # partita per partita — vivono solo nel Base Rating, vedi
 # resolve_base_rating/fetch_previous_season_standings) --------------------
 EARLY_SEASON_MATCHDAY_THRESHOLD = 10
-"""Dalla Giornata 10 (N partite REALI giocate nella stagione corrente, un
-campione minimo di 10-15 partite come richiesto) si usa il 100% dei dati/
-statistiche reali per il blend Tier/Stats di tiri-corner-cartellini (vedi
-dynamic_decay_weights) — questo, insieme allo shrinkage di REGRESSION_TO_
-MEAN_SAMPLE_SIZE applicato al Current Form Rating (vedi _shrink_to_mean),
-è la doppia barriera che impedisce a 2-3 risultati estremi di sbilanciare
-il Rating sopra quello di una big con un campione più ampio e affidabile."""
+# Dalla Giornata 10 (N partite REALI giocate nella stagione corrente, un
+# campione minimo di 10-15 partite come richiesto) si usa il 100% dei dati/
+# statistiche reali per il blend Tier/Stats di tiri-corner-cartellini (vedi
+# dynamic_decay_weights) — questo, insieme allo shrinkage di REGRESSION_TO_
+# MEAN_SAMPLE_SIZE applicato al Current Form Rating (vedi _shrink_to_mean),
+# è la doppia barriera che impedisce a 2-3 risultati estremi di sbilanciare
+# il Rating sopra quello di una big con un campione più ampio e affidabile.
 
 REGRESSION_TO_MEAN_SAMPLE_SIZE = 6.0
-"""Numero di partite (stagione corrente) oltre il quale il moltiplicatore
-Attacco/Difesa del Current Form Rating, calcolato dalle statistiche
-osservate, viene usato al 100% del suo valore grezzo. Con un campione più
-piccolo, il moltiplicatore viene 'ristretto' (shrinkage Bayesiano) verso
-1.0 (la media di lega) in proporzione al campione disponibile — vedi
-_shrink_to_mean. Con zero partite giocate quest'anno lo shrinkage riporta
-il moltiplicatore esattamente a 1.0, così il Current Form Rating collassa
-sul rating neutro di lega (BASE_RATING=1500) e il Rating finale coincide
-di fatto col solo Base Rating (Fascia/stagione precedente) — esattamente
-il comportamento atteso prima che una squadra abbia giocato."""
+# Numero di partite (stagione corrente) oltre il quale il moltiplicatore
+# Attacco/Difesa del Current Form Rating, calcolato dalle statistiche
+# osservate, viene usato al 100% del suo valore grezzo. Con un campione più
+# piccolo, il moltiplicatore viene 'ristretto' (shrinkage Bayesiano) verso
+# 1.0 (la media di lega) in proporzione al campione disponibile — vedi
+# _shrink_to_mean. Con zero partite giocate quest'anno lo shrinkage riporta
+# il moltiplicatore esattamente a 1.0, così il Current Form Rating collassa
+# sul rating neutro di lega (BASE_RATING=1500) e il Rating finale coincide
+# di fatto col solo Base Rating (Fascia/stagione precedente) — esattamente
+# il comportamento atteso prima che una squadra abbia giocato.
 
 CLUB_MATCH_LOOKBACK = 15
-"""Massimo numero di partite CORRENTI (stagione 2026/27) recuperate per
-ogni squadra di club, usate esclusivamente per il Current Form Rating e le
-statistiche di tiri/corner/cartellini — alzato da 8 a 15 per garantire un
-campione minimo di 10-15 partite come richiesto, riducendo ulteriormente
-la sensibilità del rating a 2-3 risultati anomali isolati (si veda anche
-REGRESSION_TO_MEAN_SAMPLE_SIZE, che agisce sullo stesso problema da un
-angolo complementare). La stagione precedente non usa più questo lookback
-per le statistiche: la sua unica fonte è ora la classifica finale (vedi
-fetch_previous_season_standings), letta per intero."""
+# Massimo numero di partite CORRENTI (stagione 2026/27) recuperate per
+# ogni squadra di club, usate esclusivamente per il Current Form Rating e le
+# statistiche di tiri/corner/cartellini — alzato da 8 a 15 per garantire un
+# campione minimo di 10-15 partite come richiesto, riducendo ulteriormente
+# la sensibilità del rating a 2-3 risultati anomali isolati (si veda anche
+# REGRESSION_TO_MEAN_SAMPLE_SIZE, che agisce sullo stesso problema da un
+# angolo complementare). La stagione precedente non usa più questo lookback
+# per le statistiche: la sua unica fonte è ora la classifica finale (vedi
+# fetch_previous_season_standings), letta per intero.
 
 LEAGUE_AVERAGE_GOALS_PER_TEAM = 1.35
-"""Gol attesi 'di libro' per una squadra media in una singola partita di
-massima serie: fattore di normalizzazione del moltiplicatore Attacco/Difesa
-usato dal Current Form Rating (vedi _stats_multiplier/compute_current_
-form_rating) — i gol attesi finali (xG) sono generati dalla curva Rating→
-xG (BASE_TOTAL_EXPECTED_GOALS/SUPREMACY_RATING_SENSITIVITY), non più da un
-prodotto diretto Attacco×Difesa."""
+# Gol attesi 'di libro' per una squadra media in una singola partita di
+# massima serie: fattore di normalizzazione del moltiplicatore Attacco/Difesa
+# usato dal Current Form Rating (vedi _stats_multiplier/compute_current_
+# form_rating) — i gol attesi finali (xG) sono generati dalla curva Rating→
+# xG (BASE_TOTAL_EXPECTED_GOALS/SUPREMACY_RATING_SENSITIVITY), non più da un
+# prodotto diretto Attacco×Difesa.
 
 # --- Slider manuali "Impatto Mercato" e "Impatto Infortuni" -------------------
 MARKET_FACTOR_BOUNDS = (-0.20, 0.20)
-"""Range consentito per lo slider 'Fattore Mercato' (-20% / +20%)."""
+# Range consentito per lo slider 'Fattore Mercato' (-20% / +20%).
 
 INJURY_FACTOR_BOUNDS = (-0.30, 0.30)
-"""Range consentito per lo slider 'Impatto Infortuni / Titolari Assenti'
-(-30% / +30%)."""
+# Range consentito per lo slider 'Impatto Infortuni / Titolari Assenti'
+# (-30% / +30%).
 
 # --- Forma recente come moltiplicatore dinamico (Form Amplifier) -------------
 FORM_DEFENSE_TRANSFER = 0.7
-"""Quota dell'effetto Form Factor trasferita anche alla Difesa (in direzione
-opposta): una squadra in ottima forma (Form Factor > 1.0) migliora anche la
-propria fase difensiva, ma in misura più contenuta rispetto all'attacco —
-vedi l'applicazione in build_match_model, che moltiplica direttamente
-Attacco_Finale per il Form Factor e Difesa_Finale per un fattore simmetrico
-smorzato da questo coefficiente. Alzato da 0.6 a 0.7 (DYNAMIC FORM &
-MOMENTUM): la fase difensiva deve risentire quasi quanto l'attacco del
-momento di forma, così una Big in crisi concede di più oltre a segnare
-meno, invece di restare quasi impermeabile solo perché di Fascia alta."""
+# Quota dell'effetto Form Factor trasferita anche alla Difesa (in direzione
+# opposta): una squadra in ottima forma (Form Factor > 1.0) migliora anche la
+# propria fase difensiva, ma in misura più contenuta rispetto all'attacco —
+# vedi l'applicazione in build_match_model, che moltiplica direttamente
+# Attacco_Finale per il Form Factor e Difesa_Finale per un fattore simmetrico
+# smorzato da questo coefficiente. Alzato da 0.6 a 0.7 (DYNAMIC FORM &
+# MOMENTUM): la fase difensiva deve risentire quasi quanto l'attacco del
+# momento di forma, così una Big in crisi concede di più oltre a segnare
+# meno, invece di restare quasi impermeabile solo perché di Fascia alta.
 
 # --- Correzione Dixon-Coles -----------------------------------------------------
 DIXON_COLES_RHO = -0.09
-"""Parametro ρ di Dixon-Coles (Dixon & Coles, 1997): corregge la Poisson
-bivariata indipendente sui 4 risultati a basso punteggio (0-0, 1-0, 0-1, 1-1),
-dove nella realtà i pareggi/risultati bassi sono leggermente più frequenti di
-quanto preveda il semplice prodotto di due Poisson indipendenti. Ridotto in
-magnitudine da -0.13 a -0.09 (resta nel range tipico della letteratura,
--0.08/-0.20): il boost su τ(1,1) passa da ×1.13 a ×1.09, riducendo la
-tendenza del modello ad 'attirare' verso l'1-1 i risultati quando gli xG
-delle due squadre sono vicini, senza eliminare la correzione Dixon-Coles
-(che resta scientificamente corretta e necessaria)."""
+# Parametro ρ di Dixon-Coles (Dixon & Coles, 1997): corregge la Poisson
+# bivariata indipendente sui 4 risultati a basso punteggio (0-0, 1-0, 0-1, 1-1),
+# dove nella realtà i pareggi/risultati bassi sono leggermente più frequenti di
+# quanto preveda il semplice prodotto di due Poisson indipendenti. Ridotto in
+# magnitudine da -0.13 a -0.09 (resta nel range tipico della letteratura,
+# -0.08/-0.20): il boost su τ(1,1) passa da ×1.13 a ×1.09, riducendo la
+# tendenza del modello ad 'attirare' verso l'1-1 i risultati quando gli xG
+# delle due squadre sono vicini, senza eliminare la correzione Dixon-Coles
+# (che resta scientificamente corretta e necessaria).
 
 
 # --- 1. DIZIONARIO FASCE DI FORZA (TEAM TIERS) --------------------------------
@@ -772,8 +772,8 @@ TEAM_TIER_PROFILES: dict[int, dict[str, float]] = {
 }
 
 TEAM_TIER_DEFAULT = 3
-"""Fallback esplicito per una squadra non trovata nel dizionario: Tier 3
-(Base Rating 1480) — MAI il vecchio default piatto 1500."""
+# Fallback esplicito per una squadra non trovata nel dizionario: Tier 3
+# (Base Rating 1480) — MAI il vecchio default piatto 1500.
 
 TEAM_TIER_LABELS: dict[int, str] = {
     1: "Tier 1 · Title Contender",
@@ -1693,26 +1693,26 @@ def clamp(value: float, minimum: float, maximum: float) -> float:
 # Il Form Factor pesa i risultati più recenti più di quelli lontani e produce
 # il moltiplicatore dinamico usato da global_power_rating() sopra.
 FORM_MATCHES_WINDOW = 5
-"""Numero di partite recenti considerate nel calcolo del Form Factor."""
+# Numero di partite recenti considerate nel calcolo del Form Factor.
 
 FORM_RECENCY_WEIGHTS: tuple[float, ...] = (1.0, 0.85, 0.7, 0.55, 0.4)
-"""Peso decrescente per ciascuna delle ultime FORM_MATCHES_WINDOW partite,
-dalla più recente alla meno recente."""
+# Peso decrescente per ciascuna delle ultime FORM_MATCHES_WINDOW partite,
+# dalla più recente alla meno recente.
 
 FORM_FACTOR_MIN = 0.72
 FORM_FACTOR_MAX = 1.28
-"""DYNAMIC FORM & MOMENTUM: range allargato da 0.85-1.15 a 0.72-1.28 — il
-momento di forma recente (ultime FORM_MATCHES_WINDOW partite, tipicamente
-5-8) deve poter pesare più del solo nome/blasone della squadra. Una Big in
-crisi di risultati (striscia di sconfitte/pareggi, xG realizzato basso)
-subisce ora una penalizzazione di Attacco/Difesa (e, tramite l'aggiornamento
-di rating_finale in build_match_model, anche del Global Power Rating
-mostrato in UI) fino al 28% invece del 15% precedente — abbastanza da farla
-scendere realisticamente di una Fascia effettiva contro un avversario in
-salute. Simmetricamente, una squadra di media/bassa classifica in un momento
-di grande forma vede il proprio moltiplicatore di Attacco/Difesa crescere
-fino al 28%, rendendola competitiva o perfino favorita (1-0, 2-1, pareggio)
-contro una Big appannata."""
+# DYNAMIC FORM & MOMENTUM: range allargato da 0.85-1.15 a 0.72-1.28 — il
+# momento di forma recente (ultime FORM_MATCHES_WINDOW partite, tipicamente
+# 5-8) deve poter pesare più del solo nome/blasone della squadra. Una Big in
+# crisi di risultati (striscia di sconfitte/pareggi, xG realizzato basso)
+# subisce ora una penalizzazione di Attacco/Difesa (e, tramite l'aggiornamento
+# di rating_finale in build_match_model, anche del Global Power Rating
+# mostrato in UI) fino al 28% invece del 15% precedente — abbastanza da farla
+# scendere realisticamente di una Fascia effettiva contro un avversario in
+# salute. Simmetricamente, una squadra di media/bassa classifica in un momento
+# di grande forma vede il proprio moltiplicatore di Attacco/Difesa crescere
+# fino al 28%, rendendola competitiva o perfino favorita (1-0, 2-1, pareggio)
+# contro una Big appannata.
 
 
 def compute_form_factor(
@@ -2395,13 +2395,13 @@ MULTI_ESITO_GROUPS: dict[str, list[str]] = {
     "Group D · Main Draws (0-0, 1-1, 2-2)": ["0-0", "1-1", "2-2"],
     "Group E · Over/Goal Combo (2-1, 1-2, 2-2, 3-1, 1-3)": ["2-1", "1-2", "2-2", "3-1", "1-3"],
 }
-"""Preset Multi-Outcome groups: popular combinations of exact scores on
-which bookmakers often offer a single odds ('combined multi-goal/outcome').
-Each entry lists the 'Home-Away' scores included in the group."""
+# Preset Multi-Outcome groups: popular combinations of exact scores on
+# which bookmakers often offer a single odds ('combined multi-goal/outcome').
+# Each entry lists the 'Home-Away' scores included in the group.
 
 MULTI_ESITO_CUSTOM_LABEL = "🎯 Custom Multi-Outcome"
-"""Special entry in the selector that activates the multiselect for manually
-picking exact scores (see render_multi_esito_tab)."""
+# Special entry in the selector that activates the multiselect for manually
+# picking exact scores (see render_multi_esito_tab).
 
 
 def exact_score_probability_map(model: MatchModel, max_goals: int = 6) -> dict[str, float]:
@@ -2661,26 +2661,26 @@ def render_multi_esito_tab(model: MatchModel, home: str, away: str) -> None:
 # simulazione, calibrata sugli stessi gol attesi (alpha) e cartellini attesi
 # (beta) già calcolati dal motore per quel match.
 LIVE_SHOTS_PER_GOAL_RATIO = 8.0
-"""Tiri totali stimati per ogni gol atteso (alpha), usato come fallback se
-non viene passata una lambda tiri esplicita al motore live."""
+# Tiri totali stimati per ogni gol atteso (alpha), usato come fallback se
+# non viene passata una lambda tiri esplicita al motore live.
 
 LIVE_SOT_PER_GOAL_RATIO = 3.0
-"""Tiri in porta stimati per ogni gol atteso (alpha), fallback analogo a
-LIVE_SHOTS_PER_GOAL_RATIO per i tiri in porta."""
+# Tiri in porta stimati per ogni gol atteso (alpha), fallback analogo a
+# LIVE_SHOTS_PER_GOAL_RATIO per i tiri in porta.
 
 LIVE_CORNER_BASE_LAMBDA = 5.0
-"""Corner attesi di fallback per singola squadra (se non derivati dal
-MatchModel), usati per calibrare la probabilità di corner per minuto."""
+# Corner attesi di fallback per singola squadra (se non derivati dal
+# MatchModel), usati per calibrare la probabilità di corner per minuto.
 
 LIVE_CARD_YELLOW_TO_RED_RATIO = 0.06
-"""Quota di ammonizioni che, nel motore live, degenera in un'espulsione
-diretta (evento raro ma realistico)."""
+# Quota di ammonizioni che, nel motore live, degenera in un'espulsione
+# diretta (evento raro ma realistico).
 
 LIVE_MATCH_ANIMATION_DELAY_SECONDS = 0.11
-"""Pausa (in secondi) fra un minuto simulato e il successivo durante
-l'animazione 'Cronaca Diretta': 90 minuti × 0.11s ≈ 10 secondi reali totali,
-calibrati per una clip breve e ad alto impatto da registrare per i social
-(TikTok/Reels/Shorts) senza tempi morti."""
+# Pausa (in secondi) fra un minuto simulato e il successivo durante
+# l'animazione 'Cronaca Diretta': 90 minuti × 0.11s ≈ 10 secondi reali totali,
+# calibrati per una clip breve e ad alto impatto da registrare per i social
+# (TikTok/Reels/Shorts) senza tempi morti.
 
 
 def simulate_single_match(
@@ -3335,15 +3335,15 @@ def render_live_match_tab(model: MatchModel, home: str, away: str) -> None:
 # probabilità già calcolate da match_outcome_probabilities/
 # goal_market_probabilities per garantire coerenza con le altre schede.
 KELLY_FRACTION = 0.25
-"""Quarter Kelly: frazione conservativa applicata al Kelly Criterion pieno
-per contenere la varianza sul bankroll (Fractional Kelly Stake)."""
+# Quarter Kelly: frazione conservativa applicata al Kelly Criterion pieno
+# per contenere la varianza sul bankroll (Fractional Kelly Stake).
 
 HEATMAP_HIGH_THRESHOLD = 0.70
-"""Soglia Heatmap 'Verde Chiaro/Smeraldo': probabilità >= 70%."""
+# Soglia Heatmap 'Verde Chiaro/Smeraldo': probabilità >= 70%.
 
 HEATMAP_MID_THRESHOLD = 0.50
-"""Soglia Heatmap 'Giallo/Arancione': probabilità fra 50% e 69%. Sotto il
-50% la cella è 'Rosso/Grigio'."""
+# Soglia Heatmap 'Giallo/Arancione': probabilità fra 50% e 69%. Sotto il
+# 50% la cella è 'Rosso/Grigio'.
 
 
 def kelly_stake_percent(probability: float, decimal_odds: float | None, fraction: float = KELLY_FRACTION) -> float | None:
@@ -3387,10 +3387,10 @@ KELLY_MARKET_GROUPS: dict[str, str] = {
     "kelly_gg": "Goal/No Goal",
     "kelly_ng": "Goal/No Goal",
 }
-"""Raggruppamento dei mercati Kelly per famiglia correlata: usato per
-escludere Value Bet duplicate/correlate (es. Over 2.5 e Under 2.5, o due
-esiti dello stesso 1X2) dall'ordinamento e dal box Best Value Bet — solo la
-scommessa con lo Stake Kelly più alto del gruppo viene mantenuta."""
+# Raggruppamento dei mercati Kelly per famiglia correlata: usato per
+# escludere Value Bet duplicate/correlate (es. Over 2.5 e Under 2.5, o due
+# esiti dello stesso 1X2) dall'ordinamento e dal box Best Value Bet — solo la
+# scommessa con lo Stake Kelly più alto del gruppo viene mantenuta.
 
 
 def rank_value_bets(
@@ -3446,9 +3446,9 @@ ODDS_API_SPORT_KEYS: dict[str, str] = {
     "International · FIFA World Cup": "soccer_fifa_world_cup",
     "International · UEFA European Championship": "soccer_uefa_european_championship",
 }
-"""Mappatura campionato interno -> sport key di The Odds API. Se la lega
-selezionata non è mappata, get_live_odds ripiega automaticamente su None
-(inserimento manuale)."""
+# Mappatura campionato interno -> sport key di The Odds API. Se la lega
+# selezionata non è mappata, get_live_odds ripiega automaticamente su None
+# (inserimento manuale).
 
 ODDS_API_MARKET_MAP: dict[str, tuple[str, str]] = {
     "kelly_home": ("h2h", "home"),
@@ -3459,7 +3459,7 @@ ODDS_API_MARKET_MAP: dict[str, tuple[str, str]] = {
     "kelly_gg": ("btts", "Yes"),
     "kelly_ng": ("btts", "No"),
 }
-"""Mappatura chiave mercato Kelly interna -> (mercato The Odds API, esito)."""
+# Mappatura chiave mercato Kelly interna -> (mercato The Odds API, esito).
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -3644,36 +3644,36 @@ def heatmap_color(probability: float) -> tuple[str, str]:
 # dinamico su Attacco_Finale/Difesa_Finale, applicato PRIMA della matrice di
 # Dixon-Coles (vedi build_match_model, step 3).
 FATIGUE_ATTACK_MALUS_SHORT_REST = -0.08
-"""< 72 ore (≤3 giorni) dall'ultimo impegno ufficiale: malus attacco -8%."""
+# < 72 ore (≤3 giorni) dall'ultimo impegno ufficiale: malus attacco -8%.
 FATIGUE_DEFENSE_MALUS_SHORT_REST = 0.08
-"""< 72 ore: malus difesa (vulnerabilità difensiva) +8% (concede di più)."""
+# < 72 ore: malus difesa (vulnerabilità difensiva) +8% (concede di più).
 
 FATIGUE_ATTACK_MALUS_MID_REST = -0.04
-"""Tra 72 e 96 ore (4 giorni) dall'ultimo impegno: malus attacco -4%."""
+# Tra 72 e 96 ore (4 giorni) dall'ultimo impegno: malus attacco -4%.
 FATIGUE_DEFENSE_MALUS_MID_REST = 0.04
-"""Tra 72 e 96 ore: malus difesa +4%."""
+# Tra 72 e 96 ore: malus difesa +4%.
 
 FATIGUE_TRAVEL_ATTACK_MALUS = -0.03
-"""Trasferta europea/viaggio lungo nei 4 giorni precedenti: malus
-aggiuntivo attacco -3% (si somma al malus da giorni di riposo)."""
+# Trasferta europea/viaggio lungo nei 4 giorni precedenti: malus
+# aggiuntivo attacco -3% (si somma al malus da giorni di riposo).
 FATIGUE_TRAVEL_DEFENSE_MALUS = 0.03
-"""Trasferta europea/viaggio lungo: malus aggiuntivo difesa +3%."""
+# Trasferta europea/viaggio lungo: malus aggiuntivo difesa +3%.
 
 TURNOVER_LEVELS: dict[str, float] = {
     "No rotation": 0.0,
     "Partial rotation (-3%)": -0.03,
     "Heavy rotation (-7%)": -0.07,
 }
-"""Malus attacco per il Livello di Turnover Previsto in formazione."""
+# Malus attacco per il Livello di Turnover Previsto in formazione.
 
 TURNOVER_DEFENSE_FACTOR = 0.5
-"""Quota del malus di turnover che si riflette anche sulla vulnerabilità
-difensiva: una formazione rimaneggiata concede di più, ma in misura minore
-rispetto a quanto perde in fase offensiva."""
+# Quota del malus di turnover che si riflette anche sulla vulnerabilità
+# difensiva: una formazione rimaneggiata concede di più, ma in misura minore
+# rispetto a quanto perde in fase offensiva.
 
 FATIGUE_ALERT_THRESHOLD = 0.05
-"""Soglia (5%) di malus complessivo sull'attacco oltre la quale mostrare il
-badge di allerta affaticamento nell'interfaccia."""
+# Soglia (5%) di malus complessivo sull'attacco oltre la quale mostrare il
+# badge di allerta affaticamento nell'interfaccia.
 
 
 def fatigue_rest_component(rest_days: int) -> tuple[float, float]:
@@ -4287,18 +4287,18 @@ def render_monte_carlo_computing_hud(total_paths: int = 10_000, duration_seconds
 
 
 TOP_RESULT_DOMINANCE_MARGIN = 0.05
-"""Soglia (5 punti percentuali) di margine fra l'esito macro 1X2 più
-probabile e il secondo classificato, oltre la quale il Monte Carlo 'Top
-Result' (vedi run_simulation) viene forzato a un punteggio esatto coerente
-con quell'esito macro (Smart Display) anche se non è il punteggio esatto
-più frequente in assoluto. SOTTO questa soglia — cioè in un match
-genuinamente equilibrato, dove Casa/Pareggio/Trasferta sono vicini fra
-loro — si mostra invece il punteggio esatto realmente più frequente senza
-alcuna forzatura: per un match equilibrato questo è spesso 0-0 o 1-1, ed è
-esattamente il comportamento realistico richiesto (il Pareggio deve poter
-emergere come Top Result quando lo è davvero, non essere sistematicamente
-scavalcato da un risultato di Vittoria Casa/Trasferta che vince il 'voto'
-macro per una manciata di decimi di punto percentuale)."""
+# Soglia (5 punti percentuali) di margine fra l'esito macro 1X2 più
+# probabile e il secondo classificato, oltre la quale il Monte Carlo 'Top
+# Result' (vedi run_simulation) viene forzato a un punteggio esatto coerente
+# con quell'esito macro (Smart Display) anche se non è il punteggio esatto
+# più frequente in assoluto. SOTTO questa soglia — cioè in un match
+# genuinamente equilibrato, dove Casa/Pareggio/Trasferta sono vicini fra
+# loro — si mostra invece il punteggio esatto realmente più frequente senza
+# alcuna forzatura: per un match equilibrato questo è spesso 0-0 o 1-1, ed è
+# esattamente il comportamento realistico richiesto (il Pareggio deve poter
+# emergere come Top Result quando lo è davvero, non essere sistematicamente
+# scavalcato da un risultato di Vittoria Casa/Trasferta che vince il 'voto'
+# macro per una manciata di decimi di punto percentuale).
 
 
 def run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, object]:
@@ -4550,22 +4550,29 @@ def try_build_match_model(
 
 def render_login() -> None:
     st.markdown(
-        "### 🦇 Restricted Access\n"
-        "Enter the password to access the Poisson and Monte Carlo analysis engine."
+        '<div class="wl-login-card">'
+        '<div class="wl-login-badge">🦇</div>'
+        '<div class="wl-login-title">WAYNELAB</div>'
+        '<div class="wl-login-subtitle">FOOTBALL INTELLIGENCE</div>'
+        '</div>',
+        unsafe_allow_html=True,
     )
-    with st.form("login_form", clear_on_submit=False):
-        password = st.text_input(
-            "Access Password",
-            type="password",
-            placeholder="Enter the password",
-        )
-        submitted = st.form_submit_button("Log In", type="primary")
-    if submitted:
-        if password == APP_PASSWORD:
-            st.session_state.authenticated = True
-            st.rerun()
-        else:
-            st.error("Invalid password. The dashboard data remains hidden.")
+    _, login_col, _ = st.columns([1, 1.2, 1])
+    with login_col:
+        with st.form("login_form", clear_on_submit=False):
+            password = st.text_input(
+                "Access Password",
+                type="password",
+                placeholder="Enter access password",
+                label_visibility="collapsed",
+            )
+            submitted = st.form_submit_button("Log In", type="primary", use_container_width=True)
+        if submitted:
+            if password == APP_PASSWORD:
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("Invalid password.")
 
 
 def render_sidebar_controls() -> dict[str, object]:
@@ -5437,6 +5444,44 @@ section[data-testid="stSidebar"] {
 h1, h2, h3, h4, h5 {
     font-family: "Inter", "Segoe UI", -apple-system, sans-serif;
     letter-spacing: 0.01em;
+}
+
+.wl-login-card {
+    max-width: 420px;
+    margin: 8vh auto 24px auto;
+    text-align: center;
+    padding: 36px 28px 28px 28px;
+    border-radius: 20px;
+    background: linear-gradient(160deg, rgba(18, 18, 18, 0.82) 0%, rgba(5, 5, 5, 0.95) 100%);
+    border: 1px solid rgba(0, 229, 255, 0.35);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55), 0 0 30px rgba(0, 229, 255, 0.12);
+    backdrop-filter: blur(10px);
+}
+
+.wl-login-badge {
+    font-size: 2.6rem;
+    line-height: 1;
+    margin-bottom: 6px;
+    filter: drop-shadow(0 0 12px rgba(0, 229, 255, 0.45));
+}
+
+.wl-login-title {
+    font-size: 1.7rem;
+    font-weight: 900;
+    letter-spacing: 0.14em;
+    background: linear-gradient(135deg, #00e5ff, #e0e0e0);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+}
+
+.wl-login-subtitle {
+    margin-top: 4px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
+    color: #9aa0a6;
 }
 
 .league-tag {
@@ -6380,13 +6425,12 @@ def main() -> None:
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
 
-    st.markdown(
-        "# 🦇 WayneLab\n"
-        "**Football Intelligence** — probabilistic analysis and match simulations "
-        "powered by live Football-Data.org data."
-    )
-
     if st.session_state.authenticated:
+        st.markdown(
+            "# 🦇 WayneLab\n"
+            "**Football Intelligence** — probabilistic analysis and match simulations "
+            "powered by live Football-Data.org data."
+        )
         with st.sidebar:
             st.success("Access authorized.")
             if st.button("Log Out"):
