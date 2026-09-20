@@ -453,6 +453,13 @@ RED_CARD_SHARE_OF_TOTAL_CARDS = 0.045
 # football. Used only to split the existing combined "cards" baseline into a
 # Yellow/Red estimate for the Season Stats tab.
 
+SIGNIFICANT_TREND_RELATIVE_THRESHOLD = 0.12
+# Minimum relative change (12%) between a metric's SEASON average and its L5
+# (last 5 games) average for the Season Stats tab to show a 🟢/🔴 trend
+# badge next to the L5 figure — below this threshold the two windows are
+# considered statistically indistinguishable given the underlying sample
+# sizes, and no badge is shown (avoids flagging noise as a "trend").
+
 PROMOTED_TEAMS = {
     # Italy · Serie A
     "Venezia",
@@ -1721,11 +1728,29 @@ def compute_season_stats_summary(league: str, team: str) -> dict[str, object]:
     # Global Power Rating shown here is identical in methodology to the one
     # shown on the match-analysis page.
     #
-    # Every metric is tagged "live" (taken directly from Football-Data.org
-    # results) or "estimate" (the provider has no endpoint for it, so it is
-    # derived from the same transparent league baselines used elsewhere in
-    # the app — see MICRO_EVENT_BASELINES / XG_PROXY_SHOT_CONVERSION_RATE /
-    # RED_CARD_SHARE_OF_TOTAL_CARDS) — the UI must only ever present
+    # Every metric row is (label, season_avg, l5_avg, source_tag,
+    # higher_is_better): season_avg is the per-match average over every
+    # 2026/27 match played so far; l5_avg is the per-match average over
+    # ONLY the last 5 FINISHED matches (stats.recent_matches, already
+    # capped at FORM_MATCHES_WINDOW=5 and ordered most-recent-first — the
+    # exact same window used by the Team Form & H2H tab, so both tabs agree
+    # on what "L5" means). higher_is_better drives the trend-badge
+    # direction in the UI (e.g. a rising L5 Goals Conceded is a red flag,
+    # a rising L5 Clean Sheets rate is a green one).
+    #
+    # Real goals/clean-sheets data lets the L5 window genuinely diverge
+    # from the season average. For the metrics Football-Data.org has no
+    # endpoint for (shots, corners, cards, fouls, offsides, xG, saves), the
+    # SAME transparent league-baseline approach used for the season figures
+    # is reused, but rescaled with an L5-specific scoring/conceding factor
+    # derived from the real goals of just those last 5 games — so a team's
+    # recent attacking/defensive form still visibly moves the L5 estimate,
+    # without ever fabricating data the provider doesn't have. Metrics with
+    # no goals-linked scaling in the season calculation (Corners For, Fouls
+    # Committed/Suffered, Cards) stay flat league-baseline for L5 too, for
+    # the same reason — showing a fake trend there would be worse than
+    # showing none. Tagged "live" (direct Football-Data.org results) or
+    # "estimate" (baseline-derived) — the UI must only ever present
     # "estimate" metrics with a visible label, never as literal provider data.
     stats = fetch_team_live_stats(league, team)
     matches = stats.matches
@@ -1751,33 +1776,60 @@ def compute_season_stats_summary(league: str, team: str) -> dict[str, object]:
     def _per_match(total: float) -> float:
         return total / matches if matches > 0 else 0.0
 
+    # --- L5 (last 5 FINISHED matches) window --------------------------------
+    l5_entries = stats.recent_matches
+    l5_count = len(l5_entries)
+    l5_goals_for_avg = sum(float(m["scored"]) for m in l5_entries) / l5_count if l5_count > 0 else 0.0
+    l5_goals_against_avg = sum(float(m["conceded"]) for m in l5_entries) / l5_count if l5_count > 0 else 0.0
+    l5_clean_sheets_avg = (
+        sum(1 for m in l5_entries if float(m["conceded"]) == 0) / l5_count if l5_count > 0 else 0.0
+    )
+    l5_scoring_factor = clamp(0.88 + l5_goals_for_avg * 0.08, 0.88, 1.12) if l5_count > 0 else scoring_factor
+    l5_conceding_factor = clamp(0.88 + l5_goals_against_avg * 0.08, 0.88, 1.12) if l5_count > 0 else conceding_factor
+
+    l5_total_shots_avg = baseline["shots"] * l5_scoring_factor
+    l5_shots_on_target_avg = baseline["shots_on_target"] * l5_scoring_factor
+    l5_shots_on_target_against_avg = baseline["shots_on_target"] * l5_conceding_factor
+    l5_xg_for_avg = l5_shots_on_target_avg * XG_PROXY_SHOT_CONVERSION_RATE
+    l5_xg_against_avg = l5_shots_on_target_against_avg * XG_PROXY_SHOT_CONVERSION_RATE
+    l5_saves_avg = max(l5_shots_on_target_against_avg - l5_goals_against_avg, 0.0)
+    l5_corners_for_avg = baseline["corners"]
+    l5_corners_against_avg = baseline["corners"] * l5_conceding_factor
+    l5_fouls_committed_avg = baseline["fouls"]
+    l5_fouls_suffered_avg = baseline["fouls"]
+    l5_offsides_avg = baseline["offsides"] * l5_scoring_factor
+    l5_cards_avg = baseline["cards"]
+    l5_red_cards_avg = l5_cards_avg * RED_CARD_SHARE_OF_TOTAL_CARDS
+    l5_yellow_cards_avg = l5_cards_avg - l5_red_cards_avg
+
     return {
         "team": team,
         "matches": matches,
+        "l5_matches": l5_count,
         "power_rating": power_rating,
         "base_rating": base_rating,
         "base_source": base_source,
         "form_rating": form_rating,
         "offense": [
-            ("Goals Scored", stats.goals_for, _per_match(stats.goals_for), "live"),
-            ("Expected Goals (xG) For", xg_for, _per_match(xg_for), "estimate"),
-            ("Total Shots", stats.total_shots, _per_match(stats.total_shots), "estimate"),
-            ("Shots on Target", stats.shots_on_target, _per_match(stats.shots_on_target), "estimate"),
-            ("Offsides", offsides, _per_match(offsides), "estimate"),
+            ("Goals Scored", _per_match(stats.goals_for), l5_goals_for_avg, "live", True),
+            ("Expected Goals (xG) For", _per_match(xg_for), l5_xg_for_avg, "estimate", True),
+            ("Total Shots", _per_match(stats.total_shots), l5_total_shots_avg, "estimate", True),
+            ("Shots on Target", _per_match(stats.shots_on_target), l5_shots_on_target_avg, "estimate", True),
+            ("Offsides", _per_match(offsides), l5_offsides_avg, "estimate", False),
         ],
         "defense": [
-            ("Goals Conceded", stats.goals_against, _per_match(stats.goals_against), "live"),
-            ("Expected Goals (xG) Against", xg_against, _per_match(xg_against), "estimate"),
-            ("Goalkeeper Saves", goalkeeper_saves, _per_match(goalkeeper_saves), "estimate"),
-            ("Clean Sheets", float(stats.clean_sheets), _per_match(stats.clean_sheets), "live"),
+            ("Goals Conceded", _per_match(stats.goals_against), l5_goals_against_avg, "live", False),
+            ("Expected Goals (xG) Against", _per_match(xg_against), l5_xg_against_avg, "estimate", False),
+            ("Goalkeeper Saves", _per_match(goalkeeper_saves), l5_saves_avg, "estimate", True),
+            ("Clean Sheets", _per_match(stats.clean_sheets), l5_clean_sheets_avg, "live", True),
         ],
         "discipline": [
-            ("Corners For", stats.corners, _per_match(stats.corners), "estimate"),
-            ("Corners Against", corners_against, _per_match(corners_against), "estimate"),
-            ("Fouls Committed", stats.fouls, _per_match(stats.fouls), "estimate"),
-            ("Fouls Suffered", fouls_suffered, _per_match(fouls_suffered), "estimate"),
-            ("Yellow Cards", yellow_cards, _per_match(yellow_cards), "estimate"),
-            ("Red Cards", red_cards, _per_match(red_cards), "estimate"),
+            ("Corners For", _per_match(stats.corners), l5_corners_for_avg, "estimate", True),
+            ("Corners Against", _per_match(corners_against), l5_corners_against_avg, "estimate", False),
+            ("Fouls Committed", _per_match(stats.fouls), l5_fouls_committed_avg, "estimate", False),
+            ("Fouls Suffered", _per_match(fouls_suffered), l5_fouls_suffered_avg, "estimate", True),
+            ("Yellow Cards", _per_match(yellow_cards), l5_yellow_cards_avg, "estimate", False),
+            ("Red Cards", _per_match(red_cards), l5_red_cards_avg, "estimate", False),
         ],
     }
 
@@ -2642,7 +2694,8 @@ def render_season_stats_tab() -> None:
     # main dashboard's league_select/home_select/away_select).
     st.markdown(
         "### 📊 Season Stats 2026/27\n"
-        "Full per-team statistical archive for the current season, with Per Match Averages."
+        "Full per-team statistical archive for the current season: Season Average vs L5 Form Trend "
+        "(last 5 games), per match."
     )
 
     col_league, col_team = st.columns(2)
@@ -2689,7 +2742,7 @@ def render_season_stats_tab() -> None:
             st.image(crests[season_stats_team], width=64)
     with banner_name_col:
         st.markdown(f'<div class="team-name">{escape(season_stats_team)}</div>', unsafe_allow_html=True)
-        st.caption(f"{season_stats_league} · Season 2026/27")
+        st.caption(f"{season_stats_league} · Season 2026/27 · L5 window: {int(summary['l5_matches'])} games")
     with banner_matches_col:
         st.metric("Matches Played", f"{int(summary['matches'])}")
     with banner_rating_col:
@@ -2702,12 +2755,29 @@ def render_season_stats_tab() -> None:
         )
 
     # --- Metric grids (Offense / Defense & Goalkeeping / Discipline & Set Pieces) --
-    def _render_section(title: str, rows: list[tuple[str, float, float, str]], columns: int) -> None:
+    # Each card shows the SEASON average and the L5 (last 5 games) average
+    # side by side, with a 🟢/🔴 WayneLab neon trend badge next to the L5
+    # figure whenever the two windows diverge by more than
+    # SIGNIFICANT_TREND_RELATIVE_THRESHOLD — green when the L5 trend moves
+    # in the direction that's good for the team on that metric
+    # (higher_is_better), red when it moves the other way. No badge at all
+    # means the recent form is statistically in line with the season.
+    def _trend_badge(season_avg: float, l5_avg: float, higher_is_better: bool) -> str:
+        reference = max(abs(season_avg), 1e-6)
+        relative_change = (l5_avg - season_avg) / reference
+        if abs(relative_change) < SIGNIFICANT_TREND_RELATIVE_THRESHOLD:
+            return ""
+        improving = relative_change > 0 if higher_is_better else relative_change < 0
+        return " 🟢" if improving else " 🔴"
+
+    def _render_section(title: str, rows: list[tuple[str, float, float, str, bool]], columns: int) -> None:
         st.markdown(f"##### {title}")
         cards = []
-        for label, total, per_match, source_tag in rows:
-            tag_suffix = " 🔴" if source_tag == "live" else " 🧮"
-            cards.append((label + tag_suffix, f"{total:.1f} total · {per_match:.2f} / match"))
+        for label, season_avg, l5_avg, source_tag, higher_is_better in rows:
+            tag_suffix = " 📡" if source_tag == "live" else " 🧮"
+            badge = _trend_badge(season_avg, l5_avg, higher_is_better)
+            value_text = f"{season_avg:.2f} Season | {l5_avg:.2f} L5{badge}"
+            cards.append((label + tag_suffix, value_text))
         render_metric_cards(cards, columns=columns)
 
     _render_section("⚔️ Offense", summary["offense"], columns=3)
@@ -2715,10 +2785,11 @@ def render_season_stats_tab() -> None:
     _render_section("🟨 Discipline & Set Pieces", summary["discipline"], columns=3)
 
     st.caption(
-        "🔴 Live data, sourced directly from Football-Data.org results · 🧮 Estimate — Football-Data.org "
+        "📡 Live data, sourced directly from Football-Data.org results · 🧮 Estimate — Football-Data.org "
         "exposes no endpoint for this metric, so it is derived from the same transparent league baselines "
         "used elsewhere in the app (shots/corners/cards/fouls/offsides) plus a standard shot-on-target-to-goal "
-        "conversion rate for xG, never presented as literal provider data."
+        "conversion rate for xG, never presented as literal provider data. · 🟢/🔴 next to the L5 figure = the "
+        "last-5-games trend is a significant improvement/decline versus the season average for that metric."
     )
 
 
