@@ -415,23 +415,43 @@ FOOTBALL_DATA_BASE_URL = "https://api.football-data.org/v4"
 # Football-Data.org does not expose match-level shots, corners, cards or fouls.
 # These are transparent league baselines used only for the micro-event model.
 MICRO_EVENT_BASELINES: dict[str, dict[str, float]] = {
-    "SA": {"shots": 12.0, "shots_on_target": 4.1, "corners": 4.6, "cards": 2.3, "fouls": 12.8},
-    "PL": {"shots": 12.5, "shots_on_target": 4.3, "corners": 5.0, "cards": 1.8, "fouls": 10.8},
-    "ELC": {"shots": 11.8, "shots_on_target": 3.9, "corners": 4.8, "cards": 2.1, "fouls": 12.2},
-    "PD": {"shots": 12.0, "shots_on_target": 4.0, "corners": 4.9, "cards": 2.4, "fouls": 13.0},
-    "BL1": {"shots": 13.0, "shots_on_target": 4.5, "corners": 4.8, "cards": 2.0, "fouls": 11.5},
-    "FL1": {"shots": 11.7, "shots_on_target": 3.9, "corners": 4.7, "cards": 2.2, "fouls": 12.4},
-    "DED": {"shots": 13.2, "shots_on_target": 4.6, "corners": 5.2, "cards": 1.9, "fouls": 11.0},
-    "PPL": {"shots": 11.5, "shots_on_target": 3.8, "corners": 4.5, "cards": 2.6, "fouls": 13.5},
-    "CL": {"shots": 12.6, "shots_on_target": 4.4, "corners": 4.9, "cards": 1.7, "fouls": 10.5},
+    "SA": {"shots": 12.0, "shots_on_target": 4.1, "corners": 4.6, "cards": 2.3, "fouls": 12.8, "offsides": 2.1},
+    "PL": {"shots": 12.5, "shots_on_target": 4.3, "corners": 5.0, "cards": 1.8, "fouls": 10.8, "offsides": 1.9},
+    "ELC": {"shots": 11.8, "shots_on_target": 3.9, "corners": 4.8, "cards": 2.1, "fouls": 12.2, "offsides": 1.9},
+    "PD": {"shots": 12.0, "shots_on_target": 4.0, "corners": 4.9, "cards": 2.4, "fouls": 13.0, "offsides": 2.0},
+    "BL1": {"shots": 13.0, "shots_on_target": 4.5, "corners": 4.8, "cards": 2.0, "fouls": 11.5, "offsides": 2.2},
+    "FL1": {"shots": 11.7, "shots_on_target": 3.9, "corners": 4.7, "cards": 2.2, "fouls": 12.4, "offsides": 1.9},
+    "DED": {"shots": 13.2, "shots_on_target": 4.6, "corners": 5.2, "cards": 1.9, "fouls": 11.0, "offsides": 2.3},
+    "PPL": {"shots": 11.5, "shots_on_target": 3.8, "corners": 4.5, "cards": 2.6, "fouls": 13.5, "offsides": 2.0},
+    "CL": {"shots": 12.6, "shots_on_target": 4.4, "corners": 4.9, "cards": 1.7, "fouls": 10.5, "offsides": 1.8},
     # International matches: generally slightly fewer shots/corners than
     # club football (less cohesive attacking patterns, more cautious
     # setups), cards vary with the stakes of the fixture.
-    "WC": {"shots": 11.0, "shots_on_target": 3.8, "corners": 4.3, "cards": 2.2, "fouls": 12.0},
-    "EC": {"shots": 11.2, "shots_on_target": 3.9, "corners": 4.4, "cards": 2.3, "fouls": 12.2},
-    "UNL": {"shots": 10.8, "shots_on_target": 3.6, "corners": 4.1, "cards": 2.0, "fouls": 12.0},
-    "FRIENDLY": {"shots": 10.3, "shots_on_target": 3.4, "corners": 3.9, "cards": 1.5, "fouls": 10.8},
+    "WC": {"shots": 11.0, "shots_on_target": 3.8, "corners": 4.3, "cards": 2.2, "fouls": 12.0, "offsides": 1.8},
+    "EC": {"shots": 11.2, "shots_on_target": 3.9, "corners": 4.4, "cards": 2.3, "fouls": 12.2, "offsides": 1.8},
+    "UNL": {"shots": 10.8, "shots_on_target": 3.6, "corners": 4.1, "cards": 2.0, "fouls": 12.0, "offsides": 1.7},
+    "FRIENDLY": {"shots": 10.3, "shots_on_target": 3.4, "corners": 3.9, "cards": 1.5, "fouls": 10.8, "offsides": 1.6},
 }
+
+# --- Season Stats tab: proxy conversion factors ------------------------------
+# Football-Data.org exposes no official Expected Goals, goalkeeper saves,
+# offsides, corners/fouls "against", or yellow/red split. The Season Stats
+# tab (render_season_stats_tab / compute_season_stats_summary) derives
+# transparent, clearly-labelled estimates from data the provider DOES give
+# (goals, shots-on-target baseline, league-baseline cards), using the same
+# "league baseline scaled by team output" philosophy already used above for
+# shots/corners/cards/fouls — never presented as literal provider data.
+XG_PROXY_SHOT_CONVERSION_RATE = 0.32
+# Typical professional-football conversion rate from a shot ON TARGET into a
+# goal (~30-33% empirically across top leagues). Used as: xG proxy = Shots
+# on Target x this rate — a standard, defensible xG approximation when no
+# shot-quality (xG) data is available from the provider.
+
+RED_CARD_SHARE_OF_TOTAL_CARDS = 0.045
+# Fraction of the total-cards league baseline assumed to be red cards (straight
+# reds + second yellows), typically 1 in ~20-25 match-cards in professional
+# football. Used only to split the existing combined "cards" baseline into a
+# Yellow/Red estimate for the Season Stats tab.
 
 PROMOTED_TEAMS = {
     # Italy · Serie A
@@ -1099,6 +1119,10 @@ class LiveTeamStats:
     current_season_matches: int = 0
     """Partite REALI (non pesate) disputate nella stagione in corso: usato per
     la Modalità Inizio Stagione (vedi EARLY_SEASON_MATCHDAY_THRESHOLD)."""
+    clean_sheets: int = 0
+    """Numero di partite della stagione corrente (2026/27) concluse senza
+    subire gol (conceded == 0) — dato REALE, contato direttamente sui
+    risultati restituiti dall'API, non stimato su baseline di lega."""
 
 
 def current_season_start() -> int:
@@ -1426,6 +1450,7 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
 
     goals_for = goals_against = 0.0
     home_matches = away_matches = 0.0
+    clean_sheets = 0
     recent_results: list[str] = []
     recent_points: list[int] = []
     recent_match_details: list[dict[str, object]] = []
@@ -1443,6 +1468,8 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
 
         goals_for += scored
         goals_against += conceded
+        if conceded == 0:
+            clean_sheets += 1
         if is_home:
             home_matches += 1
         else:
@@ -1503,6 +1530,7 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
         recent_matches=tuple(recent_match_details),
         form_factor=form_factor,
         current_season_matches=current_season_matches,
+        clean_sheets=clean_sheets,
     )
 
 
@@ -1681,6 +1709,77 @@ def classify_match_profile(
     if home_scoring_tempo <= TACTICAL_SCORING_TEMPO_THRESHOLD and away_scoring_tempo <= TACTICAL_SCORING_TEMPO_THRESHOLD:
         return "tactical"
     return "standard"
+
+
+def compute_season_stats_summary(league: str, team: str) -> dict[str, object]:
+    # Builds the full "Season Stats 2026/27" metric set for one team,
+    # independent of any match/opponent (unlike build_match_model, which
+    # always needs a home AND an away side). Reuses the same current-season
+    # data already fetched by fetch_team_live_stats, plus the same
+    # standalone Weighted Rating Engine pieces (resolve_base_rating /
+    # compute_current_form_rating) used inside build_match_model, so the
+    # Global Power Rating shown here is identical in methodology to the one
+    # shown on the match-analysis page.
+    #
+    # Every metric is tagged "live" (taken directly from Football-Data.org
+    # results) or "estimate" (the provider has no endpoint for it, so it is
+    # derived from the same transparent league baselines used elsewhere in
+    # the app — see MICRO_EVENT_BASELINES / XG_PROXY_SHOT_CONVERSION_RATE /
+    # RED_CARD_SHARE_OF_TOTAL_CARDS) — the UI must only ever present
+    # "estimate" metrics with a visible label, never as literal provider data.
+    stats = fetch_team_live_stats(league, team)
+    matches = stats.matches
+
+    base_rating, base_source = resolve_base_rating(league, team)
+    form_rating = compute_current_form_rating(stats)
+    power_rating = BASE_RATING_WEIGHT * base_rating + FORM_RATING_WEIGHT * form_rating
+
+    baseline = MICRO_EVENT_BASELINES[FOOTBALL_DATA_COMPETITIONS[league]]
+    scoring_factor = clamp(0.88 + (stats.goals_for / matches) * 0.08, 0.88, 1.12) if matches > 0 else 1.0
+    conceding_factor = clamp(0.88 + (stats.goals_against / matches) * 0.08, 0.88, 1.12) if matches > 0 else 1.0
+
+    shots_on_target_against = baseline["shots_on_target"] * conceding_factor * matches
+    xg_for = stats.shots_on_target * XG_PROXY_SHOT_CONVERSION_RATE
+    xg_against = shots_on_target_against * XG_PROXY_SHOT_CONVERSION_RATE
+    goalkeeper_saves = max(shots_on_target_against - stats.goals_against, 0.0)
+    corners_against = baseline["corners"] * conceding_factor * matches
+    fouls_suffered = baseline["fouls"] * matches
+    offsides = baseline["offsides"] * scoring_factor * matches
+    red_cards = stats.cards * RED_CARD_SHARE_OF_TOTAL_CARDS
+    yellow_cards = stats.cards - red_cards
+
+    def _per_match(total: float) -> float:
+        return total / matches if matches > 0 else 0.0
+
+    return {
+        "team": team,
+        "matches": matches,
+        "power_rating": power_rating,
+        "base_rating": base_rating,
+        "base_source": base_source,
+        "form_rating": form_rating,
+        "offense": [
+            ("Goals Scored", stats.goals_for, _per_match(stats.goals_for), "live"),
+            ("Expected Goals (xG) For", xg_for, _per_match(xg_for), "estimate"),
+            ("Total Shots", stats.total_shots, _per_match(stats.total_shots), "estimate"),
+            ("Shots on Target", stats.shots_on_target, _per_match(stats.shots_on_target), "estimate"),
+            ("Offsides", offsides, _per_match(offsides), "estimate"),
+        ],
+        "defense": [
+            ("Goals Conceded", stats.goals_against, _per_match(stats.goals_against), "live"),
+            ("Expected Goals (xG) Against", xg_against, _per_match(xg_against), "estimate"),
+            ("Goalkeeper Saves", goalkeeper_saves, _per_match(goalkeeper_saves), "estimate"),
+            ("Clean Sheets", float(stats.clean_sheets), _per_match(stats.clean_sheets), "live"),
+        ],
+        "discipline": [
+            ("Corners For", stats.corners, _per_match(stats.corners), "estimate"),
+            ("Corners Against", corners_against, _per_match(corners_against), "estimate"),
+            ("Fouls Committed", stats.fouls, _per_match(stats.fouls), "estimate"),
+            ("Fouls Suffered", fouls_suffered, _per_match(fouls_suffered), "estimate"),
+            ("Yellow Cards", yellow_cards, _per_match(yellow_cards), "estimate"),
+            ("Red Cards", red_cards, _per_match(red_cards), "estimate"),
+        ],
+    }
 
 
 def clamp(value: float, minimum: float, maximum: float) -> float:
@@ -2533,6 +2632,93 @@ def render_team_form_tab(league: str, home: str, away: str) -> None:
 
     st.caption(
         "W = Win · D = Draw · L = Loss. Clean Sheets counts matches where the team conceded 0 goals."
+    )
+
+
+def render_season_stats_tab() -> None:
+    # Standalone team-stats archive: its own Competition/Team dropdowns,
+    # independent of whichever match is selected on the Match Analysis page
+    # (unique widget keys prefixed season_stats_ avoid clashing with the
+    # main dashboard's league_select/home_select/away_select).
+    st.markdown(
+        "### 📊 Season Stats 2026/27\n"
+        "Full per-team statistical archive for the current season, with Per Match Averages."
+    )
+
+    col_league, col_team = st.columns(2)
+    with col_league:
+        season_stats_league = st.selectbox(
+            "Competition",
+            options=list(FOOTBALL_DATA_COMPETITIONS),
+            key="season_stats_league",
+        )
+
+    try:
+        team_rows = fetch_league_teams(season_stats_league)
+    except FootballDataError as error:
+        st.error(f"Football-Data.org unavailable: {error}")
+        return
+    teams = [name for _, name in team_rows]
+    if not teams:
+        st.warning("No teams available for this competition.")
+        return
+
+    if st.session_state.get("_season_stats_last_league") != season_stats_league:
+        st.session_state["_season_stats_last_league"] = season_stats_league
+        st.session_state["season_stats_team"] = teams[0]
+
+    with col_team:
+        season_stats_team = st.selectbox("Team", options=teams, key="season_stats_team")
+
+    try:
+        crests = fetch_team_crests(season_stats_league)
+    except FootballDataError:
+        crests = {}
+
+    try:
+        summary = compute_season_stats_summary(season_stats_league, season_stats_team)
+    except FootballDataError as error:
+        st.error(f"Football-Data.org data unavailable: {error}")
+        return
+
+    # --- Compact team banner: crest, name, matches played, Power Rating ---
+    st.markdown("---")
+    banner_crest_col, banner_name_col, banner_matches_col, banner_rating_col = st.columns([0.6, 2, 1.2, 1.2])
+    with banner_crest_col:
+        if crests.get(season_stats_team):
+            st.image(crests[season_stats_team], width=64)
+    with banner_name_col:
+        st.markdown(f'<div class="team-name">{escape(season_stats_team)}</div>', unsafe_allow_html=True)
+        st.caption(f"{season_stats_league} · Season 2026/27")
+    with banner_matches_col:
+        st.metric("Matches Played", f"{int(summary['matches'])}")
+    with banner_rating_col:
+        st.metric("Global Power Rating", f"{summary['power_rating']:.0f}")
+
+    if summary["matches"] == 0:
+        st.info(
+            f"{season_stats_team} has not played a FINISHED match yet in the 2026/27 season — "
+            "these figures will populate as fixtures are completed."
+        )
+
+    # --- Metric grids (Offense / Defense & Goalkeeping / Discipline & Set Pieces) --
+    def _render_section(title: str, rows: list[tuple[str, float, float, str]], columns: int) -> None:
+        st.markdown(f"##### {title}")
+        cards = []
+        for label, total, per_match, source_tag in rows:
+            tag_suffix = " 🔴" if source_tag == "live" else " 🧮"
+            cards.append((label + tag_suffix, f"{total:.1f} total · {per_match:.2f} / match"))
+        render_metric_cards(cards, columns=columns)
+
+    _render_section("⚔️ Offense", summary["offense"], columns=3)
+    _render_section("🛡️ Defense & Goalkeeping", summary["defense"], columns=2)
+    _render_section("🟨 Discipline & Set Pieces", summary["discipline"], columns=3)
+
+    st.caption(
+        "🔴 Live data, sourced directly from Football-Data.org results · 🧮 Estimate — Football-Data.org "
+        "exposes no endpoint for this metric, so it is derived from the same transparent league baselines "
+        "used elsewhere in the app (shots/corners/cards/fouls/offsides) plus a standard shot-on-target-to-goal "
+        "conversion rate for xG, never presented as literal provider data."
     )
 
 
@@ -6439,11 +6625,13 @@ def main() -> None:
             st.markdown("---")
             sidebar_values = render_sidebar_controls()
 
-        main_tab_analysis, main_tab_bankroll = st.tabs(
-            ["⚽ Match Analysis", "📊 Bankroll & History Management"]
+        main_tab_analysis, main_tab_season_stats, main_tab_bankroll = st.tabs(
+            ["⚽ Match Analysis", "📊 Season Stats 2026/27", "📊 Bankroll & History Management"]
         )
         with main_tab_analysis:
             render_dashboard(sidebar_values)
+        with main_tab_season_stats:
+            render_season_stats_tab()
         with main_tab_bankroll:
             render_bankroll_tab()
     else:
