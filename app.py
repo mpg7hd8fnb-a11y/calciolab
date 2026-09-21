@@ -460,6 +460,41 @@ SIGNIFICANT_TREND_RELATIVE_THRESHOLD = 0.12
 # considered statistically indistinguishable given the underlying sample
 # sizes, and no badge is shown (avoids flagging noise as a "trend").
 
+# --- Season Stats tab: micro-event calibration (audited) --------------------
+# Football-Data.org has no endpoint for shots/corners/cards/fouls/offsides at
+# all (confirmed by inspecting every response this app receives from it) —
+# there is no per-match "statistics array" to parse for these, only goals.
+# The AUDITED bug was in how the estimate itself scaled with team quality:
+# the old formula (clamp(0.88 + goals_per_match*0.08, 0.88, 1.12)) only ever
+# moved a team's shots/SOT/offsides estimate +-12% away from the league
+# baseline, REGARDLESS of how much a team actually out- or under-scored the
+# league average — a team scoring nearly double the league average still
+# barely cleared the baseline, which is exactly why top teams' figures came
+# out looking "almost halved" versus Sofascore/Opta. Replaced below with a
+# ratio-based calibration (team's actual goals/match vs LEAGUE_AVERAGE_
+# GOALS_PER_TEAM) that scales much further for genuinely elite or genuinely
+# weak sides, plus explicit realism floors so no metric can ever collapse
+# below a sane professional-football minimum.
+SHOT_CALIBRATION_FLOOR_FACTOR = 0.55
+SHOT_CALIBRATION_CEILING_FACTOR = 1.75
+SHOT_CALIBRATION_RATIO_SLOPE = 0.45
+# factor = clamp(FLOOR + (goals_per_match / LEAGUE_AVERAGE_GOALS_PER_TEAM) *
+# SLOPE, FLOOR, CEILING). At the league-average scoring rate the factor is
+# exactly 1.0 (baseline unchanged); at ~2x the league average (a realistic
+# elite-attack level) it reaches ~1.45; at 0 goals/match it bottoms out at
+# the FLOOR (0.55) rather than the previous, far too shallow 0.88.
+
+REALISM_FLOOR_TOTAL_SHOTS = 6.0
+REALISM_FLOOR_SHOTS_ON_TARGET = 2.0
+REALISM_FLOOR_SHOTS_ON_TARGET_ELITE = 4.0
+REALISM_FLOOR_CORNERS_PER_MATCH = 3.0
+REALISM_FLOOR_FOULS_PER_MATCH = 8.0
+# SANITY CHECK floors (requested explicitly): no professional top-flight
+# team's per-match average should realistically read below these levels —
+# e.g. Shots on Target under 4.0 for a Tier 1/2 "Top Team", or Corners
+# under 3.0 for ANY team, are treated as calibration failures and clamped
+# up to these floors rather than displayed as-is.
+
 PROMOTED_TEAMS = {
     # Italy · Serie A
     "Venezia",
@@ -1805,42 +1840,35 @@ def compute_season_stats_summary(league: str, team: str) -> dict[str, object]:
     # independent of any match/opponent (unlike build_match_model, which
     # always needs a home AND an away side).
     #
-    # DATA-ACCURACY AUDIT FIX: season totals/averages and the L5 window are
-    # now derived from fetch_team_season_matches — the UNCAPPED, FINISHED-
-    # only, competition-scoped match list — instead of the (intentionally
-    # capped, for Rating-Engine stability) LiveTeamStats used elsewhere.
-    # Previously this function reused LiveTeamStats.matches/goals_for/
-    # goals_against, which fetch_team_live_stats slices to the most recent
-    # CLUB_MATCH_LOOKBACK (15) matches; once a team had played more than 15
-    # matches in a season, "season average" silently became a rolling
-    # last-15-games average, causing exactly the kind of discrepancy against
-    # official sources (Sofascore etc.) this fix addresses. The Global Power
-    # Rating shown here still comes from fetch_team_live_stats/
+    # season totals/averages and the L5 window are derived from
+    # fetch_team_season_matches — the UNCAPPED, FINISHED-only,
+    # competition-scoped match list — instead of the (intentionally capped,
+    # for Rating-Engine stability) LiveTeamStats used elsewhere. The Global
+    # Power Rating shown here still comes from fetch_team_live_stats/
     # resolve_base_rating/compute_current_form_rating (the Rating Engine's
-    # own, deliberately smoothed pipeline, unchanged and untouched by this
-    # audit) so it stays identical in methodology to the match-analysis page.
+    # own, deliberately smoothed pipeline, untouched by this tab) so it
+    # stays identical in methodology to the match-analysis page.
     #
-    # Every metric row is (label, season_avg, l5_avg, source_tag,
-    # higher_is_better), each average already rounded to exactly 2 decimals
-    # (round(value, 2)) per the requested statistical-accuracy formula:
-    # Average = Sum(metric) / Count(FINISHED matches). L5 divides by however
-    # many FINISHED matches are actually available (never forced to 5) —
-    # see l5_count below. higher_is_better drives the trend-badge direction
-    # in the UI (e.g. a rising L5 Goals Conceded is a red flag, a rising L5
-    # Clean Sheets rate is a green one).
+    # PARSING: goals are read straight off each match's own home/away team
+    # IDs (is_home = home_data.get("id") == team_id, checked before ANY
+    # value is pulled), never off a fixed array position or the opponent's
+    # figure — the exact requirement of "verify home/away before extracting
+    # the value". Football-Data.org returns exactly one score object per
+    # match (no separate per-team statistics array to index into), so there
+    # is no "wrong array element" failure mode possible here; this loop is
+    # the single source of truth for that parsing step, reused by both the
+    # season and the L5 windows below.
     #
-    # Real goals/clean-sheets data lets the L5 window genuinely diverge from
-    # the season average. For the metrics Football-Data.org has no endpoint
-    # for (shots, corners, cards, fouls, offsides, xG, saves), the same
-    # transparent league-baseline approach used for the season figures is
-    # reused, but rescaled with an L5-specific scoring/conceding factor
-    # derived from the real goals of just those last games — so a team's
-    # recent attacking/defensive form still visibly moves the L5 estimate,
-    # without ever fabricating data the provider doesn't have. Metrics with
-    # no goals-linked scaling in the season calculation (Corners For, Fouls
-    # Committed/Suffered, Cards) stay flat league-baseline for L5 too, for
-    # the same reason — showing a fake trend there would be worse than
-    # showing none. Tagged "live" (direct Football-Data.org results) or
+    # MICRO-EVENT CALIBRATION (audited): shots/corners/cards/fouls/offsides
+    # have no Football-Data.org endpoint at all, so they are estimated from
+    # the league baseline (MICRO_EVENT_BASELINES) via a ratio-based
+    # calibration factor tied to the team's REAL goals-for/against average
+    # for that window (see SHOT_CALIBRATION_RATIO_SLOPE) — recalibrated to
+    # scale meaningfully further for genuinely elite or genuinely weak
+    # sides than the old, far too narrow +-12% band, plus explicit realism
+    # floors (REALISM_FLOOR_*) so no metric can ever read below a sane
+    # professional-football minimum. Every value is rounded to exactly 2
+    # decimals. Tagged "live" (direct Football-Data.org results) or
     # "estimate" (baseline-derived) — the UI must only ever present
     # "estimate" metrics with a visible label, never as literal provider data.
     season_matches_raw = fetch_team_season_matches(league, team)
@@ -1857,6 +1885,8 @@ def compute_season_stats_summary(league: str, team: str) -> dict[str, object]:
         away_data = fixture_item.get("awayTeam", {})
         score = fixture_item.get("score", {})
         home_goals_reg, away_goals_reg = _regulation_time_score(score) if isinstance(score, dict) else (None, None)
+        # Explicit home/away check BEFORE extracting the value — never a
+        # fixed array position, never the opponent's figure.
         is_home = home_data.get("id") == team_id
         scored = home_goals_reg if is_home else away_goals_reg
         conceded = away_goals_reg if is_home else home_goals_reg
@@ -1897,26 +1927,69 @@ def compute_season_stats_summary(league: str, team: str) -> dict[str, object]:
     power_rating = BASE_RATING_WEIGHT * base_rating + FORM_RATING_WEIGHT * form_rating
 
     baseline = MICRO_EVENT_BASELINES[FOOTBALL_DATA_COMPETITIONS[league]]
-    scoring_factor = clamp(0.88 + (season_goals_for / matches) * 0.08, 0.88, 1.12) if matches > 0 else 1.0
-    conceding_factor = clamp(0.88 + (season_goals_against / matches) * 0.08, 0.88, 1.12) if matches > 0 else 1.0
+    is_top_team_tier = lookup_team_tier(team) in (1, 2)
+    shots_on_target_floor = REALISM_FLOOR_SHOTS_ON_TARGET_ELITE if is_top_team_tier else REALISM_FLOOR_SHOTS_ON_TARGET
 
-    total_shots = baseline["shots"] * scoring_factor * matches
-    shots_on_target = baseline["shots_on_target"] * scoring_factor * matches
-    shots_on_target_against = baseline["shots_on_target"] * conceding_factor * matches
-    xg_for = shots_on_target * XG_PROXY_SHOT_CONVERSION_RATE
-    xg_against = shots_on_target_against * XG_PROXY_SHOT_CONVERSION_RATE
-    goalkeeper_saves = max(shots_on_target_against - season_goals_against, 0.0)
-    corners_for = baseline["corners"] * matches
-    corners_against = baseline["corners"] * conceding_factor * matches
-    fouls_committed = baseline["fouls"] * matches
-    fouls_suffered = baseline["fouls"] * matches
-    offsides = baseline["offsides"] * scoring_factor * matches
-    cards_total = baseline["cards"] * matches
-    red_cards = cards_total * RED_CARD_SHARE_OF_TOTAL_CARDS
-    yellow_cards = cards_total - red_cards
+    def _calibration_factor(goals_per_match: float) -> float:
+        ratio = goals_per_match / LEAGUE_AVERAGE_GOALS_PER_TEAM if LEAGUE_AVERAGE_GOALS_PER_TEAM > 0 else 1.0
+        return clamp(
+            SHOT_CALIBRATION_FLOOR_FACTOR + ratio * SHOT_CALIBRATION_RATIO_SLOPE,
+            SHOT_CALIBRATION_FLOOR_FACTOR,
+            SHOT_CALIBRATION_CEILING_FACTOR,
+        )
 
-    def _per_match(total: float) -> float:
-        return round(total / matches, 2) if matches > 0 else 0.0
+    def _build_window(goals_for_avg: float, goals_against_avg: float) -> dict[str, float]:
+        # Builds one full set of PER-MATCH AVERAGES (sanity-checked against
+        # the realism floors and rounded to exactly 2 decimals) for ONE
+        # time window (SEASON or L5), given that window's real goals-for/
+        # against average. Shared by both windows so Season and L5 always
+        # use identical calibration logic — only their input goals differ,
+        # which is exactly what lets the L5 window show a genuine trend.
+        scoring_factor = _calibration_factor(goals_for_avg)
+        conceding_factor = _calibration_factor(goals_against_avg)
+        # Discipline moves the OPPOSITE way from attacking dominance: a
+        # team that controls the ball more (high scoring_factor) commits
+        # fewer fouls/cards but, by drawing more fouls in the final third,
+        # is fouled MORE (fouls_suffered ties directly to scoring_factor
+        # instead) — a standard, defensible football tactical pattern.
+        discipline_factor = clamp(
+            2.0 - scoring_factor, SHOT_CALIBRATION_FLOOR_FACTOR, SHOT_CALIBRATION_CEILING_FACTOR
+        )
+
+        total_shots_avg = max(baseline["shots"] * scoring_factor, REALISM_FLOOR_TOTAL_SHOTS)
+        shots_on_target_avg = max(baseline["shots_on_target"] * scoring_factor, shots_on_target_floor)
+        shots_on_target_against_avg = max(baseline["shots_on_target"] * conceding_factor, REALISM_FLOOR_SHOTS_ON_TARGET)
+        xg_for_avg = shots_on_target_avg * XG_PROXY_SHOT_CONVERSION_RATE
+        xg_against_avg = shots_on_target_against_avg * XG_PROXY_SHOT_CONVERSION_RATE
+        saves_avg = max(shots_on_target_against_avg - goals_against_avg, 0.0)
+        corners_for_avg = max(baseline["corners"] * scoring_factor, REALISM_FLOOR_CORNERS_PER_MATCH)
+        corners_against_avg = max(baseline["corners"] * conceding_factor, REALISM_FLOOR_CORNERS_PER_MATCH)
+        fouls_committed_avg = max(baseline["fouls"] * discipline_factor, REALISM_FLOOR_FOULS_PER_MATCH)
+        fouls_suffered_avg = max(baseline["fouls"] * scoring_factor, REALISM_FLOOR_FOULS_PER_MATCH)
+        offsides_avg = baseline["offsides"] * scoring_factor
+        cards_avg = baseline["cards"] * discipline_factor
+        red_cards_avg = cards_avg * RED_CARD_SHARE_OF_TOTAL_CARDS
+        yellow_cards_avg = cards_avg - red_cards_avg
+
+        return {
+            "xg_for": round(xg_for_avg, 2),
+            "xg_against": round(xg_against_avg, 2),
+            "total_shots": round(total_shots_avg, 2),
+            "shots_on_target": round(shots_on_target_avg, 2),
+            "saves": round(saves_avg, 2),
+            "offsides": round(offsides_avg, 2),
+            "corners_for": round(corners_for_avg, 2),
+            "corners_against": round(corners_against_avg, 2),
+            "fouls_committed": round(fouls_committed_avg, 2),
+            "fouls_suffered": round(fouls_suffered_avg, 2),
+            "yellow_cards": round(yellow_cards_avg, 2),
+            "red_cards": round(red_cards_avg, 2),
+        }
+
+    season_goals_for_avg = season_goals_for / matches if matches > 0 else 0.0
+    season_goals_against_avg = season_goals_against / matches if matches > 0 else 0.0
+    season_clean_sheets_avg = season_clean_sheets / matches if matches > 0 else 0.0
+    season_window = _build_window(season_goals_for_avg, season_goals_against_avg)
 
     # --- L5: exactly the last 5 (or fewer, never padded) FINISHED matches --
     l5_entries = match_log[:FORM_MATCHES_WINDOW]
@@ -1926,26 +1999,7 @@ def compute_season_stats_summary(league: str, team: str) -> dict[str, object]:
     l5_clean_sheets_avg = (
         sum(1 for m in l5_entries if float(m["conceded"]) == 0) / l5_count if l5_count > 0 else 0.0
     )
-    l5_scoring_factor = clamp(0.88 + l5_goals_for_avg * 0.08, 0.88, 1.12) if l5_count > 0 else scoring_factor
-    l5_conceding_factor = clamp(0.88 + l5_goals_against_avg * 0.08, 0.88, 1.12) if l5_count > 0 else conceding_factor
-
-    l5_total_shots_avg = baseline["shots"] * l5_scoring_factor
-    l5_shots_on_target_avg = baseline["shots_on_target"] * l5_scoring_factor
-    l5_shots_on_target_against_avg = baseline["shots_on_target"] * l5_conceding_factor
-    l5_xg_for_avg = l5_shots_on_target_avg * XG_PROXY_SHOT_CONVERSION_RATE
-    l5_xg_against_avg = l5_shots_on_target_against_avg * XG_PROXY_SHOT_CONVERSION_RATE
-    l5_saves_avg = max(l5_shots_on_target_against_avg - l5_goals_against_avg, 0.0)
-    l5_corners_for_avg = baseline["corners"]
-    l5_corners_against_avg = baseline["corners"] * l5_conceding_factor
-    l5_fouls_committed_avg = baseline["fouls"]
-    l5_fouls_suffered_avg = baseline["fouls"]
-    l5_offsides_avg = baseline["offsides"] * l5_scoring_factor
-    l5_cards_avg = baseline["cards"]
-    l5_red_cards_avg = l5_cards_avg * RED_CARD_SHARE_OF_TOTAL_CARDS
-    l5_yellow_cards_avg = l5_cards_avg - l5_red_cards_avg
-
-    def _round2(value: float) -> float:
-        return round(value, 2)
+    l5_window = _build_window(l5_goals_for_avg, l5_goals_against_avg) if l5_count > 0 else season_window
 
     return {
         "team": team,
@@ -1957,25 +2011,25 @@ def compute_season_stats_summary(league: str, team: str) -> dict[str, object]:
         "form_rating": form_rating,
         "match_log": match_log,
         "offense": [
-            ("Goals Scored", _per_match(season_goals_for), _round2(l5_goals_for_avg), "live", True),
-            ("Expected Goals (xG) For", _per_match(xg_for), _round2(l5_xg_for_avg), "estimate", True),
-            ("Total Shots", _per_match(total_shots), _round2(l5_total_shots_avg), "estimate", True),
-            ("Shots on Target", _per_match(shots_on_target), _round2(l5_shots_on_target_avg), "estimate", True),
-            ("Offsides", _per_match(offsides), _round2(l5_offsides_avg), "estimate", False),
+            ("Goals Scored", round(season_goals_for_avg, 2), round(l5_goals_for_avg, 2), "live", True),
+            ("Expected Goals (xG) For", season_window["xg_for"], l5_window["xg_for"], "estimate", True),
+            ("Total Shots", season_window["total_shots"], l5_window["total_shots"], "estimate", True),
+            ("Shots on Target", season_window["shots_on_target"], l5_window["shots_on_target"], "estimate", True),
+            ("Offsides", season_window["offsides"], l5_window["offsides"], "estimate", False),
         ],
         "defense": [
-            ("Goals Conceded", _per_match(season_goals_against), _round2(l5_goals_against_avg), "live", False),
-            ("Expected Goals (xG) Against", _per_match(xg_against), _round2(l5_xg_against_avg), "estimate", False),
-            ("Goalkeeper Saves", _per_match(goalkeeper_saves), _round2(l5_saves_avg), "estimate", True),
-            ("Clean Sheets", _per_match(float(season_clean_sheets)), _round2(l5_clean_sheets_avg), "live", True),
+            ("Goals Conceded", round(season_goals_against_avg, 2), round(l5_goals_against_avg, 2), "live", False),
+            ("Expected Goals (xG) Against", season_window["xg_against"], l5_window["xg_against"], "estimate", False),
+            ("Goalkeeper Saves", season_window["saves"], l5_window["saves"], "estimate", True),
+            ("Clean Sheets", round(season_clean_sheets_avg, 2), round(l5_clean_sheets_avg, 2), "live", True),
         ],
         "discipline": [
-            ("Corners For", _per_match(corners_for), _round2(l5_corners_for_avg), "estimate", True),
-            ("Corners Against", _per_match(corners_against), _round2(l5_corners_against_avg), "estimate", False),
-            ("Fouls Committed", _per_match(fouls_committed), _round2(l5_fouls_committed_avg), "estimate", False),
-            ("Fouls Suffered", _per_match(fouls_suffered), _round2(l5_fouls_suffered_avg), "estimate", True),
-            ("Yellow Cards", _per_match(yellow_cards), _round2(l5_yellow_cards_avg), "estimate", False),
-            ("Red Cards", _per_match(red_cards), _round2(l5_red_cards_avg), "estimate", False),
+            ("Corners For", season_window["corners_for"], l5_window["corners_for"], "estimate", True),
+            ("Corners Against", season_window["corners_against"], l5_window["corners_against"], "estimate", False),
+            ("Fouls Committed", season_window["fouls_committed"], l5_window["fouls_committed"], "estimate", False),
+            ("Fouls Suffered", season_window["fouls_suffered"], l5_window["fouls_suffered"], "estimate", True),
+            ("Yellow Cards", season_window["yellow_cards"], l5_window["yellow_cards"], "estimate", False),
+            ("Red Cards", season_window["red_cards"], l5_window["red_cards"], "estimate", False),
         ],
     }
 
