@@ -1403,6 +1403,55 @@ def fetch_team_recent_matches_extended(
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def fetch_team_season_matches(league: str, team_name: str) -> tuple[dict[str, object], ...]:
+    # AUDIT-GRADE, UNCAPPED fetch: every 'FINISHED' 2026/27 match for
+    # `team_name` in `league` ONLY — no CLUB_MATCH_LOOKBACK slicing. That
+    # cap exists solely to keep the Weighted Rating Engine's Current Form
+    # Rating stable (fetch_team_live_stats/compute_current_form_rating) and
+    # is correct for that purpose, but it silently truncated the "season
+    # average" shown in the Season Stats tab to a rolling last-15-games
+    # window once a team had played more than that many matches this
+    # season (exactly the PSG-vs-Sofascore discrepancy this fix addresses).
+    # Season Stats must divide by the REAL number of matches played, so it
+    # gets its own uncapped source instead of reusing LiveTeamStats.matches.
+    # Sorted most-recent-first (same convention as fetch_league_matches),
+    # scoped to the SELECTED COMPETITION ONLY (Football-Data.org's
+    # /competitions/{code}/matches endpoint never mixes in other
+    # competitions a club also plays, e.g. Champions League fixtures never
+    # leak into a Ligue 1 lookup) and to FINISHED matches only (postponed/
+    # scheduled/cancelled fixtures have no fullTime score and are dropped
+    # by _match_has_final_score).
+    team_map = dict(fetch_league_teams(league))
+    team_id = next((id_ for id_, name in team_map.items() if name == team_name), None)
+    if team_id is None:
+        raise FootballDataError(f"The team {team_name} is not available in Football-Data.org.")
+
+    if is_national_team_competition(league):
+        # National teams have no meaningful "all matches in this
+        # competition" concept (a single tournament's own fixture list is
+        # often near-empty between windows) — reuse the same broader,
+        # cross-competition lookback already used elsewhere for them.
+        try:
+            source_matches = fetch_team_recent_matches_extended(league, team_name, limit=50)
+        except FootballDataError:
+            source_matches = fetch_league_matches(league)
+    else:
+        source_matches = fetch_league_matches(league)
+
+    return tuple(
+        match
+        for match in source_matches
+        if _match_has_final_score(match)
+        and (
+            match["homeTeam"].get("id") == team_id
+            or match["awayTeam"].get("id") == team_id
+            or match["homeTeam"].get("name") == team_name
+            or match["awayTeam"].get("name") == team_name
+        )
+    )
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
     """CURRENT-SEASON-ONLY statistics for `team_name`: goals, the shots/
     corners/cards/fouls baseline, Recent Form and the Current Form Rating
@@ -1721,29 +1770,38 @@ def classify_match_profile(
 def compute_season_stats_summary(league: str, team: str) -> dict[str, object]:
     # Builds the full "Season Stats 2026/27" metric set for one team,
     # independent of any match/opponent (unlike build_match_model, which
-    # always needs a home AND an away side). Reuses the same current-season
-    # data already fetched by fetch_team_live_stats, plus the same
-    # standalone Weighted Rating Engine pieces (resolve_base_rating /
-    # compute_current_form_rating) used inside build_match_model, so the
-    # Global Power Rating shown here is identical in methodology to the one
-    # shown on the match-analysis page.
+    # always needs a home AND an away side).
+    #
+    # DATA-ACCURACY AUDIT FIX: season totals/averages and the L5 window are
+    # now derived from fetch_team_season_matches — the UNCAPPED, FINISHED-
+    # only, competition-scoped match list — instead of the (intentionally
+    # capped, for Rating-Engine stability) LiveTeamStats used elsewhere.
+    # Previously this function reused LiveTeamStats.matches/goals_for/
+    # goals_against, which fetch_team_live_stats slices to the most recent
+    # CLUB_MATCH_LOOKBACK (15) matches; once a team had played more than 15
+    # matches in a season, "season average" silently became a rolling
+    # last-15-games average, causing exactly the kind of discrepancy against
+    # official sources (Sofascore etc.) this fix addresses. The Global Power
+    # Rating shown here still comes from fetch_team_live_stats/
+    # resolve_base_rating/compute_current_form_rating (the Rating Engine's
+    # own, deliberately smoothed pipeline, unchanged and untouched by this
+    # audit) so it stays identical in methodology to the match-analysis page.
     #
     # Every metric row is (label, season_avg, l5_avg, source_tag,
-    # higher_is_better): season_avg is the per-match average over every
-    # 2026/27 match played so far; l5_avg is the per-match average over
-    # ONLY the last 5 FINISHED matches (stats.recent_matches, already
-    # capped at FORM_MATCHES_WINDOW=5 and ordered most-recent-first — the
-    # exact same window used by the Team Form & H2H tab, so both tabs agree
-    # on what "L5" means). higher_is_better drives the trend-badge
-    # direction in the UI (e.g. a rising L5 Goals Conceded is a red flag,
-    # a rising L5 Clean Sheets rate is a green one).
+    # higher_is_better), each average already rounded to exactly 2 decimals
+    # (round(value, 2)) per the requested statistical-accuracy formula:
+    # Average = Sum(metric) / Count(FINISHED matches). L5 divides by however
+    # many FINISHED matches are actually available (never forced to 5) —
+    # see l5_count below. higher_is_better drives the trend-badge direction
+    # in the UI (e.g. a rising L5 Goals Conceded is a red flag, a rising L5
+    # Clean Sheets rate is a green one).
     #
-    # Real goals/clean-sheets data lets the L5 window genuinely diverge
-    # from the season average. For the metrics Football-Data.org has no
-    # endpoint for (shots, corners, cards, fouls, offsides, xG, saves), the
-    # SAME transparent league-baseline approach used for the season figures
-    # is reused, but rescaled with an L5-specific scoring/conceding factor
-    # derived from the real goals of just those last 5 games — so a team's
+    # Real goals/clean-sheets data lets the L5 window genuinely diverge from
+    # the season average. For the metrics Football-Data.org has no endpoint
+    # for (shots, corners, cards, fouls, offsides, xG, saves), the same
+    # transparent league-baseline approach used for the season figures is
+    # reused, but rescaled with an L5-specific scoring/conceding factor
+    # derived from the real goals of just those last games — so a team's
     # recent attacking/defensive form still visibly moves the L5 estimate,
     # without ever fabricating data the provider doesn't have. Metrics with
     # no goals-linked scaling in the season calculation (Corners For, Fouls
@@ -1752,32 +1810,83 @@ def compute_season_stats_summary(league: str, team: str) -> dict[str, object]:
     # showing none. Tagged "live" (direct Football-Data.org results) or
     # "estimate" (baseline-derived) — the UI must only ever present
     # "estimate" metrics with a visible label, never as literal provider data.
-    stats = fetch_team_live_stats(league, team)
-    matches = stats.matches
+    season_matches_raw = fetch_team_season_matches(league, team)
 
+    team_map = dict(fetch_league_teams(league))
+    team_id = next((id_ for id_, name in team_map.items() if name == team), None)
+
+    match_log: list[dict[str, object]] = []
+    season_goals_for = 0.0
+    season_goals_against = 0.0
+    season_clean_sheets = 0
+    for fixture_item in season_matches_raw:
+        home_data = fixture_item.get("homeTeam", {})
+        away_data = fixture_item.get("awayTeam", {})
+        score = fixture_item.get("score", {})
+        full_time = score.get("fullTime", {}) if isinstance(score, dict) else {}
+        is_home = home_data.get("id") == team_id
+        scored = _number(full_time.get("home" if is_home else "away"))
+        conceded = _number(full_time.get("away" if is_home else "home"))
+        if scored is None or conceded is None:
+            continue
+        season_goals_for += scored
+        season_goals_against += conceded
+        if conceded == 0:
+            season_clean_sheets += 1
+        opponent_name = str((away_data if is_home else home_data).get("name", "Unknown"))
+        if scored > conceded:
+            result = "W"
+        elif scored == conceded:
+            result = "D"
+        else:
+            result = "L"
+        match_log.append(
+            {
+                "date": str(fixture_item.get("utcDate", ""))[:10],
+                "venue": "Home" if is_home else "Away",
+                "opponent": opponent_name,
+                "scored": scored,
+                "conceded": conceded,
+                "result": result,
+            }
+        )
+    # fetch_team_season_matches already returns matches most-recent-first
+    # (same convention as fetch_league_matches), so match_log preserves that
+    # chronological-reverse order without any extra sorting needed.
+    matches = float(len(match_log))
+    finished_match_count = len(match_log)  # exact FINISHED count for the audit panel
+
+    # Global Power Rating: unchanged Rating-Engine pipeline (deliberately
+    # uses the capped, smoothed LiveTeamStats — not part of this audit).
+    rating_stats = fetch_team_live_stats(league, team)
     base_rating, base_source = resolve_base_rating(league, team)
-    form_rating = compute_current_form_rating(stats)
+    form_rating = compute_current_form_rating(rating_stats)
     power_rating = BASE_RATING_WEIGHT * base_rating + FORM_RATING_WEIGHT * form_rating
 
     baseline = MICRO_EVENT_BASELINES[FOOTBALL_DATA_COMPETITIONS[league]]
-    scoring_factor = clamp(0.88 + (stats.goals_for / matches) * 0.08, 0.88, 1.12) if matches > 0 else 1.0
-    conceding_factor = clamp(0.88 + (stats.goals_against / matches) * 0.08, 0.88, 1.12) if matches > 0 else 1.0
+    scoring_factor = clamp(0.88 + (season_goals_for / matches) * 0.08, 0.88, 1.12) if matches > 0 else 1.0
+    conceding_factor = clamp(0.88 + (season_goals_against / matches) * 0.08, 0.88, 1.12) if matches > 0 else 1.0
 
+    total_shots = baseline["shots"] * scoring_factor * matches
+    shots_on_target = baseline["shots_on_target"] * scoring_factor * matches
     shots_on_target_against = baseline["shots_on_target"] * conceding_factor * matches
-    xg_for = stats.shots_on_target * XG_PROXY_SHOT_CONVERSION_RATE
+    xg_for = shots_on_target * XG_PROXY_SHOT_CONVERSION_RATE
     xg_against = shots_on_target_against * XG_PROXY_SHOT_CONVERSION_RATE
-    goalkeeper_saves = max(shots_on_target_against - stats.goals_against, 0.0)
+    goalkeeper_saves = max(shots_on_target_against - season_goals_against, 0.0)
+    corners_for = baseline["corners"] * matches
     corners_against = baseline["corners"] * conceding_factor * matches
+    fouls_committed = baseline["fouls"] * matches
     fouls_suffered = baseline["fouls"] * matches
     offsides = baseline["offsides"] * scoring_factor * matches
-    red_cards = stats.cards * RED_CARD_SHARE_OF_TOTAL_CARDS
-    yellow_cards = stats.cards - red_cards
+    cards_total = baseline["cards"] * matches
+    red_cards = cards_total * RED_CARD_SHARE_OF_TOTAL_CARDS
+    yellow_cards = cards_total - red_cards
 
     def _per_match(total: float) -> float:
-        return total / matches if matches > 0 else 0.0
+        return round(total / matches, 2) if matches > 0 else 0.0
 
-    # --- L5 (last 5 FINISHED matches) window --------------------------------
-    l5_entries = stats.recent_matches
+    # --- L5: exactly the last 5 (or fewer, never padded) FINISHED matches --
+    l5_entries = match_log[:FORM_MATCHES_WINDOW]
     l5_count = len(l5_entries)
     l5_goals_for_avg = sum(float(m["scored"]) for m in l5_entries) / l5_count if l5_count > 0 else 0.0
     l5_goals_against_avg = sum(float(m["conceded"]) for m in l5_entries) / l5_count if l5_count > 0 else 0.0
@@ -1802,34 +1911,38 @@ def compute_season_stats_summary(league: str, team: str) -> dict[str, object]:
     l5_red_cards_avg = l5_cards_avg * RED_CARD_SHARE_OF_TOTAL_CARDS
     l5_yellow_cards_avg = l5_cards_avg - l5_red_cards_avg
 
+    def _round2(value: float) -> float:
+        return round(value, 2)
+
     return {
         "team": team,
-        "matches": matches,
+        "matches": finished_match_count,
         "l5_matches": l5_count,
         "power_rating": power_rating,
         "base_rating": base_rating,
         "base_source": base_source,
         "form_rating": form_rating,
+        "match_log": match_log,
         "offense": [
-            ("Goals Scored", _per_match(stats.goals_for), l5_goals_for_avg, "live", True),
-            ("Expected Goals (xG) For", _per_match(xg_for), l5_xg_for_avg, "estimate", True),
-            ("Total Shots", _per_match(stats.total_shots), l5_total_shots_avg, "estimate", True),
-            ("Shots on Target", _per_match(stats.shots_on_target), l5_shots_on_target_avg, "estimate", True),
-            ("Offsides", _per_match(offsides), l5_offsides_avg, "estimate", False),
+            ("Goals Scored", _per_match(season_goals_for), _round2(l5_goals_for_avg), "live", True),
+            ("Expected Goals (xG) For", _per_match(xg_for), _round2(l5_xg_for_avg), "estimate", True),
+            ("Total Shots", _per_match(total_shots), _round2(l5_total_shots_avg), "estimate", True),
+            ("Shots on Target", _per_match(shots_on_target), _round2(l5_shots_on_target_avg), "estimate", True),
+            ("Offsides", _per_match(offsides), _round2(l5_offsides_avg), "estimate", False),
         ],
         "defense": [
-            ("Goals Conceded", _per_match(stats.goals_against), l5_goals_against_avg, "live", False),
-            ("Expected Goals (xG) Against", _per_match(xg_against), l5_xg_against_avg, "estimate", False),
-            ("Goalkeeper Saves", _per_match(goalkeeper_saves), l5_saves_avg, "estimate", True),
-            ("Clean Sheets", _per_match(stats.clean_sheets), l5_clean_sheets_avg, "live", True),
+            ("Goals Conceded", _per_match(season_goals_against), _round2(l5_goals_against_avg), "live", False),
+            ("Expected Goals (xG) Against", _per_match(xg_against), _round2(l5_xg_against_avg), "estimate", False),
+            ("Goalkeeper Saves", _per_match(goalkeeper_saves), _round2(l5_saves_avg), "estimate", True),
+            ("Clean Sheets", _per_match(float(season_clean_sheets)), _round2(l5_clean_sheets_avg), "live", True),
         ],
         "discipline": [
-            ("Corners For", _per_match(stats.corners), l5_corners_for_avg, "estimate", True),
-            ("Corners Against", _per_match(corners_against), l5_corners_against_avg, "estimate", False),
-            ("Fouls Committed", _per_match(stats.fouls), l5_fouls_committed_avg, "estimate", False),
-            ("Fouls Suffered", _per_match(fouls_suffered), l5_fouls_suffered_avg, "estimate", True),
-            ("Yellow Cards", _per_match(yellow_cards), l5_yellow_cards_avg, "estimate", False),
-            ("Red Cards", _per_match(red_cards), l5_red_cards_avg, "estimate", False),
+            ("Corners For", _per_match(corners_for), _round2(l5_corners_for_avg), "estimate", True),
+            ("Corners Against", _per_match(corners_against), _round2(l5_corners_against_avg), "estimate", False),
+            ("Fouls Committed", _per_match(fouls_committed), _round2(l5_fouls_committed_avg), "estimate", False),
+            ("Fouls Suffered", _per_match(fouls_suffered), _round2(l5_fouls_suffered_avg), "estimate", True),
+            ("Yellow Cards", _per_match(yellow_cards), _round2(l5_yellow_cards_avg), "estimate", False),
+            ("Red Cards", _per_match(red_cards), _round2(l5_red_cards_avg), "estimate", False),
         ],
     }
 
@@ -2791,6 +2904,36 @@ def render_season_stats_tab() -> None:
         "conversion rate for xG, never presented as literal provider data. · 🟢/🔴 next to the L5 figure = the "
         "last-5-games trend is a significant improvement/decline versus the season average for that metric."
     )
+
+    with st.expander("🔍 Data Integrity & Match Log", expanded=False):
+        st.markdown(
+            f"**FINISHED matches detected by the API for {escape(season_stats_team)} in "
+            f"{escape(season_stats_league)} (2026/27):** {int(summary['matches'])}"
+        )
+        st.caption(
+            "Season averages above = Sum(metric) / this exact count. If this number looks lower than what "
+            "you see on an official source, the match is most likely still SCHEDULED/POSTPONED rather than "
+            "FINISHED in Football-Data.org's data, or was played in a different competition than the one "
+            "selected here (e.g. a Champions League fixture doesn't count toward a Ligue 1 average, by design)."
+        )
+        match_log = summary.get("match_log", [])
+        if not match_log:
+            st.info("No FINISHED matches on record yet for this team in this competition.")
+        else:
+            log_frame = pd.DataFrame(
+                [
+                    {
+                        "Date": entry["date"] or "n/a",
+                        "Venue": entry["venue"],
+                        "Opponent": entry["opponent"],
+                        "Score": f"{int(entry['scored'])}-{int(entry['conceded'])}",
+                        "Result": entry["result"],
+                    }
+                    for entry in match_log
+                ]
+            )
+            st.caption(f"L5 Form Trend above uses the top {min(5, len(match_log))} rows of this table (most recent first).")
+            st.dataframe(log_frame, use_container_width=True, hide_index=True)
 
 
 def render_multi_esito_tab(model: MatchModel, home: str, away: str) -> None:
