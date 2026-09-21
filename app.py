@@ -1241,17 +1241,36 @@ def _parse_finished_matches(payload: dict[str, object]) -> tuple[dict[str, objec
     return tuple(matches)
 
 
+def _regulation_time_score(score: dict[str, object]) -> tuple[float | None, float | None]:
+    # NORMALIZATION TO 90 REGULATION MINUTES (+ stoppage time): most
+    # competitions in this app are pure round-robin leagues (SA, PL, PD,
+    # BL1, FL1, DED, PPL, ELC) where extra time/penalties never occur, but
+    # the knockout stages of CL/WC/EC/UNL can go beyond 90 minutes.
+    # Football-Data.org exposes the 90-minute score separately as
+    # "regularTime" for exactly those ties (fullTime there reflects the
+    # extra-time-inclusive result, and any penalty shootout lives in its
+    # own "penalties" field, never merged into goal counts). Preferring
+    # regularTime when present — and falling back to fullTime for every
+    # normal match, where the two are identical — keeps every goal-based
+    # average in this app scoped to regulation play only, per-match.
+    regular_time = score.get("regularTime")
+    if isinstance(regular_time, dict):
+        home_reg = _number(regular_time.get("home"))
+        away_reg = _number(regular_time.get("away"))
+        if home_reg is not None and away_reg is not None:
+            return home_reg, away_reg
+    full_time = score.get("fullTime")
+    if not isinstance(full_time, dict):
+        return None, None
+    return _number(full_time.get("home")), _number(full_time.get("away"))
+
+
 def _match_has_final_score(match: dict[str, object]) -> bool:
     score = match.get("score")
     if not isinstance(score, dict):
         return False
-    full_time = score.get("fullTime")
-    if not isinstance(full_time, dict):
-        return False
-    return (
-        _number(full_time.get("home")) is not None
-        and _number(full_time.get("away")) is not None
-    )
+    home_goals, away_goals = _regulation_time_score(score)
+    return home_goals is not None and away_goals is not None
 
 
 def _fallback_team_snapshot(league: str) -> tuple[tuple[int, str], ...]:
@@ -1435,13 +1454,27 @@ def fetch_team_season_matches(league: str, team_name: str) -> tuple[dict[str, ob
             source_matches = fetch_team_recent_matches_extended(league, team_name, limit=50)
         except FootballDataError:
             source_matches = fetch_league_matches(league)
+        expected_competition_code = None  # national-team lookback is intentionally cross-competition
     else:
         source_matches = fetch_league_matches(league)
+        # RIGID SINGLE-COMPETITION FILTER: /competitions/{code}/matches
+        # already scopes the request to this league alone (a domestic cup,
+        # a European cup, or a friendly can never be returned here), but we
+        # additionally cross-check each match's own "competition.code"
+        # field when the payload provides one, as a belt-and-suspenders
+        # guarantee that no Coppa Italia/Champions League/friendly fixture
+        # can ever leak into a league-scoped season average.
+        expected_competition_code = FOOTBALL_DATA_COMPETITIONS[league]
 
     return tuple(
         match
         for match in source_matches
         if _match_has_final_score(match)
+        and (
+            expected_competition_code is None
+            or not isinstance(match.get("competition"), dict)
+            or match["competition"].get("code") == expected_competition_code
+        )
         and (
             match["homeTeam"].get("id") == team_id
             or match["awayTeam"].get("id") == team_id
@@ -1515,10 +1548,10 @@ def fetch_team_live_stats(league: str, team_name: str) -> LiveTeamStats:
         home_data = fixture_item.get("homeTeam", {})
         away_data = fixture_item.get("awayTeam", {})
         score = fixture_item.get("score", {})
-        full_time = score.get("fullTime", {}) if isinstance(score, dict) else {}
+        home_goals_reg, away_goals_reg = _regulation_time_score(score) if isinstance(score, dict) else (None, None)
         is_home = home_data.get("id") == team_id
-        scored = _number(full_time.get("home" if is_home else "away"))
-        conceded = _number(full_time.get("away" if is_home else "home"))
+        scored = home_goals_reg if is_home else away_goals_reg
+        conceded = away_goals_reg if is_home else home_goals_reg
         if scored is None or conceded is None:
             continue
 
@@ -1823,10 +1856,10 @@ def compute_season_stats_summary(league: str, team: str) -> dict[str, object]:
         home_data = fixture_item.get("homeTeam", {})
         away_data = fixture_item.get("awayTeam", {})
         score = fixture_item.get("score", {})
-        full_time = score.get("fullTime", {}) if isinstance(score, dict) else {}
+        home_goals_reg, away_goals_reg = _regulation_time_score(score) if isinstance(score, dict) else (None, None)
         is_home = home_data.get("id") == team_id
-        scored = _number(full_time.get("home" if is_home else "away"))
-        conceded = _number(full_time.get("away" if is_home else "home"))
+        scored = home_goals_reg if is_home else away_goals_reg
+        conceded = away_goals_reg if is_home else home_goals_reg
         if scored is None or conceded is None:
             continue
         season_goals_for += scored
@@ -2934,6 +2967,12 @@ def render_season_stats_tab() -> None:
             )
             st.caption(f"L5 Form Trend above uses the top {min(5, len(match_log))} rows of this table (most recent first).")
             st.dataframe(log_frame, use_container_width=True, hide_index=True)
+
+    st.markdown(
+        '<div class="wl-data-disclaimer">ℹ️ Note: Data provided via Football-Data.org. Event definitions '
+        '(shots on target, fouls) may slightly vary from Opta/Sofascore standard providers.</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def render_multi_esito_tab(model: MatchModel, home: str, away: str) -> None:
@@ -5881,6 +5920,17 @@ h1, h2, h3, h4, h5 {
     font-weight: 700;
     letter-spacing: 0.28em;
     text-transform: uppercase;
+    color: #9aa0a6;
+}
+
+.wl-data-disclaimer {
+    margin-top: 14px;
+    padding: 10px 14px;
+    border-radius: 8px;
+    background: #0a0a0a;
+    border-left: 3px solid #00e5ff;
+    font-size: 0.76rem;
+    line-height: 1.4;
     color: #9aa0a6;
 }
 
