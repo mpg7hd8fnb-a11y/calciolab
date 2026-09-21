@@ -495,6 +495,50 @@ REALISM_FLOOR_FOULS_PER_MATCH = 8.0
 # under 3.0 for ANY team, are treated as calibration failures and clamped
 # up to these floors rather than displayed as-is.
 
+# ==============================================================================
+# OPTA/SOFASCORE TIER ALIGNMENT ENGINE
+# ==============================================================================
+# A further, TIER-PROPORTIONAL alignment layer on top of the goals-based
+# SHOT_CALIBRATION_* factor above. The ratio-based calibration alone still
+# under-shoots real Opta/Sofascore ranges for genuinely elite attacks (e.g.
+# a PSG/Real Madrid/Inter-level Tier-1 side reads ~5.1-5.5 Shots on Target
+# per match from goals alone, versus the ~6.5-8.0 real Opta/Sofascore range
+# such sides actually post) — because a team's Tier (blasone + squad
+# quality, via lookup_team_tier) carries signal about shot VOLUME and
+# QUALITY that goals-per-match alone doesn't fully capture (an elite squad
+# out-shoots its level even in games it doesn't convert clinically). This
+# layer multiplies the ALREADY-calibrated shots-on-target/total-shots/
+# offsides/fouls figures by a further factor keyed to the team's own Tier,
+# proportional across all 5 Tiers, so a Tier-1 side lands in the real Opta
+# range while a Tier-5 side is proportionally scaled down instead.
+OPTA_ALIGNMENT_MULTIPLIERS: dict[int, float] = {
+    1: 1.40,  # Title Contenders — Opta/Sofascore alignment target (e.g. PSG/Real Madrid/Inter-level Shots on Target ~6.5-8.0/match)
+    2: 1.18,  # European Spot
+    3: 1.00,  # Mid-Table (unchanged from the goals-based calibration)
+    4: 0.88,  # Relegation Battle
+    5: 0.75,  # Newly Promoted
+}
+
+OPTA_TOTAL_SHOTS_DAMPENING = 0.5
+# Real Opta/Sofascore data shows shot VOLUME (Total Shots, Offsides, Fouls)
+# varying far less by Tier than shot ACCURACY (Shots on Target) does — top
+# teams create fewer, more clinical chances rather than proportionally many
+# more shots. The full OPTA_ALIGNMENT_MULTIPLIERS factor is applied to
+# Shots on Target; Total Shots, Offsides and Fouls use a DAMPENED version
+# (effective_multiplier = 1 + (tier_multiplier - 1) * this fraction) so
+# they move in the same direction without an unrealistic volume inflation.
+
+
+def opta_alignment_multiplier(team_tier: int, dampen: bool = False) -> float:
+    # Shared by both the Season Stats tab (compute_season_stats_summary)
+    # and the match-analysis Analytics pipeline (build_match_model), so a
+    # given team's Tier is aligned identically everywhere in the app.
+    tier_multiplier = OPTA_ALIGNMENT_MULTIPLIERS.get(team_tier, 1.0)
+    if not dampen:
+        return tier_multiplier
+    return 1.0 + (tier_multiplier - 1.0) * OPTA_TOTAL_SHOTS_DAMPENING
+
+
 PROMOTED_TEAMS = {
     # Italy · Serie A
     "Venezia",
@@ -1927,8 +1971,11 @@ def compute_season_stats_summary(league: str, team: str) -> dict[str, object]:
     power_rating = BASE_RATING_WEIGHT * base_rating + FORM_RATING_WEIGHT * form_rating
 
     baseline = MICRO_EVENT_BASELINES[FOOTBALL_DATA_COMPETITIONS[league]]
-    is_top_team_tier = lookup_team_tier(team) in (1, 2)
+    team_tier = lookup_team_tier(team)
+    is_top_team_tier = team_tier in (1, 2)
     shots_on_target_floor = REALISM_FLOOR_SHOTS_ON_TARGET_ELITE if is_top_team_tier else REALISM_FLOOR_SHOTS_ON_TARGET
+    opta_sot_multiplier = opta_alignment_multiplier(team_tier)
+    opta_volume_multiplier = opta_alignment_multiplier(team_tier, dampen=True)
 
     def _calibration_factor(goals_per_match: float) -> float:
         ratio = goals_per_match / LEAGUE_AVERAGE_GOALS_PER_TEAM if LEAGUE_AVERAGE_GOALS_PER_TEAM > 0 else 1.0
@@ -1956,17 +2003,35 @@ def compute_season_stats_summary(league: str, team: str) -> dict[str, object]:
             2.0 - scoring_factor, SHOT_CALIBRATION_FLOOR_FACTOR, SHOT_CALIBRATION_CEILING_FACTOR
         )
 
-        total_shots_avg = max(baseline["shots"] * scoring_factor, REALISM_FLOOR_TOTAL_SHOTS)
-        shots_on_target_avg = max(baseline["shots_on_target"] * scoring_factor, shots_on_target_floor)
-        shots_on_target_against_avg = max(baseline["shots_on_target"] * conceding_factor, REALISM_FLOOR_SHOTS_ON_TARGET)
+        # OPTA/SOFASCORE TIER ALIGNMENT: applied on top of the goals-based
+        # calibration above (opta_sot_multiplier full-strength for Shots on
+        # Target, opta_volume_multiplier dampened for Total Shots/Offsides/
+        # Fouls) — see OPTA_ALIGNMENT_MULTIPLIERS. Applied only to the
+        # team's OWN attacking-side figures (Shots on Target/Total Shots
+        # for, Offsides, Fouls Suffered); the "against" figures the team
+        # faces (Shots on Target Against, Fouls Committed) instead scale
+        # INVERSELY with the SAME tier multiplier, since an elite squad
+        # both creates more chances of its own AND concedes proportionally
+        # fewer to the opposition.
+        total_shots_avg = max(baseline["shots"] * scoring_factor * opta_volume_multiplier, REALISM_FLOOR_TOTAL_SHOTS)
+        shots_on_target_avg = max(
+            baseline["shots_on_target"] * scoring_factor * opta_sot_multiplier, shots_on_target_floor
+        )
+        shots_on_target_against_avg = max(
+            baseline["shots_on_target"] * conceding_factor / opta_sot_multiplier, REALISM_FLOOR_SHOTS_ON_TARGET
+        )
         xg_for_avg = shots_on_target_avg * XG_PROXY_SHOT_CONVERSION_RATE
         xg_against_avg = shots_on_target_against_avg * XG_PROXY_SHOT_CONVERSION_RATE
         saves_avg = max(shots_on_target_against_avg - goals_against_avg, 0.0)
         corners_for_avg = max(baseline["corners"] * scoring_factor, REALISM_FLOOR_CORNERS_PER_MATCH)
         corners_against_avg = max(baseline["corners"] * conceding_factor, REALISM_FLOOR_CORNERS_PER_MATCH)
-        fouls_committed_avg = max(baseline["fouls"] * discipline_factor, REALISM_FLOOR_FOULS_PER_MATCH)
-        fouls_suffered_avg = max(baseline["fouls"] * scoring_factor, REALISM_FLOOR_FOULS_PER_MATCH)
-        offsides_avg = baseline["offsides"] * scoring_factor
+        fouls_committed_avg = max(
+            baseline["fouls"] * discipline_factor / opta_volume_multiplier, REALISM_FLOOR_FOULS_PER_MATCH
+        )
+        fouls_suffered_avg = max(
+            baseline["fouls"] * scoring_factor * opta_volume_multiplier, REALISM_FLOOR_FOULS_PER_MATCH
+        )
+        offsides_avg = baseline["offsides"] * scoring_factor * opta_volume_multiplier
         cards_avg = baseline["cards"] * discipline_factor
         red_cards_avg = cards_avg * RED_CARD_SHARE_OF_TOTAL_CARDS
         yellow_cards_avg = cards_avg - red_cards_avg
@@ -2292,10 +2357,19 @@ def build_match_model(
     away_sot_blended *= 1 + manual_factor_away + fatigue_attack_malus_away
 
     shot_boost, shot_suppress = rating_scaling_factors(rating_diff, damping=SHOT_RATING_DAMPING)
-    home_shots = max(home_shots_blended * shot_boost, 1.0)
-    away_shots = max(away_shots_blended * shot_suppress, 1.0)
-    home_sot = max(home_sot_blended * shot_boost, 0.3)
-    away_sot = max(away_sot_blended * shot_suppress, 0.3)
+    # OPTA/SOFASCORE TIER ALIGNMENT (shared with the Season Stats tab — see
+    # opta_alignment_multiplier): lifts Shots on Target for genuinely elite
+    # sides into the real Opta/Sofascore range, with Total Shots getting the
+    # dampened version since shot VOLUME varies far less by Tier than shot
+    # ACCURACY does in real data.
+    home_opta_sot_mult = opta_alignment_multiplier(home_tier_number)
+    away_opta_sot_mult = opta_alignment_multiplier(away_tier_number)
+    home_opta_volume_mult = opta_alignment_multiplier(home_tier_number, dampen=True)
+    away_opta_volume_mult = opta_alignment_multiplier(away_tier_number, dampen=True)
+    home_shots = max(home_shots_blended * shot_boost * home_opta_volume_mult, 1.0)
+    away_shots = max(away_shots_blended * shot_suppress * away_opta_volume_mult, 1.0)
+    home_sot = max(home_sot_blended * shot_boost * home_opta_sot_mult, 0.3)
+    away_sot = max(away_sot_blended * shot_suppress * away_opta_sot_mult, 0.3)
     shots_total = home_shots + away_shots
 
     # --- 6. Corner: legati anche al possesso, sensibilità ulteriormente smorzata
