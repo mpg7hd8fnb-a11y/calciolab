@@ -533,10 +533,27 @@ def opta_alignment_multiplier(team_tier: int, dampen: bool = False) -> float:
     # Shared by both the Season Stats tab (compute_season_stats_summary)
     # and the match-analysis Analytics pipeline (build_match_model), so a
     # given team's Tier is aligned identically everywhere in the app.
+    # Respects the sidebar's "Opta/Sofascore Calibration" toggle: off means
+    # every metric falls back to the raw league-baseline estimate.
+    if not st.session_state.get("opta_calibration_enabled", True):
+        return 1.0
     tier_multiplier = OPTA_ALIGNMENT_MULTIPLIERS.get(team_tier, 1.0)
     if not dampen:
         return tier_multiplier
     return 1.0 + (tier_multiplier - 1.0) * OPTA_TOTAL_SHOTS_DAMPENING
+
+
+def get_base_rating_weight() -> float:
+    # Sidebar-adjustable Base/Form split (default 72%/28%, i.e.
+    # BASE_RATING_WEIGHT) — reads live from session_state so every caller
+    # (build_match_model, compute_season_stats_summary, the AI Tactical
+    # Preview) stays in sync with the "Base Rating Weight" slider without
+    # threading an extra parameter through each function signature.
+    return st.session_state.get("base_rating_weight_pct", int(BASE_RATING_WEIGHT * 100)) / 100.0
+
+
+def get_form_rating_weight() -> float:
+    return 1.0 - get_base_rating_weight()
 
 
 PROMOTED_TEAMS = {
@@ -1476,6 +1493,62 @@ def calendar_frame(league: str) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns)
 
 
+QUICK_PRESET_OPTIONS = [
+    "🔧 Manual Selection",
+    "🎭 Big Match Spectacle",
+    "⚖️ Tactical Battle",
+    "⚔️ Mismatch",
+]
+# SMART MATCH SELECTOR presets: each narrows the "Match of the Day" dropdown
+# to fixtures whose two teams' blasone TIER (lookup_team_tier — a cheap,
+# no-API-call lookup, unlike a full live-stats fetch) fits that archetype,
+# so picking a preset stays instant even before any match-specific data is
+# loaded. This is a lightweight PRE-FILTER on the fixture list, distinct
+# from — and a cheaper cousin of — the live, goals-driven Match Profile
+# classification (classify_match_profile) computed once a specific match is
+# actually analyzed.
+
+
+def build_fixture_options(calendar_df: pd.DataFrame) -> list[tuple[str, str, str]]:
+    # (label, home_team, away_team) tuples for the "Match of the Day"
+    # dropdown, built from the competition's full fixture list
+    # (calendar_frame) — upcoming fixtures are listed first, then finished
+    # ones, so a fresh preseason calendar (all SCHEDULED) and a nearly
+    # completed season (mostly FINISHED) both produce a sensible, non-empty
+    # selector.
+    options: list[tuple[str, str, str]] = []
+    upcoming_rows = calendar_df[calendar_df["Status"] != "Finished"]
+    finished_rows = calendar_df[calendar_df["Status"] == "Finished"].iloc[::-1]  # most recent finished first
+    for _, row in pd.concat([upcoming_rows, finished_rows]).iterrows():
+        home_name = str(row["Home"]).strip()
+        away_name = str(row["Away"]).strip()
+        if not home_name or not away_name:
+            continue
+        date_text = str(row["Date"]).strip() or "TBD"
+        status_text = str(row["Status"])
+        label = f"{home_name} vs {away_name} — {date_text} ({status_text})"
+        options.append((label, home_name, away_name))
+    return options
+
+
+def filter_fixtures_by_preset(
+    fixtures: list[tuple[str, str, str]], preset: str
+) -> list[tuple[str, str, str]]:
+    if preset == "🎭 Big Match Spectacle":
+        return [f for f in fixtures if lookup_team_tier(f[1]) <= 2 and lookup_team_tier(f[2]) <= 2]
+    if preset == "⚖️ Tactical Battle":
+        return [
+            f
+            for f in fixtures
+            if lookup_team_tier(f[1]) >= 3
+            and lookup_team_tier(f[2]) >= 3
+            and abs(lookup_team_tier(f[1]) - lookup_team_tier(f[2])) <= 1
+        ]
+    if preset == "⚔️ Mismatch":
+        return [f for f in fixtures if abs(lookup_team_tier(f[1]) - lookup_team_tier(f[2])) >= 2]
+    return fixtures
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_team_recent_matches_extended(
     league: str, team_name: str, limit: int = NATIONAL_TEAM_MATCH_WINDOW
@@ -1968,7 +2041,7 @@ def compute_season_stats_summary(league: str, team: str) -> dict[str, object]:
     rating_stats = fetch_team_live_stats(league, team)
     base_rating, base_source = resolve_base_rating(league, team)
     form_rating = compute_current_form_rating(rating_stats)
-    power_rating = BASE_RATING_WEIGHT * base_rating + FORM_RATING_WEIGHT * form_rating
+    power_rating = get_base_rating_weight() * base_rating + get_form_rating_weight() * form_rating
 
     baseline = MICRO_EVENT_BASELINES[FOOTBALL_DATA_COMPETITIONS[league]]
     team_tier = lookup_team_tier(team)
@@ -2246,8 +2319,8 @@ def build_match_model(
     home_form_rating = compute_current_form_rating(home_stats)
     away_form_rating = compute_current_form_rating(away_stats)
 
-    rating_finale_home = BASE_RATING_WEIGHT * home_base_rating + FORM_RATING_WEIGHT * home_form_rating
-    rating_finale_away = BASE_RATING_WEIGHT * away_base_rating + FORM_RATING_WEIGHT * away_form_rating
+    rating_finale_home = get_base_rating_weight() * home_base_rating + get_form_rating_weight() * home_form_rating
+    rating_finale_away = get_base_rating_weight() * away_base_rating + get_form_rating_weight() * away_form_rating
 
     # --- 3. Slider manuali (Mercato/Infortuni) + Indice di Affaticamento &
     # Turnover (Fase 2), SOMMATI fra loro (nessuno sovrascrive l'altro) e
@@ -3556,16 +3629,18 @@ def render_social_share_card(
     )
 
 
-def render_top_result_highlight_card(score_label: str, probability: float, simulations_count: int) -> None:
-    """🏆 HUD reveal card for the 'Top Result' emerging from the 10,000
-    Monte Carlo paths: giant gold/neon score front and center, with the
+def render_top_result_highlight_card(
+    score_label: str, probability: float, simulations_count: int, total_simulations: int = 10_000
+) -> None:
+    """🏆 HUD reveal card for the 'Top Result' emerging from the Monte
+    Carlo paths: giant gold/neon score front and center, with the
     confidence percentage in evidence — built to be the first thing a
     viewer's eye lands on when the simulation finishes."""
     st.markdown(
         '<div class="mc-highlight-card">'
-        '<div class="mc-highlight-label">🏆 TOP RESULT · 10,000 SIMULATIONS</div>'
+        f'<div class="mc-highlight-label">🏆 TOP RESULT · {total_simulations:,} SIMULATIONS</div>'
         f'<div class="mc-highlight-score">{escape(score_label)}</div>'
-        f'<div class="mc-highlight-sub">Confidence: {probability:.1%} · {simulations_count:,} / 10,000 paths</div>'
+        f'<div class="mc-highlight-sub">Confidence: {probability:.1%} · {simulations_count:,} / {total_simulations:,} paths</div>'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -5148,6 +5223,33 @@ def render_sidebar_controls() -> dict[str, object]:
     Rotation Index (Phase 2). Values increase/decrease the Power Index and
     expected attack/defense BEFORE the xG, shots and probability calculation
     (see build_match_model)."""
+    st.markdown("### ⚙️ Simulation & Calibration")
+    with st.expander("Simulation & Calibration", expanded=False):
+        st.caption("Advanced engine parameters — the central dashboard stays focused on the HUD.")
+        st.select_slider(
+            "Monte Carlo Iterations",
+            options=[1_000, 2_500, 5_000, 10_000, 20_000],
+            value=10_000,
+            key="mc_iterations",
+            help="More iterations = smoother probabilities, slower simulation.",
+        )
+        st.slider(
+            "Base Rating Weight (2025/26 Season)",
+            60,
+            80,
+            int(BASE_RATING_WEIGHT * 100),
+            format="%d%%",
+            key="base_rating_weight_pct",
+            help="Remaining weight goes to Current Form (2026/27). Default 72% / 28%.",
+        )
+        st.toggle(
+            "Opta/Sofascore Calibration",
+            value=True,
+            key="opta_calibration_enabled",
+            help="Tier-based alignment of shots/corners/fouls toward real Opta/Sofascore ranges. "
+            "Off = raw league-baseline estimates only.",
+        )
+
     st.markdown("### 💼 Market Impact / Expectations")
     st.caption("Major signings or departures relative to the season average.")
     market_factor_home = (
@@ -5230,6 +5332,9 @@ def render_sidebar_controls() -> dict[str, object]:
         "fatigue_home": fatigue_home,
         "fatigue_away": fatigue_away,
         "odds_api_key": odds_api_key,
+        "mc_iterations": st.session_state.get("mc_iterations", 10_000),
+        "base_rating_weight_pct": st.session_state.get("base_rating_weight_pct", int(BASE_RATING_WEIGHT * 100)),
+        "opta_calibration_enabled": st.session_state.get("opta_calibration_enabled", True),
     }
 
 
@@ -5711,18 +5816,19 @@ def render_bankroll_tab() -> None:
 
 
 def render_dashboard(sidebar_values: dict[str, float]) -> None:
-    st.markdown(
-        "### Match Settings\n"
-        "Teams, fixtures and results are fetched directly from "
-        "Football-Data.org. These are not bookmaker odds."
-    )
-
-    col_league, col_home, col_away = st.columns(3)
+    col_league, col_preset = st.columns([2, 1.3])
     with col_league:
         league = st.selectbox(
-            "League",
+            "Competition",
             options=list(FOOTBALL_DATA_COMPETITIONS),
             key="league_select",
+        )
+    with col_preset:
+        preset = st.selectbox(
+            "Quick Preset",
+            options=QUICK_PRESET_OPTIONS,
+            key="quick_preset",
+            help="Narrows Match of the Day to fixtures matching that archetype (by Team Tier).",
         )
 
     try:
@@ -5734,33 +5840,8 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
     teams = [name for _, name in team_rows]
 
     if len(teams) < 2:
-        with col_home:
-            st.selectbox("Home Team", options=teams, disabled=True)
-        with col_away:
-            st.selectbox("Away Team", options=teams, disabled=True)
         st.warning("Football-Data.org did not return two available teams.")
         return
-
-    # If the league changed, reset the team selections to their default values.
-    if st.session_state.get("_last_league") != league:
-        st.session_state["_last_league"] = league
-        st.session_state["home_select"] = teams[0]
-        st.session_state["away_select"] = teams[1]
-
-    with col_home:
-        home = st.selectbox("Home Team", options=teams, key="home_select")
-    with col_away:
-        away = st.selectbox("Away Team", options=teams, key="away_select")
-
-    try:
-        status_text = (
-            f"Football-Data.org: {len(teams)} teams loaded · "
-            f"{competition_season_status(league)}. "
-            "Micro-events estimated on league baseline."
-        )
-        st.info(status_text)
-    except FootballDataError as error:
-        st.warning(f"Season status unavailable: {error}")
 
     try:
         calendar = calendar_frame(league)
@@ -5768,7 +5849,51 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
         st.error(f"Football-Data.org fixtures unavailable: {error}")
         calendar = pd.DataFrame(columns=["Date", "Status", "Home", "Away"])
 
-    with st.expander("📅 2026/27 Season Fixtures", expanded=False):
+    all_fixture_options = build_fixture_options(calendar)
+    preset_fixture_options = filter_fixtures_by_preset(all_fixture_options, preset)
+    manual_label = "🔧 Custom Matchup (pick teams manually)"
+
+    # Reset the Match of the Day pick whenever the competition or preset
+    # changes, so a stale fixture from a different context is never shown.
+    selector_context = (league, preset)
+    if st.session_state.get("_match_selector_context") != selector_context:
+        st.session_state["_match_selector_context"] = selector_context
+        st.session_state["match_of_day_select"] = (
+            preset_fixture_options[0][0] if preset_fixture_options else manual_label
+        )
+
+    match_labels = [label for label, _h, _a in preset_fixture_options] + [manual_label]
+    if not preset_fixture_options:
+        st.caption(f"No fixtures currently match '{preset}' in this competition — pick teams manually below.")
+    selected_match_label = st.selectbox("📅 Match of the Day", options=match_labels, key="match_of_day_select")
+
+    if selected_match_label == manual_label:
+        with st.expander("🔧 Manual Team Selection", expanded=True):
+            if st.session_state.get("_last_league") != league:
+                st.session_state["_last_league"] = league
+                st.session_state["home_select"] = teams[0]
+                st.session_state["away_select"] = teams[1]
+            col_home, col_away = st.columns(2)
+            with col_home:
+                home = st.selectbox("Home Team", options=teams, key="home_select")
+            with col_away:
+                away = st.selectbox("Away Team", options=teams, key="away_select")
+    else:
+        home, away = next(
+            (h, a) for label, h, a in preset_fixture_options if label == selected_match_label
+        )
+        st.caption(f"🏠 {home}  ·  ✈️ {away}")
+
+    with st.expander("📅 2026/27 Season Fixtures & Status", expanded=False):
+        try:
+            status_text = (
+                f"Football-Data.org: {len(teams)} teams loaded · "
+                f"{competition_season_status(league)}. "
+                "Micro-events estimated on league baseline."
+            )
+            st.caption(status_text)
+        except FootballDataError as error:
+            st.warning(f"Season status unavailable: {error}")
         st.dataframe(calendar, use_container_width=True, hide_index=True)
 
     if home == away:
@@ -5997,8 +6122,9 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
         render_value_betting_tab(model, home, away, league, sidebar_values.get("odds_api_key", ""))
 
     with tab_montecarlo:
+        mc_iterations_preview = int(st.session_state.get("mc_iterations", 10_000))
         st.markdown(
-            '<div class="mc-intro-caption">10,000 independent Poisson-distributed matches, weighted with the '
+            f'<div class="mc-intro-caption">{mc_iterations_preview:,} independent Poisson-distributed matches, weighted with the '
             "Dixon-Coles correction on low-scoring results · consistent with the 1X2 forecast in the Poisson tab.</div>",
             unsafe_allow_html=True,
         )
@@ -6020,19 +6146,20 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
             st.session_state.pop("montecarlo_result", None)
             st.session_state["montecarlo_teams"] = (home, away)
 
+        mc_iterations = int(st.session_state.get("mc_iterations", 10_000))
         montecarlo_button_label = (
-            "🔁 Relaunch 10,000 Monte Carlo Simulations"
+            f"🔁 Relaunch {mc_iterations:,} Monte Carlo Simulations"
             if "montecarlo_result" in st.session_state
-            else "▶️ Run 10,000 Monte Carlo Simulations"
+            else f"▶️ Run {mc_iterations:,} Monte Carlo Simulations"
         )
         run_clicked = st.button(montecarlo_button_label, type="primary", key="simulate_button")
 
         if run_clicked:
-            render_monte_carlo_computing_hud(total_paths=10_000, duration_seconds=2.6)
-            st.session_state["montecarlo_result"] = run_simulation(model)
+            render_monte_carlo_computing_hud(total_paths=mc_iterations, duration_seconds=2.6)
+            st.session_state["montecarlo_result"] = run_simulation(model, n_simulations=mc_iterations)
 
         if "montecarlo_result" not in st.session_state:
-            st.info("Press the button to launch 10,000 Monte Carlo simulations for this match.")
+            st.info(f"Press the button to launch {mc_iterations:,} Monte Carlo simulations for this match.")
         else:
             simulation = st.session_state["montecarlo_result"]
             score_frame: pd.DataFrame = simulation["scores"]
@@ -6061,6 +6188,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
                     score_label=str(top_score_row["Exact Score"]),
                     probability=float(top_score_row["Probability"]),
                     simulations_count=int(top_score_row["Simulations"]),
+                    total_simulations=mc_iterations,
                 )
 
             with col_alt_frequencies:
@@ -6083,7 +6211,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
                 render_micro_events_intel_column(intel)
 
             st.caption(
-                f"⚙️ 10,000 / 10,000 paths computed for {home} vs {away} · "
+                f"⚙️ {mc_iterations:,} / {mc_iterations:,} paths computed for {home} vs {away} · "
                 "synced with the Dixon-Coles matrix above."
             )
 
