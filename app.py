@@ -5428,6 +5428,170 @@ def render_value_betting_tab(model: MatchModel, home: str, away: str, league: st
     )
 
 
+# ==============================================================================
+# AI TACTICAL PREVIEW — stat-driven, TV-analyst-style match narrative
+# ==============================================================================
+# Purely additive, purely a PRESENTATION layer: reads exclusively from
+# figures the engine has already computed for this match (Weighted Rating
+# 70/30 Base/Form split, xG, 1X2, exact-score probabilities, micro-events,
+# L5 recent form) — no invented data, no new statistical model, and no
+# external API call required (a deterministic Python template generator,
+# so the tab is always available even without an LLM key configured,
+# unlike the separate "Intelligence Analysis Report" which prefers an LLM
+# when one is configured — this one is intentionally always-template so
+# the tactical narrative is 100% reproducible from the visible numbers).
+def _tactical_form_letters(stats: "LiveTeamStats | None") -> str | None:
+    if stats is None or not stats.recent_form:
+        return None
+    return "".join(stats.recent_form[:FORM_MATCHES_WINDOW])
+
+
+def _tactical_form_phrase(letters: str | None, team_name: str) -> str:
+    if not letters:
+        return f"{escape(team_name)} have no completed fixtures on record yet this season to read form from"
+    wins, draws, losses = letters.count("W"), letters.count("D"), letters.count("L")
+    record = f"{wins}W-{draws}D-{losses}L"
+    if wins >= 4:
+        mood = "red-hot"
+    elif losses >= 3 and wins <= 1:
+        mood = "under real pressure"
+    else:
+        mood = "steady, if unspectacular"
+    return f"{escape(team_name)} arrive {mood} across their last {len(letters)} ({record})"
+
+
+def _tactical_trend_phrase(base_rating: float, form_rating: float) -> str:
+    diff = form_rating - base_rating
+    if diff > 40:
+        return "and their current output is actually running ahead of their season-long level"
+    if diff < -40:
+        return "though their current output has dipped below their season-long level"
+    return "and their current output is broadly tracking their season-long level"
+
+
+def generate_tactical_preview(model: MatchModel, league: str, home: str, away: str) -> dict[str, str]:
+    try:
+        home_stats: LiveTeamStats | None = fetch_team_live_stats(league, home)
+    except FootballDataError:
+        home_stats = None
+    try:
+        away_stats: LiveTeamStats | None = fetch_team_live_stats(league, away)
+    except FootballDataError:
+        away_stats = None
+
+    home_base_rating, _home_base_source = resolve_base_rating(league, home)
+    away_base_rating, _away_base_source = resolve_base_rating(league, away)
+    home_form_rating = compute_current_form_rating(home_stats) if home_stats is not None else home_base_rating
+    away_form_rating = compute_current_form_rating(away_stats) if away_stats is not None else away_base_rating
+
+    home_favored = model.home_win_prob >= model.away_win_prob
+    favorite, underdog = (home, away) if home_favored else (away, home)
+    favorite_rating = model.home_rating if home_favored else model.away_rating
+    underdog_rating = model.away_rating if home_favored else model.home_rating
+    favorite_lambda = model.home_lambda if home_favored else model.away_lambda
+    underdog_lambda = model.away_lambda if home_favored else model.home_lambda
+
+    outcome_probs = sorted([model.home_win_prob, model.draw_prob, model.away_win_prob], reverse=True)
+    is_tight_match = (outcome_probs[0] - outcome_probs[1]) < 0.08
+
+    home_letters = _tactical_form_letters(home_stats)
+    away_letters = _tactical_form_letters(away_stats)
+
+    tactical_read = " ".join(
+        [
+            f"{escape(favorite)} go into this one as the stronger side on the Weighted Rating Engine, "
+            f"posting a Global Power Rating of {favorite_rating:.0f} against {escape(underdog)}'s "
+            f"{underdog_rating:.0f} — a gap built 70% on where each side finished last season and 30% on "
+            f"what they've shown so far this campaign.",
+            f"{_tactical_form_phrase(home_letters, home)}, {_tactical_trend_phrase(home_base_rating, home_form_rating)}.",
+            f"{_tactical_form_phrase(away_letters, away)}, {_tactical_trend_phrase(away_base_rating, away_form_rating)}.",
+            (
+                "With so little separating the two sides in the model, expect a cagey opening exchange before "
+                "either side properly commits numbers forward."
+                if is_tight_match
+                else (
+                    f"The gap is real enough that {escape(favorite)} should dictate the game's early tempo, "
+                    f"with {escape(underdog)} needing a disciplined start to stay in it."
+                )
+            ),
+        ]
+    )
+
+    matchup_analysis = " ".join(
+        [
+            f"On the numbers, {escape(favorite)}'s attack projects for {favorite_lambda:.2f} expected goals in "
+            f"this fixture, the higher of the two lambdas, against a {escape(underdog)} side projected for "
+            f"{underdog_lambda:.2f}.",
+            f"The model expects {model.shots_total_lambda:.0f} shots across the 90 minutes and "
+            f"{model.corners_total_lambda:.1f} corners, with {escape(home)} sending "
+            f"{model.home_shots_on_target_lambda:.1f} on target at the {escape(away)} goal and {escape(away)} "
+            f"replying with {model.away_shots_on_target_lambda:.1f} of their own.",
+            (
+                f"{escape(underdog)} aren't without teeth here — an expected-goals read above 1.00 means "
+                f"they're a live threat on the break, not merely making up the numbers."
+                if underdog_lambda >= 1.0
+                else (
+                    f"{escape(underdog)}'s own attacking output projects modestly, which should keep "
+                    f"{escape(favorite)} comfortable if they take their early sight of goal."
+                )
+            ),
+        ]
+    )
+
+    top_scores = exact_score_probabilities(model.home_lambda, model.away_lambda, max_goals=6)[:3]
+    top_score_label, top_score_prob = top_scores[0] if top_scores else ("N/A", 0.0)
+    monte_carlo_scenario_parts = [
+        f"Running the Poisson + Dixon-Coles engine across the full scoreline grid, {top_score_label} emerges as "
+        f"the single most likely outcome at {top_score_prob:.1%}, with the macro market reading "
+        f"{model.home_win_prob:.0%} {escape(home)}, {model.draw_prob:.0%} Draw, {model.away_win_prob:.0%} "
+        f"{escape(away)}."
+    ]
+    if len(top_scores) > 1:
+        alt_label, alt_prob = top_scores[1]
+        monte_carlo_scenario_parts.append(
+            f"The next-closest scenario, {alt_label} at {alt_prob:.1%}, is never far behind — Dixon-Coles "
+            f"nudges the model toward tighter scorelines whenever the gap between the two sides isn't "
+            f"overwhelming, keeping low-scoring alternatives firmly in play."
+        )
+    if len(top_scores) > 2:
+        third_label, third_prob = top_scores[2]
+        monte_carlo_scenario_parts.append(
+            f"A {third_label} finish rounds out the top three at {third_prob:.1%}, the kind of scoreline that "
+            f"stays live for as long as the first goal doesn't arrive early."
+        )
+    monte_carlo_scenario = " ".join(monte_carlo_scenario_parts)
+
+    return {
+        "tactical_read": tactical_read,
+        "matchup_analysis": matchup_analysis,
+        "monte_carlo_scenario": monte_carlo_scenario,
+    }
+
+
+def render_tactical_card(title: str, body_text: str) -> None:
+    st.markdown(
+        f'<div class="tactical-card"><div class="tactical-card-title">{escape(title)}</div>'
+        f'<div class="tactical-card-body">{body_text}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_tactical_preview_tab(model: MatchModel, league: str, home: str, away: str) -> None:
+    st.markdown(
+        "### 📝 AI Tactical Preview\n"
+        "A stat-driven tactical read of this fixture, generated from the same Weighted Rating Engine, xG model "
+        "and Poisson + Dixon-Coles projections used throughout WayneLab."
+    )
+    preview = generate_tactical_preview(model, league, home, away)
+    render_tactical_card("🧠 Key Tactical Read", preview["tactical_read"])
+    render_tactical_card("⚔️ Matchup Analysis", preview["matchup_analysis"])
+    render_tactical_card("🎯 Monte Carlo Projection & Scenario", preview["monte_carlo_scenario"])
+    st.caption(
+        "Generated entirely from this match's own engine outputs (Weighted Rating 70/30, xG, 1X2, exact-score "
+        "probabilities) — a deterministic tactical narrative, not a live external AI call."
+    )
+
+
 def render_match_executive_summary(
     model: MatchModel,
     home: str,
@@ -5717,6 +5881,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
 
     (
         tab_poisson,
+        tab_tactical_preview,
         tab_team_form,
         tab_goal_markets,
         tab_charts_dashboard,
@@ -5727,6 +5892,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
     ) = st.tabs(
         [
             "Odds & Probability Analysis (Poisson)",
+            "📝 AI Tactical Preview",
             "📊 Team Form & H2H",
             "📊 Goal Stats & Markets",
             "📊 Charts Dashboard & Micro-Events",
@@ -5766,6 +5932,9 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
             "historical data, Early Season Mode and manual sliders applied "
             "upstream, and Dixon-Coles correction on draws/low scores."
         )
+
+    with tab_tactical_preview:
+        render_tactical_preview_tab(model, league, home, away)
 
     with tab_team_form:
         render_team_form_tab(league, home, away)
@@ -6060,6 +6229,32 @@ h1, h2, h3, h4, h5 {
     font-size: 0.76rem;
     line-height: 1.4;
     color: #9aa0a6;
+}
+
+.tactical-card {
+    background: linear-gradient(160deg, rgba(18, 18, 18, 0.88) 0%, rgba(5, 5, 5, 0.97) 100%);
+    border: 1px solid rgba(0, 229, 255, 0.35);
+    border-radius: 16px;
+    padding: 18px 22px;
+    margin-bottom: 16px;
+    backdrop-filter: blur(10px);
+    box-shadow: 0 8px 26px rgba(0, 0, 0, 0.45), 0 0 20px rgba(0, 229, 255, 0.08);
+}
+
+.tactical-card-title {
+    font-size: 1.02rem;
+    font-weight: 900;
+    letter-spacing: 0.04em;
+    color: #00e5ff;
+    text-shadow: 0 0 10px rgba(0, 229, 255, 0.5);
+    margin-bottom: 10px;
+    text-transform: uppercase;
+}
+
+.tactical-card-body {
+    font-size: 0.93rem;
+    line-height: 1.65;
+    color: #e0e0e0;
 }
 
 .league-tag {
