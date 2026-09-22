@@ -1580,46 +1580,121 @@ def fetch_team_recent_matches_extended(
 # Football-Data.org's /teams/{id} endpoint DOES return a real first-team
 # squad (name + position, no stats), used whenever it's available — real
 # player NAMES are always preferred over invented ones. It has NO player-
-# level ratings, goals, or scoring-probability data at all, so the FC-style
-# Overall Rating and the Anytime Goalscorer % shown in the UI are ALWAYS
-# algorithmically generated from data this app already has (the team's
-# Global Power Rating and this match's xG), never presented as literal
-# provider or Opta/Sofascore data. When the squad endpoint is unavailable
-# (rate limit, plan tier, or a genuinely empty response), generic
-# role-archetype placeholders are shown instead of a real name — this app
-# never invents a specific person's identity to fill a gap in the data.
+# level ratings, goals, scoring-probability, or injury data at all, so the
+# FC-style Overall Rating and the Anytime Goalscorer % shown in the UI are
+# ALWAYS algorithmically generated from data this app already has (Team
+# Power Rating, Role, this match's xG), never presented as literal
+# provider/Opta/Sofascore data. When the squad endpoint is unavailable
+# (rate limit, plan tier, empty response), generic role-archetype
+# placeholders are shown instead of a real name — this app never invents a
+# specific person's identity to fill a gap in the data.
 KEY_PLAYER_MAX_CARDS = 3
 
-GENERIC_KEY_PLAYER_ARCHETYPES: tuple[tuple[str, str, float], ...] = (
-    ("Lead Striker", "Striker", 0.34),
-    ("Creative Playmaker", "Attacking Midfielder", 0.22),
-    ("Wide Threat", "Winger", 0.19),
+# AUDITED FIX: Football-Data.org frequently returns COARSE position labels
+# — "Attacker", "Midfielder", "Defender", "Goalkeeper" — rather than
+# granular ones ("Centre-Forward", "Right Winger"...). The previous
+# classifier only matched "forward"/"striker" substrings, so a player
+# literally tagged "Attacker" fell through to a generic bucket instead of
+# being recognized as a Striker, while "Midfielder" always matched —
+# explaining why midfielders dominated the Key Players list almost
+# exclusively. Fixed below by matching "attack" too, and by checking the
+# more specific "attacking midfield" BEFORE the broad "attack"/"forward"
+# check so a genuine attacking midfielder isn't mis-tagged as a Striker.
+ROLE_XG_SHARE: dict[str, float] = {
+    "Striker": 0.42,
+    "Winger": 0.20,
+    "Attacking Midfielder": 0.20,
+    "Midfielder": 0.08,
+    "Defender": 0.02,
+}
+# Individual (not aggregate-category) share of the TEAM's match xG used for
+# ONE selected player's Anytime Goalscorer Poisson calculation — calibrated
+# so the role ORDERING mirrors the requested 70/20/8/2 split (Forwards
+# collectively dominate a team's scoring, Wingers/CAM next, Central
+# Midfielders a distant third, Defenders almost never) while still reading
+# as realistic PER-PLAYER percentages (e.g. a lead striker in a big match
+# can clear 50%+, matching real Anytime Goalscorer market pricing).
+
+ROLE_OVERALL_RANGE: dict[str, tuple[int, int]] = {
+    "Striker": (72, 91),
+    "Winger": (70, 88),
+    "Attacking Midfielder": (68, 85),
+    "Midfielder": (65, 83),
+    "Defender": (62, 80),
+}
+# AUDITED FIX: a single shared 72-91 range for EVERY role meant a good-but-
+# not-world-class attacking midfielder or central midfielder at a highly
+# rated club (e.g. a Roma/Atalanta-level "Pellegrini"/"Koopmeiners" type
+# profile) could read as an unrealistic 88-91 "world class" Overall purely
+# because their CLUB's Power Rating was high. Each role now has its own
+# ceiling — only a Striker can ever reach 91, an Attacking/Central
+# Midfielder tops out at 85/83 — which is what keeps that kind of player
+# realistically in the 78-83 band instead.
+
+STAR_PLAYER_OVERALL_OVERRIDES: dict[str, int] = {
+    "kylian mbappé": 91,
+    "kylian mbappe": 91,
+    "erling haaland": 91,
+    "vinícius júnior": 90,
+    "vinicius junior": 90,
+    "vinícius jr.": 90,
+    "vinicius jr": 90,
+    "jude bellingham": 90,
+    "lionel messi": 90,
+}
+# A small, manually-curated table for a handful of truly world-class
+# players whose general caliber is stable, widely-published public
+# knowledge (unlike day-to-day injury status, NEVER inferred or guessed
+# here) — matched case-insensitively against the real Football-Data.org
+# squad name. Every other player, including very good but non-elite names,
+# is rated purely by the formulaic Team Power Rating x Role Range model
+# above, which is what keeps a club's #2/#3 attacking option from
+# incorrectly reading as "world class" just because the club itself is.
+
+EXCLUDED_PLAYERS: set[str] = set()
+# Manually-maintained exclusion list (lower-cased full names) for players
+# who should NEVER be offered as a Key Player/Anytime Goalscorer card —
+# e.g. long-term injuries, suspensions, or players no longer first-team
+# regulars for 2026/27. Football-Data.org has NO live injury/availability
+# feed of any kind, so this list is intentionally left EMPTY by default:
+# populate it yourself with names you can verify are unavailable right
+# now (operator-maintained, not automatically fetched or inferred) —
+# fabricating specific real-world injury claims without a verified source
+# would risk misinforming users about real people. Example of the expected
+# format (commented out): {"example player name"}.
+
+GENERIC_KEY_PLAYER_ARCHETYPES: tuple[tuple[str, str], ...] = (
+    ("Lead Striker (Generated)", "Striker"),
+    ("Creative Playmaker (Generated)", "Attacking Midfielder"),
+    ("Wide Threat (Generated)", "Winger"),
 )
 # Used only when Football-Data.org's squad endpoint is unavailable for a
-# team: generic ROLE labels (not a specific person's name), so a missing
-# API response is never papered over with a fabricated human identity.
+# team, OR as a last-resort guarantee that at least one Striker is always
+# present (see select_key_players): generic ROLE labels (not a specific
+# person's name), so a missing API response is never papered over with a
+# fabricated human identity.
 
 
-def classify_player_role(position: str) -> tuple[str, float, int]:
-    # Maps a raw Football-Data.org "position" string to a (display_role,
-    # estimated share of the TEAM's match xG this role typically accounts
-    # for, selection priority — lower picked first for the 3 Key Player
-    # cards). The xG shares are a simplified but standard attacking-role
-    # split (out of a forward-heavy front line), not literal Opta data.
+def classify_player_role(position: str) -> str:
+    # Maps a raw Football-Data.org "position" string (which may be coarse,
+    # e.g. just "Attacker") to one of the ROLE_XG_SHARE/ROLE_OVERALL_RANGE
+    # buckets. Order matters: the more specific "attacking midfield" check
+    # runs BEFORE the broad "attack"/"forward"/"striker" check, so a real
+    # attacking midfielder isn't mis-classified as a Striker.
     position_lower = (position or "").lower()
-    if "forward" in position_lower or "striker" in position_lower:
-        return "Striker", 0.34, 1
-    if "winger" in position_lower or "wing" in position_lower:
-        return "Winger", 0.19, 2
-    if "attacking midfield" in position_lower:
-        return "Attacking Midfielder", 0.22, 2
+    if "attacking midfield" in position_lower or "second striker" in position_lower:
+        return "Attacking Midfielder"
+    if "wing" in position_lower:
+        return "Winger"
+    if "forward" in position_lower or "striker" in position_lower or "attack" in position_lower:
+        return "Striker"
     if "midfield" in position_lower:
-        return "Midfielder", 0.12, 3
+        return "Midfielder"
     if "back" in position_lower or "defence" in position_lower or "defender" in position_lower:
-        return "Defender", 0.05, 4
+        return "Defender"
     if "keeper" in position_lower or "goalkeeper" in position_lower:
-        return "Goalkeeper", 0.0, 5
-    return "Player", 0.10, 3
+        return "Goalkeeper"
+    return "Midfielder"  # unrecognized/blank position: safest neutral default
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -1648,31 +1723,64 @@ def fetch_team_squad(league: str, team_name: str) -> tuple[dict[str, str], ...]:
 
 
 def select_key_players(squad: tuple[dict[str, str], ...]) -> list[dict[str, object]]:
-    # Picks the most attack-relevant, non-goalkeeper squad members (lowest
-    # classify_player_role priority first) as the Key Player / Anytime
-    # Goalscorer candidates — a pragmatic stand-in for true "most decisive
-    # player" ranking, since Football-Data.org has no appearances/goals
-    # data to rank by. Deduplicated by name.
+    # ROLE-WEIGHTED SELECTION (Forwards first): buckets every eligible
+    # squad member by role, excludes goalkeepers and anyone in
+    # EXCLUDED_PLAYERS, then builds the 3 Key Player slots by DRAWING FROM
+    # STRIKERS FIRST (up to 2, satisfying "always 1-2 forwards among the
+    # top 3"), filling any remaining slots from Winger/Attacking
+    # Midfielder, then Midfielder, then any extra Strikers, then Defender.
+    # A hard guarantee at the end injects a generated Striker if the real
+    # squad data genuinely contained none.
+    buckets: dict[str, list[str]] = {"Striker": [], "Winger": [], "Attacking Midfielder": [], "Midfielder": [], "Defender": []}
     seen_names: set[str] = set()
-    classified: list[dict[str, object]] = []
     for player in squad:
         name = player.get("name")
         if not name or name in seen_names:
             continue
-        role, xg_share, priority = classify_player_role(player.get("position", ""))
-        if priority >= 5:  # goalkeepers excluded from the goalscorer framing
+        if name.strip().lower() in EXCLUDED_PLAYERS:
             continue
-        classified.append({"name": name, "role": role, "xg_share": xg_share, "priority": priority, "generated": False})
+        role = classify_player_role(player.get("position", ""))
+        if role == "Goalkeeper" or role not in buckets:
+            continue
+        buckets[role].append(name)
         seen_names.add(name)
-    classified.sort(key=lambda entry: entry["priority"])
-    return classified[:KEY_PLAYER_MAX_CARDS]
+
+    selected: list[tuple[str, str]] = []  # (name, role)
+
+    for name in buckets["Striker"][:2]:
+        selected.append((name, "Striker"))
+
+    fill_order = [
+        ("Winger", buckets["Winger"]),
+        ("Attacking Midfielder", buckets["Attacking Midfielder"]),
+        ("Midfielder", buckets["Midfielder"]),
+        ("Striker", buckets["Striker"][len(selected):]),
+        ("Defender", buckets["Defender"]),
+    ]
+    chosen_names = {name for name, _role in selected}
+    for role, names in fill_order:
+        for name in names:
+            if len(selected) >= KEY_PLAYER_MAX_CARDS:
+                break
+            if name in chosen_names:
+                continue
+            selected.append((name, role))
+            chosen_names.add(name)
+        if len(selected) >= KEY_PLAYER_MAX_CARDS:
+            break
+
+    if not any(role == "Striker" for _name, role in selected):
+        # Hard guarantee: real squad data contained no recognizable
+        # Striker at all — inject a generated one at the front rather than
+        # ever showing a Key Players list with zero forwards.
+        selected = [("Lead Striker (Generated)", "Striker")] + selected
+        selected = selected[:KEY_PLAYER_MAX_CARDS]
+
+    return [{"name": name, "role": role, "generated": "(Generated)" in name} for name, role in selected]
 
 
 def generate_archetype_key_players() -> list[dict[str, object]]:
-    return [
-        {"name": name, "role": role, "xg_share": share, "priority": 1, "generated": True}
-        for name, role, share in GENERIC_KEY_PLAYER_ARCHETYPES
-    ]
+    return [{"name": name, "role": role, "generated": True} for name, role in GENERIC_KEY_PLAYER_ARCHETYPES]
 
 
 def _stable_name_jitter(name: str, spread: int = 2) -> int:
@@ -1683,27 +1791,30 @@ def _stable_name_jitter(name: str, spread: int = 2) -> int:
     return (int(digest[:2], 16) % (2 * spread + 1)) - spread
 
 
-def generate_player_overall_rating(team_power_rating: float, role_priority: int, player_name: str) -> int:
-    # FC/Ultimate-Team-style Overall (60-91), generated from the TEAM's own
-    # Global Power Rating (already computed by the Weighted Rating Engine —
-    # see build_match_model/compute_season_stats_summary) mapped onto a
-    # realistic Overall range, with a small role bump for more attacking
-    # positions (they're the ones being framed as "Key Players" here) and a
-    # deterministic per-player jitter so a squad doesn't read as a flat
-    # wall of identical numbers. Always a generated estimate — Football-
-    # Data.org has no player-level ratings of any kind.
+def generate_player_overall_rating(team_power_rating: float, role: str, player_name: str) -> int:
+    # FC/Ultimate-Team-style Overall, generated per ROLE-SPECIFIC ceiling
+    # (see ROLE_OVERALL_RANGE) from the TEAM's own Global Power Rating,
+    # with a small deterministic per-player jitter — UNLESS the player is
+    # in STAR_PLAYER_OVERALL_OVERRIDES, in which case that fixed, publicly-
+    # known rating is used directly regardless of club/role. Always a
+    # generated estimate outside the star-player table — Football-Data.org
+    # has no player-level ratings of any kind.
+    override = STAR_PLAYER_OVERALL_OVERRIDES.get(player_name.strip().lower())
+    if override is not None:
+        return override
+    range_min, range_max = ROLE_OVERALL_RANGE.get(role, (65, 83))
     normalized = clamp((team_power_rating - 1150.0) / (1850.0 - 1150.0), 0.0, 1.0)
-    base_rating = 72.0 + normalized * (91.0 - 72.0)
-    role_bonus = {1: 2, 2: 1, 3: 0}.get(role_priority, -2)
+    base_rating = range_min + normalized * (range_max - range_min)
     jitter = _stable_name_jitter(player_name)
-    return int(clamp(base_rating + role_bonus + jitter, 60.0, 91.0))
+    return int(clamp(base_rating + jitter, 55.0, 91.0))
 
 
-def generate_player_goal_probability(team_lambda: float, xg_share: float) -> float:
+def generate_player_goal_probability(team_lambda: float, role: str) -> float:
     # Anytime Goalscorer probability = 1 - P(0 goals), Poisson on the
-    # player's SHARE of the team's own match xG (same Poisson machinery
-    # used everywhere else in the app) — an estimate, not a real per-player
-    # xG feed (Football-Data.org has none).
+    # player's SHARE of the team's own match xG for their role (see
+    # ROLE_XG_SHARE) — an estimate, not a real per-player xG feed
+    # (Football-Data.org has none).
+    xg_share = ROLE_XG_SHARE.get(role, 0.05)
     player_lambda = max(team_lambda * xg_share, 0.0)
     return clamp(1.0 - math.exp(-player_lambda), 0.0, 0.97)
 
@@ -1713,15 +1824,16 @@ def build_key_players_for_team(
 ) -> tuple[list[dict[str, object]], bool]:
     # Returns (player_cards, used_real_squad_data). Real Football-Data.org
     # names are preferred; generic role archetypes silently fill any gap
-    # (missing squad entirely, or fewer than KEY_PLAYER_MAX_CARDS attacking
-    # players found) so the section always renders exactly 3 cards.
+    # (missing squad entirely, or fewer than KEY_PLAYER_MAX_CARDS eligible
+    # players found) so the section always renders exactly 3 cards, always
+    # with at least 1-2 Strikers among them.
     try:
         squad = fetch_team_squad(league, team_name)
         key_players = select_key_players(squad)
     except FootballDataError:
         key_players = []
 
-    used_real_squad_data = len(key_players) >= KEY_PLAYER_MAX_CARDS
+    used_real_squad_data = len(key_players) >= KEY_PLAYER_MAX_CARDS and not any(p["generated"] for p in key_players)
     if len(key_players) < KEY_PLAYER_MAX_CARDS:
         key_players = key_players + generate_archetype_key_players()[: KEY_PLAYER_MAX_CARDS - len(key_players)]
 
@@ -1731,13 +1843,13 @@ def build_key_players_for_team(
             {
                 "name": player["name"],
                 "role": player["role"],
-                "overall": generate_player_overall_rating(team_power_rating, player["priority"], player["name"]),
-                "goal_probability": generate_player_goal_probability(team_lambda, player["xg_share"]),
+                "overall": generate_player_overall_rating(team_power_rating, player["role"], player["name"]),
+                "goal_probability": generate_player_goal_probability(team_lambda, player["role"]),
+                "xg_share": ROLE_XG_SHARE.get(player["role"], 0.05),
                 "generated": player["generated"],
             }
         )
     return cards, used_real_squad_data
-
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_team_season_matches(league: str, team_name: str) -> tuple[dict[str, object], ...]:
@@ -3671,6 +3783,77 @@ def run_live_match_from_model(model: MatchModel, home: str, away: str) -> dict[s
     )
 
 
+def attribute_goal_scorers(
+    events: list[dict[str, object]],
+    home_players: list[dict[str, object]],
+    away_players: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    # POST-HOC attribution layer on top of simulate_single_match's existing
+    # per-minute Bernoulli engine (unchanged): for every simulated 'goal'
+    # event, draws WHICH Key Player scored it via a weighted random pick
+    # over that team's 3 FC Cards (weighted by each player's own
+    # ROLE_XG_SHARE), plus an "Unlisted Player" catch-all bucket for the
+    # portion of the team's attack not attributed to a tracked Key Player —
+    # a real squad has more than 3 possible scorers, so the 3 named cards
+    # should not win every single goal.
+    scorers: list[dict[str, object]] = []
+    for event in events:
+        if event.get("type") != "goal":
+            continue
+        team = event["team"]
+        players = home_players if team == "home" else away_players
+        names = [player["name"] for player in players]
+        weights = [float(player["xg_share"]) for player in players]
+        tracked_total = sum(weights)
+        unlisted_weight = max(1.0 - tracked_total, 0.05)
+        names = names + ["Unlisted Player"]
+        weights = weights + [unlisted_weight]
+        scorer_name = random.choices(names, weights=weights, k=1)[0]
+        scorers.append({"minute": int(event["minute"]), "team": team, "scorer": scorer_name})
+    return scorers
+
+
+def determine_match_mvp(
+    goal_scorers: list[dict[str, object]],
+    home_players: list[dict[str, object]],
+    away_players: list[dict[str, object]],
+    home_goals: int,
+    away_goals: int,
+    home: str,
+    away: str,
+) -> dict[str, object]:
+    # MVP = the tracked Key Player with the most simulated goals (ties
+    # broken by higher generated Overall); if none of the 3 tracked cards
+    # per side found the net, falls back to the highest-Overall Key Player
+    # on the side that didn't lose (a draw defaults to home).
+    tracked_by_name = {player["name"]: player for player in home_players + away_players}
+    goal_counts: dict[str, int] = {}
+    for scorer_event in goal_scorers:
+        name = scorer_event["scorer"]
+        if name in tracked_by_name:
+            goal_counts[name] = goal_counts.get(name, 0) + 1
+
+    if goal_counts:
+        best_name = max(goal_counts, key=lambda name: (goal_counts[name], tracked_by_name[name]["overall"]))
+        player = tracked_by_name[best_name]
+        goals = goal_counts[best_name]
+        return {
+            "name": best_name,
+            "role": player["role"],
+            "overall": player["overall"],
+            "reason": f"{goals} goal{'s' if goals > 1 else ''} in this simulation",
+        }
+
+    pool, team_label = (home_players, home) if home_goals >= away_goals else (away_players, away)
+    best = max(pool, key=lambda player: player["overall"])
+    return {
+        "name": best["name"],
+        "role": best["role"],
+        "overall": best["overall"],
+        "reason": f"top performer for {team_label}",
+    }
+
+
 # ==============================================================================
 # COMPONENTI UI "DARK GAMING / BROADCAST" (restyling estetico riutilizzabile)
 # ==============================================================================
@@ -3964,26 +4147,36 @@ def render_micro_events_intel_column(intel: dict[str, float]) -> None:
 
 def render_fc_player_card(player: dict[str, object]) -> None:
     # FC/Ultimate-Team-style player card: giant neon Overall, role label,
-    # name, and an Anytime Goalscorer probability badge — the 🧮 tag marks
-    # a generated role archetype (no real squad name available), 📡 marks a
-    # real Football-Data.org squad name (Overall/goal% are still always
-    # generated either way — see build_key_players_for_team).
+    # name, and a "GOAL CHANCE" neon progress bar with the Anytime
+    # Goalscorer probability — the 🧮 tag marks a generated role archetype
+    # (no real squad name available), 📡 marks a real Football-Data.org
+    # squad name (Overall/goal% are still always generated either way —
+    # see build_key_players_for_team).
     source_tag = "🧮" if player["generated"] else "📡"
+    goal_pct = float(player["goal_probability"])
+    bar_width = clamp(goal_pct * 100, 3.0, 100.0)
     st.markdown(
         f'<div class="fc-player-card"><div class="fc-player-source-tag">{source_tag}</div>'
         f'<div class="fc-player-overall">{int(player["overall"])}</div>'
         f'<div class="fc-player-role">{escape(str(player["role"]))}</div>'
         f'<div class="fc-player-name">{escape(str(player["name"]))}</div>'
-        f'<div class="fc-player-goal-badge">⚽ {float(player["goal_probability"]):.0%}</div>'
-        '</div>',
+        f'<div class="fc-player-progress-label">⚽ {goal_pct:.0%} Goal Chance</div>'
+        '<div class="fc-player-progress-track">'
+        f'<div class="fc-player-progress-fill" style="width:{bar_width:.1f}%"></div>'
+        '</div></div>',
         unsafe_allow_html=True,
     )
 
 
-def render_key_players_section(model: MatchModel, league: str, home: str, away: str) -> None:
+def render_key_players_section(
+    model: MatchModel, league: str, home: str, away: str
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     # "⭐ KEY PLAYERS & GOAL PROBABILITIES": compact, single-screen block —
     # 2 stacked rows of 3 cards (Home, then Away) rather than a 6-wide
-    # grid, so it stays legible on a narrow vertical video frame.
+    # grid, so it stays legible on a narrow vertical video frame. Returns
+    # the computed (home_players, away_players) so callers (the FC
+    # Simulator's goal-scorer attribution) reuse the exact same cards
+    # rather than recomputing/re-rolling them.
     st.markdown('<div class="mc-col-title">⭐ KEY PLAYERS & GOAL PROBABILITIES</div>', unsafe_allow_html=True)
 
     home_players, _home_live = build_key_players_for_team(league, home, model.home_lambda, model.home_rating)
@@ -4005,6 +4198,18 @@ def render_key_players_section(model: MatchModel, league: str, home: str, away: 
         "📡 Real squad name from Football-Data.org · 🧮 Generic role archetype (squad data unavailable) · "
         "Overall Rating and Goal Probability are always generated (from Team Power Rating and this match's "
         "xG by role) — Football-Data.org has no player-level ratings or scoring data of any kind."
+    )
+    return home_players, away_players
+
+
+def render_mvp_card(mvp: dict[str, object]) -> None:
+    st.markdown(
+        '<div class="fc-mvp-card">'
+        '<div class="fc-mvp-label">👑 Match MVP</div>'
+        f'<div class="fc-mvp-name">{escape(str(mvp["name"]))}</div>'
+        f'<div class="fc-mvp-sub">{escape(str(mvp["role"]))} · Overall {int(mvp["overall"])} · {escape(str(mvp["reason"]))}</div>'
+        '</div>',
+        unsafe_allow_html=True,
     )
 
 
@@ -4055,22 +4260,25 @@ def render_micro_events_intel_grid(intel: dict[str, float], home: str, away: str
         )
 
 
-def render_live_match_tab(model: MatchModel, home: str, away: str) -> None:
-    """🎮 Live Match Simulator (FC/FIFA Style): 'Start Match Simulation'
-    button that generates and animates ONE single match minute by minute
-    (live chronicle + final scoreboard), with the option to replay it
-    endlessly via 'Simulate Again'. Entertainment module independent from
-    the analytical engine: the reference probabilities remain the
-    Poisson/Dixon-Coles ones from the other tabs."""
+def render_live_match_tab(model: MatchModel, league: str, home: str, away: str) -> None:
+    """🎮 FC Simulator: the PRIMARY, spectacular home for Key Player FC
+    Cards, Anytime Goalscorer probabilities, the minute-by-minute live
+    chronicle, simulated goal scorers/minutes and a Match MVP card.
+    Entertainment module independent from the analytical engine: the
+    reference probabilities remain the Poisson/Dixon-Coles ones from the
+    other tabs — this is an illustrative single-match simulation, not a
+    forecast source."""
     st.markdown(
-        "### 🎮 Live Match Simulator (FC/FIFA Style)\n"
-        "Watch a single match 'play out' minute by minute, with a live "
-        "chronicle and a different outcome every time. Expected goals and "
-        "cards are calibrated on the same match Global Power Rating — but "
-        "this is an illustrative simulation of ONE match, it does not "
-        "replace the Poisson/Dixon-Coles/Monte Carlo forecasts from the "
-        "other tabs."
+        "### 🎮 FC Simulator\n"
+        "Key Players, Anytime Goalscorer odds, and a full minute-by-minute simulation — the showcase tab for "
+        "social video. Expected goals and cards are calibrated on the same match Global Power Rating, but this "
+        "is an illustrative simulation of ONE match; it does not replace the Poisson/Dixon-Coles/Monte Carlo "
+        "forecasts from the other tabs."
     )
+
+    st.markdown("---")
+    home_players, away_players = render_key_players_section(model, league, home, away)
+    st.markdown("---")
 
     if st.session_state.get("live_match_teams") != (home, away):
         # Selected teams changed: the previous simulation is no longer
@@ -4078,6 +4286,8 @@ def render_live_match_tab(model: MatchModel, home: str, away: str) -> None:
         # different match than the one currently being analyzed.
         st.session_state.pop("live_match_result", None)
         st.session_state.pop("live_match_chronicle", None)
+        st.session_state.pop("live_match_goal_scorers", None)
+        st.session_state.pop("live_match_mvp", None)
         st.session_state["live_match_teams"] = (home, away)
 
     has_previous_result = "live_match_result" in st.session_state
@@ -4123,8 +4333,20 @@ def render_live_match_tab(model: MatchModel, home: str, away: str) -> None:
             unsafe_allow_html=True,
         )
 
+        # Attribute each simulated goal to one of the 6 tracked FC Cards
+        # (or an "Unlisted Player"), then derive First Goal Scorer / MVP —
+        # reuses the SAME home_players/away_players shown in the pre-match
+        # showcase above (both deterministic given this match, so they
+        # match exactly what the viewer already saw).
+        goal_scorers = attribute_goal_scorers(result["events"], home_players, away_players)
+        mvp = determine_match_mvp(
+            goal_scorers, home_players, away_players, live_home_goals, live_away_goals, home, away
+        )
+
         st.session_state["live_match_result"] = result
         st.session_state["live_match_chronicle"] = chronicle
+        st.session_state["live_match_goal_scorers"] = goal_scorers
+        st.session_state["live_match_mvp"] = mvp
 
     if "live_match_result" not in st.session_state:
         st.info("Press '▶️ Start Match Simulation' to send the two teams onto the pitch.")
@@ -4132,10 +4354,36 @@ def render_live_match_tab(model: MatchModel, home: str, away: str) -> None:
 
     result = st.session_state["live_match_result"]
     stats = result["stats"]
+    goal_scorers = st.session_state.get("live_match_goal_scorers", [])
+    mvp = st.session_state.get("live_match_mvp")
 
     st.markdown("---")
     st.markdown("## 🏆 Final Scoreboard")
     render_broadcast_scoreboard(home, away, stats["home_goals"], stats["away_goals"], "FT 90'+")
+
+    st.markdown("#### ⚽ Goal Timeline & MVP")
+    col_timeline, col_mvp = st.columns([1.4, 1])
+    with col_timeline:
+        if not goal_scorers:
+            st.info("No goals in this simulation.")
+        else:
+            first_scorer = goal_scorers[0]
+            first_team_name = home if first_scorer["team"] == "home" else away
+            st.markdown(
+                f'<div class="fc-goal-timeline-item">🥇 <b>First Goal:</b> {escape(str(first_scorer["scorer"]))} '
+                f"({escape(first_team_name)}) — {first_scorer['minute']}'</div>",
+                unsafe_allow_html=True,
+            )
+            timeline_html = "".join(
+                f'<div class="fc-goal-timeline-item">⚽ {scorer_event["minute"]}\' — '
+                f'{escape(str(scorer_event["scorer"]))} '
+                f'({escape(home if scorer_event["team"] == "home" else away)})</div>'
+                for scorer_event in goal_scorers
+            )
+            st.markdown(timeline_html, unsafe_allow_html=True)
+    with col_mvp:
+        if mvp is not None:
+            render_mvp_card(mvp)
 
     st.markdown("#### 📊 Stat Comparison")
     render_stat_bar("Total Shots", stats["home_shots"], stats["away_shots"])
@@ -4166,6 +4414,8 @@ def render_live_match_tab(model: MatchModel, home: str, away: str) -> None:
         ),
         ("👟 Ball possession", f"{result['possesso_home']}% - {result['possesso_away']}%"),
     ]
+    if mvp is not None:
+        social_rows.append(("👑 Match MVP", f"{mvp['name']} ({mvp['role']})"))
     render_social_share_card(
         title=f"{home} vs {away}",
         headline=result["final_score"],
@@ -4177,8 +4427,12 @@ def render_live_match_tab(model: MatchModel, home: str, away: str) -> None:
     st.caption(
         "Illustrative minute-by-minute simulation: every run generates a different outcome, "
         "calibrated on the match's expected goals and cards, but it is NOT the source of the "
-        "probabilities used in the other tabs (Poisson/Dixon-Coles remain the analytical reference)."
+        "probabilities used in the other tabs (Poisson/Dixon-Coles remain the analytical reference). "
+        "Goal scorers, First Goal and MVP are drawn from the Key Players' generated goal shares, not real "
+        "player data."
     )
+
+
 
 
 # ==============================================================================
@@ -6236,7 +6490,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
             "🎯 Multi-Outcome & Value Bet Analyzer",
             "💰 Value Betting & Heatmap",
             "Monte Carlo Simulator (10,000 Matches)",
-            "🎮 Live Match Simulator (FC/FIFA Style)",
+            "🎮 FC Simulator",
         ]
     )
 
@@ -6426,9 +6680,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
                 f"⚙️ {mc_iterations:,} / {mc_iterations:,} paths computed for {home} vs {away} · "
                 "synced with the Dixon-Coles matrix above."
             )
-
-            st.markdown("---")
-            render_key_players_section(model, league, home, away)
+            st.caption("⭐ Key Players & Goal Probabilities now live in the 🎮 FC Simulator tab.")
 
             # --- Extended analytics, tucked away collapsed so the primary --
             # HUD above stays a single, scroll-free screen by default.
@@ -6481,7 +6733,7 @@ def render_dashboard(sidebar_values: dict[str, float]) -> None:
                 st.plotly_chart(goals_chart, use_container_width=True)
 
     with tab_live_match:
-        render_live_match_tab(model, home, away)
+        render_live_match_tab(model, league, home, away)
 
 
 DARK_THEME_CSS = """
@@ -6657,6 +6909,73 @@ h1, h2, h3, h4, h5 {
     font-weight: 800;
     font-size: 0.76rem;
     font-variant-numeric: tabular-nums;
+}
+
+.fc-player-progress-label {
+    margin-top: 10px;
+    font-size: 0.7rem;
+    font-weight: 800;
+    letter-spacing: 0.03em;
+    color: #00ff87;
+    text-transform: uppercase;
+}
+
+.fc-player-progress-track {
+    margin-top: 4px;
+    width: 100%;
+    height: 7px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+}
+
+.fc-player-progress-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #00e5ff, #00ff87);
+    box-shadow: 0 0 8px rgba(0, 255, 135, 0.6);
+}
+
+.fc-mvp-card {
+    background: linear-gradient(155deg, rgba(255, 214, 10, 0.14), rgba(5, 5, 5, 0.97));
+    border: 1px solid #ffd60a;
+    border-radius: 16px;
+    padding: 16px 18px;
+    text-align: center;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5), 0 0 22px rgba(255, 214, 10, 0.18);
+    margin-bottom: 12px;
+}
+
+.fc-mvp-label {
+    font-size: 0.72rem;
+    font-weight: 900;
+    letter-spacing: 0.14em;
+    color: #ffd60a;
+    text-transform: uppercase;
+}
+
+.fc-mvp-name {
+    font-size: 1.5rem;
+    font-weight: 900;
+    color: #ffffff;
+    margin: 6px 0 2px 0;
+}
+
+.fc-mvp-sub {
+    font-size: 0.8rem;
+    color: #e0e0e0;
+    font-weight: 600;
+}
+
+.fc-goal-timeline-item {
+    padding: 6px 0;
+    border-bottom: 1px dashed rgba(255, 255, 255, 0.08);
+    font-size: 0.85rem;
+    color: #e0e0e0;
+}
+
+.fc-goal-timeline-item:last-child {
+    border-bottom: none;
 }
 
 .league-tag {
