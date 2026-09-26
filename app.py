@@ -8103,8 +8103,8 @@ def main() -> None:
             st.markdown("---")
             sidebar_values = render_sidebar_controls()
 
-        main_tab_analysis, main_tab_season_stats, main_tab_bankroll = st.tabs(
-            ["⚽ Match Analysis", "📊 Season Stats 2026/27", "📊 Bankroll & History Management"]
+        main_tab_analysis, main_tab_season_stats, main_tab_bankroll, main_tab_matchday = st.tabs(
+            ["⚽ Match Analysis", "📊 Season Stats 2026/27", "📊 Bankroll & History Management", "🏆 Matchday Live"]
         )
         with main_tab_analysis:
             render_dashboard(sidebar_values)
@@ -8112,6 +8112,9 @@ def main() -> None:
             render_season_stats_tab()
         with main_tab_bankroll:
             render_bankroll_tab()
+            with main_tab_matchday:
+    league_simulator.render_matchday_simulator_tab()
+
     else:
         render_login()
 
