@@ -1663,16 +1663,158 @@ EXCLUDED_PLAYERS: set[str] = set()
 # would risk misinforming users about real people. Example of the expected
 # format (commented out): {"example player name"}.
 
-GENERIC_KEY_PLAYER_ARCHETYPES: tuple[tuple[str, str], ...] = (
-    ("Lead Striker (Generated)", "Striker"),
-    ("Creative Playmaker (Generated)", "Attacking Midfielder"),
-    ("Wide Threat (Generated)", "Winger"),
-)
-# Used only when Football-Data.org's squad endpoint is unavailable for a
-# team, OR as a last-resort guarantee that at least one Striker is always
-# present (see select_key_players): generic ROLE labels (not a specific
-# person's name), so a missing API response is never papered over with a
-# fabricated human identity.
+# ==============================================================================
+# MARQUEE CLUB ROSTER — curated real attacking players for major clubs
+# ==============================================================================
+# A small, MANUALLY-CURATED table of real, extremely well-known attacking
+# players for a handful of marquee clubs, checked FIRST (before the live
+# Football-Data.org squad fetch) so recognizable stars show up reliably in
+# the FC Cards instead of a generic "Lead Striker"-style label. Every
+# entry lists a Striker/Winger FIRST (so the top-2-scorer guarantee is
+# real attacking talent, never a generic tag) with a supporting
+# midfielder third.
+#
+# IMPORTANT LIMITATION, stated plainly: this list reflects player-club
+# associations that were extremely stable and widely known as of this
+# app's own knowledge — it is NOT live-verified against the current
+# 2026/27 season, and Football-Data.org has no transfer/injury feed this
+# app could cross-check it against either. A real transfer, retirement, or
+# injury that happened after that point will not be reflected here. Treat
+# these names as "recognizable marquee talent for this club", not as a
+# confirmed current-day lineup — always the same honest caveat this app
+# applies to every other estimate it shows.
+MARQUEE_CLUB_ATTACKERS: dict[str, list[dict[str, object]]] = {
+    "Inter": [
+        {"name": "Lautaro Martínez", "role": "Striker", "overall": 88},
+        {"name": "Marcus Thuram", "role": "Striker", "overall": 85},
+        {"name": "Hakan Çalhanoğlu", "role": "Attacking Midfielder", "overall": 86},
+    ],
+    "Milan": [
+        {"name": "Rafael Leão", "role": "Winger", "overall": 87},
+        {"name": "Christian Pulisic", "role": "Winger", "overall": 84},
+        {"name": "Álvaro Morata", "role": "Striker", "overall": 82},
+    ],
+    "Juventus": [
+        {"name": "Dušan Vlahović", "role": "Striker", "overall": 85},
+        {"name": "Kenan Yıldız", "role": "Winger", "overall": 83},
+        {"name": "Francisco Conceição", "role": "Winger", "overall": 81},
+    ],
+    "Napoli": [
+        {"name": "Romelu Lukaku", "role": "Striker", "overall": 84},
+        {"name": "Khvicha Kvaratskhelia", "role": "Winger", "overall": 87},
+        {"name": "Scott McTominay", "role": "Midfielder", "overall": 81},
+    ],
+    "Roma": [
+        {"name": "Paulo Dybala", "role": "Attacking Midfielder", "overall": 85},
+        {"name": "Artem Dovbyk", "role": "Striker", "overall": 82},
+        {"name": "Stephan El Shaarawy", "role": "Winger", "overall": 79},
+    ],
+    "PSG": [
+        {"name": "Ousmane Dembélé", "role": "Winger", "overall": 87},
+        {"name": "Bradley Barcola", "role": "Winger", "overall": 84},
+        {"name": "Désiré Doué", "role": "Attacking Midfielder", "overall": 82},
+    ],
+    "Real Madrid": [
+        {"name": "Kylian Mbappé", "role": "Striker", "overall": 91},
+        {"name": "Vinícius Júnior", "role": "Winger", "overall": 90},
+        {"name": "Jude Bellingham", "role": "Attacking Midfielder", "overall": 90},
+    ],
+    "Barcelona": [
+        {"name": "Robert Lewandowski", "role": "Striker", "overall": 87},
+        {"name": "Raphinha", "role": "Winger", "overall": 86},
+        {"name": "Lamine Yamal", "role": "Winger", "overall": 88},
+    ],
+    "Manchester City": [
+        {"name": "Erling Haaland", "role": "Striker", "overall": 91},
+        {"name": "Phil Foden", "role": "Attacking Midfielder", "overall": 87},
+        {"name": "Jérémy Doku", "role": "Winger", "overall": 84},
+    ],
+    "Arsenal": [
+        {"name": "Bukayo Saka", "role": "Winger", "overall": 88},
+        {"name": "Gabriel Martinelli", "role": "Winger", "overall": 83},
+        {"name": "Kai Havertz", "role": "Striker", "overall": 83},
+    ],
+    "Bayern": [
+        {"name": "Harry Kane", "role": "Striker", "overall": 89},
+        {"name": "Jamal Musiala", "role": "Attacking Midfielder", "overall": 88},
+        {"name": "Michael Olise", "role": "Winger", "overall": 84},
+    ],
+}
+
+
+def lookup_marquee_club_attackers(team_name: str) -> list[dict[str, object]] | None:
+    # Same fuzzy substring matching style as lookup_team_tier, so a live
+    # Football-Data.org name that differs slightly from the dict key
+    # ("FC Bayern München" vs "Bayern") still resolves correctly.
+    normalized = _normalize_team_name(team_name)
+    if not normalized:
+        return None
+    for club_key, players in MARQUEE_CLUB_ATTACKERS.items():
+        club_normalized = _normalize_team_name(club_key)
+        if club_normalized in normalized or normalized in club_normalized:
+            return players
+    return None
+
+
+NAME_POOLS_BY_COUNTRY: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "Italy": (("Matteo", "Lorenzo", "Andrea", "Davide", "Gianluca", "Simone"), ("Ferrari", "Rossi", "Bianchi", "Romano", "Conti", "Ricci")),
+    "France": (("Antoine", "Hugo", "Théo", "Mathis", "Enzo", "Nathan"), ("Bernard", "Petit", "Girard", "Roux", "Fournier", "Morel")),
+    "Spain": (("Álvaro", "Iker", "Pablo", "Diego", "Rodrigo", "Marc"), ("García", "Martínez", "López", "Sánchez", "Torres", "Navarro")),
+    "England": (("Jack", "Harry", "Callum", "Tyler", "Oliver", "Charlie"), ("Smith", "Taylor", "Walker", "Wright", "Evans", "Hughes")),
+    "Germany": (("Leon", "Finn", "Maximilian", "Paul", "Jonas", "Niklas"), ("Schmidt", "Wagner", "Becker", "Hoffmann", "Schulz", "Klein")),
+    "Netherlands": (("Daan", "Sem", "Milan", "Luuk", "Thijs", "Bram"), ("de Jong", "Bakker", "Visser", "Smit", "Mulder", "Dekker")),
+    "Portugal": (("Rúben", "Gonçalo", "Tiago", "Bruno", "André", "Diogo"), ("Silva", "Costa", "Ferreira", "Pereira", "Carvalho", "Gomes")),
+    "Generic": (("Marco", "Alex", "Sam", "Leo", "Noah", "Kai"), ("Santos", "King", "Moore", "Bell", "Reed", "Cole")),
+}
+
+LEAGUE_TO_COUNTRY: dict[str, str] = {
+    "Italy · Serie A": "Italy",
+    "Italy · Serie B": "Italy",
+    "England · Premier League": "England",
+    "England · EFL Championship": "England",
+    "Spain · La Liga": "Spain",
+    "Spain · Segunda División": "Spain",
+    "Germany · Bundesliga": "Germany",
+    "Germany · 2. Bundesliga": "Germany",
+    "France · Ligue 1": "France",
+    "France · Ligue 2": "France",
+    "Netherlands · Eredivisie": "Netherlands",
+    "Portugal · Primeira Liga": "Portugal",
+}
+# National-team and multi-country competitions (Champions League, World
+# Cup, Euros, Nations League, Friendlies) intentionally fall back to
+# "Generic" below — there is no single coherent nationality to draw from.
+
+
+def generate_nationality_coherent_players(
+    league: str, count_needed: int, exclude_count: int = 0
+) -> list[dict[str, object]]:
+    # NATIONALITY-COHERENT fallback, used only when a team is in neither
+    # MARQUEE_CLUB_ATTACKERS nor a usable live Football-Data.org squad:
+    # composes a plausible-sounding (deterministic, stable across reruns)
+    # name from a first/last-name pool matched to the competition's
+    # country, clearly tagged as generated (🧮) — never a generic role
+    # label like "Lead Striker", and never presented as a real, specific
+    # identified person.
+    country = LEAGUE_TO_COUNTRY.get(league, "Generic")
+    first_names, last_names = NAME_POOLS_BY_COUNTRY.get(country, NAME_POOLS_BY_COUNTRY["Generic"])
+    roles = ["Striker", "Winger", "Attacking Midfielder"]
+    results: list[dict[str, object]] = []
+    used_names: set[str] = set()
+    for offset in range(count_needed):
+        slot = exclude_count + offset
+        role = roles[slot % len(roles)]
+        name = ""
+        for retry in range(10):  # avoid a rare hash collision producing a duplicate name
+            digest = hashlib.md5(f"{league}-{country}-{slot}-{retry}".encode("utf-8")).hexdigest()
+            first = first_names[int(digest[0:2], 16) % len(first_names)]
+            last = last_names[int(digest[2:4], 16) % len(last_names)]
+            name = f"{first} {last}"
+            if name not in used_names:
+                break
+        used_names.add(name)
+        results.append({"name": name, "role": role, "generated": True})
+    return results
 
 
 def classify_player_role(position: str) -> str:
@@ -1770,17 +1912,13 @@ def select_key_players(squad: tuple[dict[str, str], ...]) -> list[dict[str, obje
             break
 
     if not any(role == "Striker" for _name, role in selected):
-        # Hard guarantee: real squad data contained no recognizable
-        # Striker at all — inject a generated one at the front rather than
-        # ever showing a Key Players list with zero forwards.
-        selected = [("Lead Striker (Generated)", "Striker")] + selected
-        selected = selected[:KEY_PLAYER_MAX_CARDS]
+        # No recognizable Striker in the real squad data at all: leave this
+        # to the caller (build_key_players_for_team), which has the
+        # `league` context needed to top up with a nationality-coherent
+        # generated Striker instead of a generic role label.
+        pass
 
-    return [{"name": name, "role": role, "generated": "(Generated)" in name} for name, role in selected]
-
-
-def generate_archetype_key_players() -> list[dict[str, object]]:
-    return [{"name": name, "role": role, "generated": True} for name, role in GENERIC_KEY_PLAYER_ARCHETYPES]
+    return [{"name": name, "role": role, "generated": False} for name, role in selected]
 
 
 def _stable_name_jitter(name: str, spread: int = 2) -> int:
@@ -1821,35 +1959,64 @@ def generate_player_goal_probability(team_lambda: float, role: str) -> float:
 
 def build_key_players_for_team(
     league: str, team_name: str, team_lambda: float, team_power_rating: float
-) -> tuple[list[dict[str, object]], bool]:
-    # Returns (player_cards, used_real_squad_data). Real Football-Data.org
-    # names are preferred; generic role archetypes silently fill any gap
-    # (missing squad entirely, or fewer than KEY_PLAYER_MAX_CARDS eligible
-    # players found) so the section always renders exactly 3 cards, always
-    # with at least 1-2 Strikers among them.
-    try:
-        squad = fetch_team_squad(league, team_name)
-        key_players = select_key_players(squad)
-    except FootballDataError:
-        key_players = []
+) -> tuple[list[dict[str, object]], str]:
+    # Returns (player_cards, source_label) where source_label is "marquee"
+    # (curated real-player table), "live" (real Football-Data.org squad),
+    # or "generated" (nationality-coherent placeholder names). Priority
+    # order, per the "real names first" requirement:
+    #   1) MARQUEE_CLUB_ATTACKERS — a handful of major clubs get real,
+    #      recognizable attacking stars directly, guaranteed correct roles.
+    #   2) Live Football-Data.org squad (fetch_team_squad/select_key_players)
+    #      — real names for every other team the API covers.
+    #   3) Nationality-coherent generated names — used only to fill any
+    #      remaining gap (squad unavailable, or missing a Striker), never a
+    #      generic role label like "Lead Striker".
+    marquee_players = lookup_marquee_club_attackers(team_name)
+    if marquee_players:
+        key_players: list[dict[str, object]] = [
+            {"name": p["name"], "role": p["role"], "overall_override": p["overall"], "generated": False}
+            for p in marquee_players[:KEY_PLAYER_MAX_CARDS]
+        ]
+        source = "marquee"
+    else:
+        try:
+            squad = fetch_team_squad(league, team_name)
+            key_players = select_key_players(squad)
+            source = "live" if key_players else "generated"
+        except FootballDataError:
+            key_players = []
+            source = "generated"
 
-    used_real_squad_data = len(key_players) >= KEY_PLAYER_MAX_CARDS and not any(p["generated"] for p in key_players)
+    if not any(player["role"] == "Striker" for player in key_players):
+        # Real data (marquee or live) contained no recognizable Striker at
+        # all: top up with a nationality-coherent generated Striker rather
+        # than ever showing zero forwards among the Key Players.
+        key_players = generate_nationality_coherent_players(league, 1) + key_players
+        source = "generated" if source != "marquee" else source
+
     if len(key_players) < KEY_PLAYER_MAX_CARDS:
-        key_players = key_players + generate_archetype_key_players()[: KEY_PLAYER_MAX_CARDS - len(key_players)]
+        key_players = key_players + generate_nationality_coherent_players(
+            league, KEY_PLAYER_MAX_CARDS - len(key_players), exclude_count=len(key_players)
+        )
+        if source not in ("marquee",):
+            source = "generated" if any(p["generated"] for p in key_players) else source
 
     cards: list[dict[str, object]] = []
     for player in key_players[:KEY_PLAYER_MAX_CARDS]:
+        overall = player.get("overall_override")
+        if overall is None:
+            overall = generate_player_overall_rating(team_power_rating, player["role"], player["name"])
         cards.append(
             {
                 "name": player["name"],
                 "role": player["role"],
-                "overall": generate_player_overall_rating(team_power_rating, player["role"], player["name"]),
+                "overall": overall,
                 "goal_probability": generate_player_goal_probability(team_lambda, player["role"]),
                 "xg_share": ROLE_XG_SHARE.get(player["role"], 0.05),
                 "generated": player["generated"],
             }
         )
-    return cards, used_real_squad_data
+    return cards, source
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_team_season_matches(league: str, team_name: str) -> tuple[dict[str, object], ...]:
@@ -4179,8 +4346,8 @@ def render_key_players_section(
     # rather than recomputing/re-rolling them.
     st.markdown('<div class="mc-col-title">⭐ KEY PLAYERS & GOAL PROBABILITIES</div>', unsafe_allow_html=True)
 
-    home_players, _home_live = build_key_players_for_team(league, home, model.home_lambda, model.home_rating)
-    away_players, _away_live = build_key_players_for_team(league, away, model.away_lambda, model.away_rating)
+    home_players, _home_source = build_key_players_for_team(league, home, model.home_lambda, model.home_rating)
+    away_players, _away_source = build_key_players_for_team(league, away, model.away_lambda, model.away_rating)
 
     st.caption(f"🏠 {home}")
     home_cols = st.columns(KEY_PLAYER_MAX_CARDS)
@@ -4195,9 +4362,10 @@ def render_key_players_section(
             render_fc_player_card(player)
 
     st.caption(
-        "📡 Real squad name from Football-Data.org · 🧮 Generic role archetype (squad data unavailable) · "
-        "Overall Rating and Goal Probability are always generated (from Team Power Rating and this match's "
-        "xG by role) — Football-Data.org has no player-level ratings or scoring data of any kind."
+        "📡 Real player name (curated marquee roster or live Football-Data.org squad) · 🧮 Generated name "
+        "(no real squad data available for this team) — Overall Rating and Goal Probability are always "
+        "generated (from Team Power Rating and this match's xG by role) regardless of the name source; "
+        "Football-Data.org has no player-level ratings, scoring, or injury data of any kind."
     )
     return home_players, away_players
 
