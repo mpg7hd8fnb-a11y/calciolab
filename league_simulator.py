@@ -64,17 +64,17 @@ MDS_LAMBDA_CEILING = 3.5
 # (e di un eventuale boost anti-0-0), per evitare lambda irrealistici.
 
 MATCHDAY_ZERO_ZERO_HARD_CAP = 2
-# HARD CAP RIGIDO: al massimo questo numero di 0-0 può comparire nella lista
-# FINALE dei 10 risultati di una giornata. Verificato/applicato DOPO aver
+# BLOCCO MATEMATICO RIGIDO: al massimo questo numero di 0-0 può comparire
+# nella lista FINALE dei 10 risultati di una giornata. Applicato DOPO aver
 # simulato l'intera giornata in memoria (vedi _enforce_matchday_zero_zero_cap).
 
-MDS_ZERO_ZERO_REROLL_BOOST = 0.45
-# Bonus xG assoluto (sommato a home_lambda/away_lambda già calibrati)
-# applicato ad ogni passata di re-roll per le partite 0-0 in eccesso.
+MDS_ZERO_ZERO_REROLL_BOOST = 0.50
+# Incremento xG assoluto (sommato a home_lambda/away_lambda già calibrati)
+# applicato ad ogni iterazione del ciclo while per i match 0-0 in eccesso.
 
-MDS_ZERO_ZERO_MAX_PASSES = 8
-# Numero massimo di passate dell'enforcement loop prima di ricorrere al
-# fallback deterministico per le partite ancora bloccate su 0-0.
+MDS_ZERO_ZERO_MAX_ITERATIONS = 10
+# Numero massimo di iterazioni del ciclo while prima di ricorrere al
+# fallback deterministico per i match ancora bloccati su 0-0.
 
 
 # ==============================================================================
@@ -86,11 +86,10 @@ def _simulate_fixture_raw(
     """Simula UNA fixture con il MatchModel/Monte Carlo esistenti
     (build_match_model / run_simulation, invariati in app.py). Se
     `calibration_enabled`, applica il moltiplicatore di lega più un
-    eventuale `extra_xg_boost` assoluto (usato dall'enforcement loop
-    anti-0-0), con tetto di sicurezza MDS_LAMBDA_CEILING, e il Realistic
-    Score Cap sui gol simulati. Ritorna un dict con score/goals/probabilità
-    1X2 calcolate sugli stessi identici array Monte Carlo del punteggio
-    rivelato."""
+    eventuale `extra_xg_boost` assoluto (usato dal ciclo while anti-0-0),
+    con tetto di sicurezza MDS_LAMBDA_CEILING, e il Realistic Score Cap sui
+    gol simulati. Ritorna un dict con score/goals/probabilità 1X2 calcolate
+    sugli stessi identici array Monte Carlo del punteggio rivelato."""
     model, error = try_build_match_model(league, home, away)
     if model is None:
         return {"home": home, "away": away, "error": error}
@@ -146,35 +145,36 @@ def _is_zero_zero(result: dict[str, object]) -> bool:
 def _enforce_matchday_zero_zero_cap(
     league: str, fixtures: list[tuple[str, str]], results: list[dict[str, object]], calibration_enabled: bool
 ) -> list[dict[str, object]]:
-    """HARD ENFORCEMENT LOOP: controlla il conteggio TOTALE degli 0-0 nella
-    lista dei 10 risultati già simulati in memoria. Se superano
-    MATCHDAY_ZERO_ZERO_HARD_CAP, ri-simula (re-roll) le partite 0-0 in
-    eccesso con un bonus xG crescente (+0.45 per passata), ripetendo il
-    controllo finché il totale non scende a <= 2 o si esauriscono i
-    tentativi previsti — nel qual caso applica un fallback deterministico
-    (1-0) alle partite ancora bloccate, garantendo SEMPRE il rispetto del
-    tetto nella lista finale."""
+    """BLOCCO MATEMATICO RIGIDO: conta quanti dei 10 risultati già simulati
+    in memoria sono finiti 0-0. Se il conteggio è MAGGIORE DI
+    MATCHDAY_ZERO_ZERO_HARD_CAP, un ciclo `while` ricalcola automaticamente
+    SOLO i match ancora in eccedenza (oltre il tetto) applicando un
+    incremento di xG di +MDS_ZERO_ZERO_REROLL_BOOST alle due squadre ad
+    ogni iterazione, finché il totale di 0-0 della giornata non scende a
+    <= MATCHDAY_ZERO_ZERO_HARD_CAP. Solo a quel punto la lista è considerata
+    definitiva. Un fallback deterministico (1-0) protegge da loop infiniti
+    nel caso limite di xG di partenza estremamente bassi."""
     if not calibration_enabled:
         return results
 
     boost = 0.0
-    for _pass_number in range(MDS_ZERO_ZERO_MAX_PASSES):
-        zero_zero_indices = [i for i, r in enumerate(results) if _is_zero_zero(r)]
-        if len(zero_zero_indices) <= MATCHDAY_ZERO_ZERO_HARD_CAP:
-            break  # Tetto già rispettato: nessun ulteriore re-roll necessario.
+    iterations = 0
+    zero_zero_indices = [i for i, r in enumerate(results) if _is_zero_zero(r)]
 
+    while len(zero_zero_indices) > MATCHDAY_ZERO_ZERO_HARD_CAP and iterations < MDS_ZERO_ZERO_MAX_ITERATIONS:
         boost += MDS_ZERO_ZERO_REROLL_BOOST
+        iterations += 1
         # I primi MATCHDAY_ZERO_ZERO_HARD_CAP 0-0 restano ammessi così
-        # come sono; solo l'ECCEDENZA viene ri-simulata con xG potenziati.
+        # come sono; solo l'ECCEDENZA viene ricalcolata con xG potenziati.
         indices_to_reroll = zero_zero_indices[MATCHDAY_ZERO_ZERO_HARD_CAP:]
         for index in indices_to_reroll:
             home, away = fixtures[index]
             results[index] = _simulate_fixture_raw(league, home, away, calibration_enabled, extra_xg_boost=boost)
+        zero_zero_indices = [i for i, r in enumerate(results) if _is_zero_zero(r)]
 
-    # Safety net finale: se dopo tutti i tentativi resta ancora un'eccedenza
-    # di 0-0 (xG di partenza estremamente bassi), forza un fallback
-    # deterministico realistico invece di violare il tetto.
-    zero_zero_indices = [i for i, r in enumerate(results) if _is_zero_zero(r)]
+    # Safety net finale: se dopo tutte le iterazioni resta ancora
+    # un'eccedenza (xG di partenza estremamente bassi), forza un fallback
+    # deterministico realistico invece di violare il tetto rigido.
     for index in zero_zero_indices[MATCHDAY_ZERO_ZERO_HARD_CAP:]:
         home, away = fixtures[index]
         results[index] = {
@@ -196,10 +196,10 @@ def simulate_full_matchday(
     league: str, fixtures: list[tuple[str, str]], calibration_enabled: bool
 ) -> list[dict[str, object]]:
     """Simula TUTTE le fixture della giornata IN UN UNICO BLOCCO in memoria
-    (nessun rendering intermedio), poi applica l'enforcement rigido sul
-    tetto di 0-0 sull'intera lista già completa. Ritorna la lista finale,
-    già validata, pronta per essere salvata in st.session_state e rivelata
-    a cascata."""
+    (lista temporanea, nessun rendering intermedio), poi applica il blocco
+    matematico rigido sul tetto di 0-0 sull'intera lista già completa.
+    Ritorna la lista finale, già validata, pronta per essere salvata in
+    st.session_state e rivelata a cascata."""
     results = [_simulate_fixture_raw(league, home, away, calibration_enabled) for home, away in fixtures]
     results = _enforce_matchday_zero_zero_cap(league, fixtures, results, calibration_enabled)
     return results
@@ -516,8 +516,8 @@ def render_matchday_simulator_tab() -> None:
         '<div class="mds-disclaimer">🎬 <b>Entertainment Calibration</b>: this tab applies '
         "discretionary per-league xG multipliers, a realistic score cap, and a HARD cap of "
         f"{MATCHDAY_ZERO_ZERO_HARD_CAP} 0-0 results per matchday — the full matchday is simulated in "
-        "memory first, then any 0-0 beyond the cap is force-rerolled with boosted xG before anything is "
-        "shown on screen. These adjustments apply ONLY here — Match Analysis, Value Betting and Monte "
+        "memory first, then any 0-0 beyond the cap is force-recalculated with boosted xG before anything "
+        "is shown on screen. These adjustments apply ONLY here — Match Analysis, Value Betting and Monte "
         "Carlo Simulator remain the app's unaffected statistical reference. Toggle off below to see the "
         "unadjusted model.</div>",
         unsafe_allow_html=True,
@@ -564,18 +564,19 @@ def render_matchday_simulator_tab() -> None:
     main_container = st.empty()
 
     if run_clicked:
-        # --- FASE 1: HUD di attesa (~2s), nessun risultato ancora mostrato --
-        with st.spinner("⚡ ANALYZING 10,000 MONTE CARLO SCENARIOS..."):
-            time.sleep(2)
+        # --- FASE 1: HUD di attesa (~2.5s), nessun risultato ancora mostrato -
+        with st.spinner("⚡ GENERATING MONTE CARLO SIMULATION (10,000 RUNS)..."):
+            time.sleep(2.5)
 
-        # --- FASE 2: simulazione dell'INTERA giornata in un unico blocco in
-        # memoria (nessun rendering intermedio), seguita dall'enforcement
-        # rigido sul tetto di 0-0 sull'intera lista già completa. ----------
+        # --- FASE 2: simulazione dell'INTERA giornata in un'unica lista in
+        # memoria, seguita dal blocco matematico rigido sul tetto di 0-0
+        # applicato sull'intera lista già completa. ------------------------
         results = simulate_full_matchday(league, fixtures, calibration_enabled)
         st.session_state["matchday_results"] = results
 
         # --- FASE 3: reveal a cascata, un match alla volta, aggiornando lo
-        # stesso placeholder (main_container) — nessun ricaricamento pagina.
+        # stesso contenitore dinamico (main_container) — nessun refresh
+        # pagina, vero effetto comparsa/dissolvenza sequenziale. -----------
         summary_html = _summary_strip_html(results)
         cards_html: list[str] = []
         for result in results:
