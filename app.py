@@ -18,6 +18,8 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from scipy.stats import poisson
+import league_simulator
+
 
 
 APP_PASSWORD = "wayne2026"
