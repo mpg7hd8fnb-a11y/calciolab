@@ -8112,7 +8112,7 @@ def main() -> None:
             render_season_stats_tab()
         with main_tab_bankroll:
             render_bankroll_tab()
-            with main_tab_matchday:
+        with main_tab_matchday:
     league_simulator.render_matchday_simulator_tab()
 
     else:
