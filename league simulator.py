@@ -1,4 +1,3 @@
-st.write("TEST DI AGGIORNAMENTO ATTIVO
 """"
 league_simulator.py — WayneLab · 🏆 Matchday Live Simulator
 Modulo indipendente e puramente additivo: riusa esclusivamente le funzioni
