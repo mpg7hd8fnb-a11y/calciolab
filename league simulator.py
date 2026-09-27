@@ -871,6 +871,7 @@ def render_matchday_simulator_tab() -> None:
     di supporto (dati, modello Poisson/Monte Carlo, CSS, dataset demo di
     fallback, generazione dell'HTML animato) sono definite in questo stesso
     file."""
+    st.error("🚨 TEST COLLEGAMENTO: SE VEDI QUESTO MESSAGGIO IL FILE SI STA AGGIORNANDO!")
     st.markdown(MATCHDAY_CSS, unsafe_allow_html=True)
     st.markdown('<div class="mds-header-title">🏆 MATCHDAY LIVE SIMULATOR</div>', unsafe_allow_html=True)
     st.caption(
