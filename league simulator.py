@@ -1,3 +1,58 @@
+"""
+league_simulator.py — WayneLab · 🏆 Matchday Live Simulator
+Modulo COMPLETAMENTE STANDALONE: questo file non importa e non nomina
+alcun altro modulo del progetto ospitante. Client dati, modello statistico
+e rendering sono tutti definiti qui dentro. La funzione principale non
+richiede alcun argomento:
+
+    def render_matchday_simulator_tab() -> None: ...
+
+MODELLO STATISTICO LOCALE
+--------------------------
+try_build_match_model stima gli xG con un classico schema Poisson
+"attack/defense" calcolato sulle partite concluse della competizione:
+    home_lambda = league_avg_home_goals × home_attack(home) × away_defense(away)
+    away_lambda = league_avg_away_goals × away_attack(away) × home_defense(home)
+run_simulation esegue poi una Monte Carlo Poisson standard sui due lambda.
+Questo è un motore indipendente, pensato solo per alimentare questa tab
+"broadcast": essendo il file completamente autonomo, non condivide codice
+con nessun'altra parte del progetto ospitante.
+
+DATI: DUE LIVELLI DI FALLBACK (nessuna chiamata di rete obbligatoria)
+-----------------------------------------------------------------------
+1) Se è disponibile una API key di Football-Data.org (st.secrets
+   ["FOOTBALL_DATA_API_KEY"] oppure variabile d'ambiente
+   FOOTBALL_DATA_API_KEY), fetch_league_matches/fetch_team_crests
+   interrogano l'API reale.
+2) Se la chiave manca, la rete non risponde, o l'API restituisce un
+   errore, si passa AUTOMATICAMENTE a un piccolo dataset dimostrativo
+   generato internamente (_DEMO_LEAGUE_DATA): una giornata di 10 fixture
+   con squadre fittizie e uno storico sintetico di partite concluse, così
+   il modulo resta sempre eseguibile al 100% in autonomia, anche del tutto
+   offline.
+
+⚠️ ENTERTAINMENT CALIBRATION LAYER
+Questo modulo applica, SOLO al proprio interno, moltiplicatori di xG e
+vincoli di punteggio pensati per rendere le simulazioni più dinamiche nei
+video social (TikTok/Reels/Shorts). Sono valori discrezionali di pacing,
+non un feed statistico validato, e sono disattivabili dal toggle in UI.
+
+FUNZIONALITÀ:
+  • RESET RIGIDO DELLO STATO: al click su "SIMULATE FULL MATCHDAY", ogni
+    chiave di st.session_state riconducibile a questo modulo (contenente
+    "matchday", "mds" o "results") viene esplicitamente cancellata PRIMA di
+    generare la nuova giornata.
+  • ANTI-ZERO-ZERO A CICLO WHILE: le 10 fixture vengono simulate una prima
+    volta in un array temporaneo; se gli 0-0 rivelati sono più di 2, un
+    ciclo while applica un boost incrementale di +0.50 xG e ri-simula SOLO
+    i match ancora 0-0, finché il totale della giornata non scende a <= 2
+    (con un tetto di iterazioni di sicurezza).
+  • MOTORE VISIVO "HUD BROADCAST" 9:16: hook iniziale animato (~1.5s, via
+    st.empty()), reveal delle 10 card una alla volta con time.sleep(0.6)
+    tra una e l'altra (via st.empty()/st.container()), e banner di
+    riepilogo finale (Total Goals / Avg Goals / Home Wins %).
+"""
+
 from __future__ import annotations
 
 import dataclasses
@@ -877,64 +932,56 @@ def render_matchday_simulator_tab() -> None:
         crests = {}
 
     if run_clicked:
-        # RESET RIGIDO DELLO STATO: cancella esplicitamente qualunque chiave
-        # di session_state riconducibile a questo modulo PRIMA di generare
-        # la nuova giornata, così la UI riparte sempre da zero. Il filtro è
-        # basato su substring ampio ("matchday"/"mds"/"results") e cancella
-        # anche le chiavi dei widget di questa tab — è voluto: garantisce un
-        # refresh visivo completo ad ogni simulazione. I valori già letti in
-        # questa run (calibration_enabled, league, matchday) restano validi.
-        # IMPORTANTE: nessun risultato viene scritto in st.session_state
-        # prima o durante il ciclo di reveal qui sotto — solo DOPO che tutte
-        # le card sono state mostrate una alla volta (vedi punto 4). Questo
-        # è tassativo: scrivere in session_state durante l'animazione
-        # innesca un rerun di Streamlit che interrompe la sequenza.
+        # RESET DELLO STATO AL CLICK: pop espliciti delle chiavi richieste,
+        # più il reset ampio già in uso da questo modulo (basato su substring
+        # "matchday"/"mds"/"results") per coprire anche le chiavi realmente
+        # usate qui (mds_calibration_enabled, mds_league_select, ecc.).
+        # Nessun risultato viene scritto in st.session_state prima o durante
+        # il ciclo di reveal: solo DOPO che tutte le card sono state mostrate
+        # (vedi punto 4) — scrivere in session_state a metà animazione
+        # innescherebbe un rerun che la interromperebbe.
+        st.session_state.pop("simulated_results", None)
+        st.session_state.pop("matchday_data", None)
         for key in list(st.session_state.keys()):
             if "matchday" in key or "mds" in key or "results" in key:
                 del st.session_state[key]
 
-        # 1) Hook da social: banner temporaneo dentro un st.empty(), visibile
-        #    per 1.5s, poi svuotato esplicitamente.
+        # 1) ANIMAZIONE HOOK AI ENGINE (1.5 SECONDI)
         hook_placeholder = st.empty()
         _render_hook_banner(hook_placeholder)
-        time.sleep(MDS_HOOK_SECONDS)
+        time.sleep(1.5)
         hook_placeholder.empty()
 
         # 2) Simulazione completa della giornata, calcolata INTERAMENTE IN
         #    MEMORIA prima di disegnare qualunque card (hard cap anti-0-0 a
-        #    ciclo while incluso — vedi _run_full_matchday). Questo passaggio
-        #    non scrive nulla a schermo: la UI resta vuota (subito dopo
-        #    l'hook) finché il calcolo non è completo.
+        #    ciclo while incluso — vedi _run_full_matchday).
         results = _run_full_matchday(league, fixtures, calibration_enabled)
 
-        # 3) REVEAL SEQUENZIALE — CRITICO: un contenitore dinamico unico,
-        #    poi un ciclo esplicito for i, outcome in enumerate(results) che
-        #    per ogni iterazione (a) crea uno slot st.empty() dedicato dentro
-        #    il contenitore, (b) ci disegna dentro la card corrente, (c) SOLO
-        #    DOPO chiama time.sleep(0.6). Ogni slot è un elemento nuovo e
-        #    distinto: Streamlit invia il relativo aggiornamento al browser
-        #    non appena viene scritto, quindi il time.sleep successivo crea
-        #    un ritardo visibile reale prima della card successiva. Se anche
-        #    con questa struttura le card continuano a comparire tutte
-        #    insieme, la causa non è in questo file (l'ordine
-        #    disegna-poi-aspetta è quello corretto e standard di Streamlit)
-        #    ma quasi certamente un livello di buffering a monte
-        #    (reverse proxy / CDN che bufferizza la risposta HTTP/WebSocket
-        #    prima di consegnarla al browser): in tal caso va disattivato il
-        #    buffering lato hosting, non modificato lo script Python.
-        cards_container = st.container()
-        for index, outcome in enumerate(results):
-            card_slot = cards_container.empty()
-            with card_slot.container():
-                if "error" in outcome:
-                    st.warning(f"{outcome['home']} vs {outcome['away']}: {outcome['error']}")
-                else:
-                    _render_match_card(outcome["home"], outcome["away"], outcome, crests)
-            time.sleep(MDS_CARD_REVEAL_DELAY_SECONDS)
+        # 3) REVEAL SEQUENZIALE REALE DELLE 10 CARD.
+        #    NB rispetto alla richiesta letterale: 'matches_area' è un
+        #    st.empty() (non un st.container() semplice), perché è l'unico
+        #    modo per "ridisegnare tutte le card fino a quella attuale" ad
+        #    ogni giro SENZA duplicarle — un st.container() normale non si
+        #    svuota tra un giro e l'altro, quindi ridisegnare la lista
+        #    crescente al suo interno ad ogni iterazione impilerebbe le card
+        #    già mostrate più volte. Con matches_area.container(), invece,
+        #    ogni iterazione sostituisce per intero il contenuto precedente
+        #    con il frame aggiornato (card 1..N), poi arriva il
+        #    time.sleep(0.6) tassativo prima del frame successivo.
+        rendered_matches: list[dict[str, object]] = []
+        matches_area = st.empty()
 
-        # 4) Banner di riepilogo finale — disegnato, e SOLO ORA i risultati
-        #    vengono eventualmente esposti ad altre parti dello stato (qui
-        #    non serve nemmeno: la tab non li ripersiste, cosi il reset del
-        #    punto 1 al prossimo click riparte sempre pulito).
+        for match in results:
+            rendered_matches.append(match)
+            with matches_area.container():
+                # Disegna TUTTE le card fino a quella attuale.
+                for shown in rendered_matches:
+                    if "error" in shown:
+                        st.warning(f"{shown['home']} vs {shown['away']}: {shown['error']}")
+                    else:
+                        _render_match_card(shown["home"], shown["away"], shown, crests)
+            time.sleep(MDS_CARD_REVEAL_DELAY_SECONDS)  # Delay tassativo per l'effetto cascata
+
+        # 4) Banner di riepilogo finale, disegnato solo a reveal completato.
         _render_matchday_summary(results)
         st.success(f"✅ Giornata {matchday} fully simulated — {len(fixtures)} matches.")
