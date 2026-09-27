@@ -21,14 +21,12 @@ from scipy.stats import poisson
 import sys
 import league_simulator
 
-# ... nella sezione dove viene mostrato il tab del simulatore:
-with main_tab_matchday:
-    league_simulator.render_matchday_simulator_tab(
-        run_simulation=run_simulation,
-        fetch_league_matches=fetch_league_matches,
-        fetch_team_crests=fetch_team_crests
-    )
+# ... nella sezione dei tab (dove definisci i tab principali):
+# Assicurati che main_tab_matchday sia il nome corretto del tuo tab!
+# Se il tuo tab si chiama semplicemente tab_matchday o tab3, usa quel nome.
 
+with main_tab_matchday:
+    league_simulator.render_matchday_simulator_tab()
 
 
 
