@@ -47,7 +47,7 @@ FUNZIONALITÀ:
     ciclo while applica un boost incrementale di +0.50 xG e ri-simula SOLO
     i match ancora 0-0, finché il totale della giornata non scende a <= 2
     (con un tetto di iterazioni di sicurezza).
-  • MOTORE VISIVO "HUD BROADCAST" 9:16: hook iniziale animato (~2s, via
+  • MOTORE VISIVO "HUD BROADCAST" 9:16: hook iniziale animato (~1.5s, via
     st.empty()), reveal delle 10 card una alla volta con time.sleep(0.6)
     tra una e l'altra (via st.empty()/st.container()), e banner di
     riepilogo finale (Total Goals / Avg Goals / Home Wins %).
@@ -350,7 +350,7 @@ MDS_ZERO_ZERO_BOOST_STEP = 0.50
 
 MDS_ZERO_ZERO_MAX_BOOST_ROUNDS = 15
 
-MDS_HOOK_SECONDS = 2.0
+MDS_HOOK_SECONDS = 1.5
 MDS_CARD_REVEAL_DELAY_SECONDS = 0.6
 
 
@@ -834,14 +834,28 @@ def _render_match_card(home: str, away: str, outcome: dict[str, object], crests:
     )
 
 
+def _most_surprising_result(results: list[dict[str, object]]) -> str:
+    """Individua il match il cui esito rivelato aveva, tra i tre 1X2
+    calcolati sugli stessi array Monte Carlo, la probabilità più bassa —
+    cioè il risultato statisticamente meno atteso della giornata."""
+    valid = [r for r in results if "error" not in r and "home_goals_total" in r]
+    if not valid:
+        return "—"
+    surprise_pick = min(valid, key=lambda r: _revealed_outcome_pill(r)[1])
+    _, prob = _revealed_outcome_pill(surprise_pick)
+    return (
+        f'{escape(str(surprise_pick["home"]))} <span>{escape(str(surprise_pick["score"]))}</span> '
+        f'{escape(str(surprise_pick["away"]))} — only {prob:.0%} predicted'
+    )
+
+
 def _render_matchday_summary(results: list[dict[str, object]]) -> None:
     valid = [r for r in results if "error" not in r and "home_goals_total" in r]
     if not valid:
         return
     total_goals = sum(r["home_goals_total"] + r["away_goals_total"] for r in valid)
     avg_goals = total_goals / len(valid)
-    home_wins = sum(1 for r in valid if r["home_goals_total"] > r["away_goals_total"])
-    home_win_pct = (home_wins / len(valid)) * 100
+    surprise_html = _most_surprising_result(results)
 
     st.markdown(
         '<div class="mds-summary-wrap">'
@@ -850,10 +864,13 @@ def _render_matchday_summary(results: list[dict[str, object]]) -> None:
         f'<div class="mds-summary-badge"><div class="mds-summary-value">{total_goals}</div>'
         f'<div class="mds-summary-label">Total Goals</div></div>'
         f'<div class="mds-summary-badge"><div class="mds-summary-value">{avg_goals:.2f}</div>'
-        f'<div class="mds-summary-label">Avg Goals</div></div>'
-        f'<div class="mds-summary-badge"><div class="mds-summary-value">{home_win_pct:.0f}%</div>'
-        f'<div class="mds-summary-label">Home Wins %</div></div>'
-        "</div></div>",
+        f'<div class="mds-summary-label">Avg Goals / Match</div></div>'
+        "</div>"
+        '<div class="mds-surprise-box">'
+        '<div class="mds-surprise-label">🎲 Most Surprising Result</div>'
+        f'<div class="mds-surprise-value">{surprise_html}</div>'
+        "</div>"
+        "</div>",
         unsafe_allow_html=True,
     )
 
@@ -916,39 +933,63 @@ def render_matchday_simulator_tab() -> None:
 
     if run_clicked:
         # RESET RIGIDO DELLO STATO: cancella esplicitamente qualunque chiave
-        # di session_state riconducibile a questo modulo prima di generare
+        # di session_state riconducibile a questo modulo PRIMA di generare
         # la nuova giornata, così la UI riparte sempre da zero. Il filtro è
         # basato su substring ampio ("matchday"/"mds"/"results") e cancella
         # anche le chiavi dei widget di questa tab — è voluto: garantisce un
         # refresh visivo completo ad ogni simulazione. I valori già letti in
         # questa run (calibration_enabled, league, matchday) restano validi.
+        # IMPORTANTE: nessun risultato viene scritto in st.session_state
+        # prima o durante il ciclo di reveal qui sotto — solo DOPO che tutte
+        # le card sono state mostrate una alla volta (vedi punto 4). Questo
+        # è tassativo: scrivere in session_state durante l'animazione
+        # innesca un rerun di Streamlit che interrompe la sequenza.
         for key in list(st.session_state.keys()):
             if "matchday" in key or "mds" in key or "results" in key:
                 del st.session_state[key]
 
-        # 1) Hook da social: overlay ad alto impatto per ~2s (via st.empty())
-        #    prima della prima card.
+        # 1) Hook da social: banner temporaneo dentro un st.empty(), visibile
+        #    per 1.5s, poi svuotato esplicitamente.
         hook_placeholder = st.empty()
         _render_hook_banner(hook_placeholder)
         time.sleep(MDS_HOOK_SECONDS)
         hook_placeholder.empty()
 
-        # 2) Simulazione completa della giornata con hard cap anti-0-0 a
-        #    ciclo while (vedi _run_full_matchday).
+        # 2) Simulazione completa della giornata, calcolata INTERAMENTE IN
+        #    MEMORIA prima di disegnare qualunque card (hard cap anti-0-0 a
+        #    ciclo while incluso — vedi _run_full_matchday). Questo passaggio
+        #    non scrive nulla a schermo: la UI resta vuota (subito dopo
+        #    l'hook) finché il calcolo non è completo.
         results = _run_full_matchday(league, fixtures, calibration_enabled)
 
-        # 3) Reveal sequenziale reale: una card alla volta, via
-        #    st.container()/st.empty(), con 0.6s di ritardo tra una e l'altra.
+        # 3) REVEAL SEQUENZIALE — CRITICO: un contenitore dinamico unico,
+        #    poi un ciclo esplicito for i, outcome in enumerate(results) che
+        #    per ogni iterazione (a) crea uno slot st.empty() dedicato dentro
+        #    il contenitore, (b) ci disegna dentro la card corrente, (c) SOLO
+        #    DOPO chiama time.sleep(0.6). Ogni slot è un elemento nuovo e
+        #    distinto: Streamlit invia il relativo aggiornamento al browser
+        #    non appena viene scritto, quindi il time.sleep successivo crea
+        #    un ritardo visibile reale prima della card successiva. Se anche
+        #    con questa struttura le card continuano a comparire tutte
+        #    insieme, la causa non è in questo file (l'ordine
+        #    disegna-poi-aspetta è quello corretto e standard di Streamlit)
+        #    ma quasi certamente un livello di buffering a monte
+        #    (reverse proxy / CDN che bufferizza la risposta HTTP/WebSocket
+        #    prima di consegnarla al browser): in tal caso va disattivato il
+        #    buffering lato hosting, non modificato lo script Python.
         cards_container = st.container()
         for index, outcome in enumerate(results):
-            with cards_container:
+            card_slot = cards_container.empty()
+            with card_slot.container():
                 if "error" in outcome:
                     st.warning(f"{outcome['home']} vs {outcome['away']}: {outcome['error']}")
                 else:
                     _render_match_card(outcome["home"], outcome["away"], outcome, crests)
-            if index < len(results) - 1:
-                time.sleep(MDS_CARD_REVEAL_DELAY_SECONDS)
+            time.sleep(MDS_CARD_REVEAL_DELAY_SECONDS)
 
-        # 4) Banner di riepilogo finale.
+        # 4) Banner di riepilogo finale — disegnato, e SOLO ORA i risultati
+        #    vengono eventualmente esposti ad altre parti dello stato (qui
+        #    non serve nemmeno: la tab non li ripersiste, cosi il reset del
+        #    punto 1 al prossimo click riparte sempre pulito).
         _render_matchday_summary(results)
         st.success(f"✅ Giornata {matchday} fully simulated — {len(fixtures)} matches.")
