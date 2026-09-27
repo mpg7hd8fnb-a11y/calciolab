@@ -1,4 +1,5 @@
-"""
+st.write("TEST DI AGGIORNAMENTO ATTIVO
+""""
 league_simulator.py — WayneLab · 🏆 Matchday Live Simulator
 Modulo indipendente e puramente additivo: riusa esclusivamente le funzioni
 e i modelli già presenti in app.py (build_match_model, run_simulation,
