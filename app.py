@@ -19,7 +19,12 @@ import streamlit as st
 import streamlit.components.v1 as components
 from scipy.stats import poisson
 import sys
+import importlib
 import league_simulator
+
+# Ricarica il modulo senza re-importare app
+importlib.reload(league_simulator)
+
 
 
 
