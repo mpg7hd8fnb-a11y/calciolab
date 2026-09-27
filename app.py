@@ -19,12 +19,16 @@ import streamlit as st
 import streamlit.components.v1 as components
 from scipy.stats import poisson
 import sys
-import importlib
 import league_simulator
 
-# Ricarica in sicurezza evitando loop circolari
-if "league_simulator" in sys.modules:
-    importlib.reload(league_simulator)
+# ... nella sezione dove viene mostrato il tab del simulatore:
+with main_tab_matchday:
+    league_simulator.render_matchday_simulator_tab(
+        run_simulation=run_simulation,
+        fetch_league_matches=fetch_league_matches,
+        fetch_team_crests=fetch_team_crests
+    )
+
 
 
 
