@@ -559,8 +559,7 @@ MATCHDAY_CSS = f"""
 .mds-pill {{
     position: absolute;
     bottom: 12px;
-    left: 50%;
-    transform: translateX(-50%);
+    right: 14px;
     font-family: "Courier New", monospace;
     font-size: 0.74rem;
     font-weight: 800;
@@ -643,6 +642,31 @@ MATCHDAY_CSS = f"""
     text-transform: uppercase;
     color: #9aa0a6;
     margin-top: 2px;
+}}
+.mds-surprise-box {{
+    margin-top: 10px;
+    background: #0a0a0a;
+    border: 1px solid rgba(0,229,255,0.5);
+    border-radius: 14px;
+    padding: 12px 14px;
+    text-align: center;
+}}
+.mds-surprise-label {{
+    font-size: 0.63rem;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: #9aa0a6;
+    margin-bottom: 4px;
+}}
+.mds-surprise-value {{
+    font-family: "Courier New", monospace;
+    font-size: 1.0rem;
+    font-weight: 800;
+    color: #f5f5f5;
+    letter-spacing: 0.02em;
+}}
+.mds-surprise-value span {{
+    color: {MATCHDAY_ACCENT};
 }}
 </style>
 """
