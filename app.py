@@ -18,7 +18,10 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from scipy.stats import poisson
-import league_simulator  # v2.0 update
+import importlib
+import league_simulator
+importlib.reload(league_simulator)
+
 
 
 
