@@ -4,7 +4,7 @@ Modulo indipendente e puramente additivo: riusa esclusivamente le funzioni
 e i modelli già presenti in app.py (build_match_model, run_simulation,
 fetch_league_teams, fetch_league_matches, fetch_team_crests) — nessuna
 nuova logica statistica di forecast, solo una nuova UI "broadcast" pensata
-per la registrazione di contenuti social (TikTok/Reels/Shorts).
+per la registrazione di contenuti social verticali (TikTok/Reels/Shorts).
 
 ⚠️ ENTERTAINMENT CALIBRATION LAYER
 Questo modulo applica, SOLO al proprio interno, dei moltiplicatori di xG e
@@ -17,14 +17,21 @@ sotto sono valori di calibrazione discrezionali (non derivati da un feed
 statistico verificato in tempo reale) — un utente può disattivarli con il
 toggle in UI per vedere l'output non calibrato.
 
-NOVITÀ DI QUESTA VERSIONE:
-  • Hard Cap Anti-Zero-Zero a livello di GIORNATA (max 2 × 0-0 su 10 match,
-    con re-roll a xG boostato per il 3° 0-0 in poi).
-  • "Smooth Broadcast Engine": overlay di analisi ad alto impatto seguito da
-    una reveal a cascata delle card (fade-in sequenziale via CSS, un solo
-    ciclo di rendering — niente refresh a scatti per ogni singola partita).
-  • Badge di sintesi giornata (Total Goals / Avg Goals per Match / Home
-    Win %) in stile neon Electric Cyan.
+NOVITÀ DI QUESTA VERSIONE (Vertical Broadcast HUD):
+  • Hook iniziale da social: banner "⚡ WAYNELAB AI ENGINE" con progress bar
+    Electric Cyan (~2s) prima di rivelare la prima partita.
+  • Card match minimal "Obsidian HUD": crest-risultato-crest centrati, nomi
+    squadre in uppercase, UNA sola pill in basso a destra con l'esito e la
+    relativa probabilità (es. "1 · 68%"). Nessuna statistica superflua.
+  • Reveal sequenziale REALE (non solo CSS): le partite compaiono una alla
+    volta con un ritardo effettivo di ~0.8s, pensato per la registrazione
+    schermo (suspense "live" durante il video).
+  • Overlay finale di sintesi giornata con Total Goals, Avg Goals/Match e
+    Most Surprising Result (il match il cui esito rivelato aveva la
+    probabilità più bassa tra i tre 1X2 calcolati sugli stessi array Monte
+    Carlo mostrati in card).
+  • Hard Cap Anti-Zero-Zero di giornata invariato: max 2×0-0 su 10 match,
+    con re-roll a xG boostato dal terzo 0-0 in poi.
 """
 
 from __future__ import annotations
@@ -95,15 +102,14 @@ MDS_ZERO_ZERO_CAP_BOOST_MULTIPLIER = 1.6
 # Boost temporaneo di xG usato SOLO per il re-roll anti-cap (non altera il
 # punteggio delle partite già assegnate né i lambda del modello originale).
 
-MDS_ANALYZING_SECONDS = 2.4
-# Durata dell'overlay "ANALYZING 10,000 MONTE CARLO SCENARIOS..." mostrato
-# una sola volta all'avvio della giornata (non per singolo match): il calcolo
-# vero e proprio delle 10 simulazioni avviene sotto, in un unico passaggio.
+MDS_HOOK_SECONDS = 2.0
+# Durata del banner hook iniziale "⚡ WAYNELAB AI ENGINE" — i primi 2 secondi
+# di video, pensati per catturare l'attenzione prima della prima card.
 
-MDS_CARD_STAGGER_SECONDS = 0.35
-# Ritardo (via CSS animation-delay) tra la comparsa di una card e la
-# successiva nella reveal a cascata. Puramente visivo: tutte le card sono
-# già calcolate e inviate al browser in un solo rendering.
+MDS_CARD_REVEAL_DELAY_SECONDS = 0.8
+# Ritardo REALE (time.sleep) tra la comparsa di una card e la successiva:
+# è il ritmo di registrazione, non un'animazione CSS — ogni partita resta
+# visibile sullo schermo mentre la successiva viene svelata.
 
 
 def _apply_league_calibration(league: str, home_lambda: float, away_lambda: float) -> tuple[float, float, float]:
@@ -154,8 +160,8 @@ def _suppress_zero_zero(
 def _empirical_score_and_outcomes(home_goals: np.ndarray, away_goals: np.ndarray) -> dict[str, object]:
     """Frequenze empiriche (post-calibrazione) del punteggio esatto più
     comune e delle probabilità 1X2, calcolate direttamente sugli stessi
-    array Monte Carlo mostrati come risultato — così i badge 1X2 restano
-    sempre coerenti col punteggio esatto rivelato in questo modulo."""
+    array Monte Carlo mostrati come risultato — così la pill 1X2 resta
+    sempre coerente col punteggio esatto rivelato in questo modulo."""
     n = len(home_goals)
     pairs, counts = np.unique(np.stack([home_goals, away_goals], axis=1), axis=0, return_counts=True)
     top_index = int(np.argmax(counts))
@@ -173,8 +179,22 @@ def _empirical_score_and_outcomes(home_goals: np.ndarray, away_goals: np.ndarray
     }
 
 
+def _revealed_outcome_pill(outcome: dict[str, object]) -> tuple[str, float]:
+    """Determina la pill 1X2 da mostrare in card in base al punteggio
+    EFFETTIVAMENTE rivelato (non al solo esito più probabile in astratto):
+    ritorna (codice, probabilità) dove codice è '1' (casa), 'X' (pareggio)
+    o '2' (trasferta), e la probabilità è quella calcolata sugli stessi
+    array Monte Carlo per quell'esito."""
+    home_goals, away_goals = outcome["home_goals_total"], outcome["away_goals_total"]
+    if home_goals > away_goals:
+        return "1", outcome["home_prob"]
+    if home_goals < away_goals:
+        return "2", outcome["away_prob"]
+    return "X", outcome["draw_prob"]
+
+
 # ==============================================================================
-# CSS — Obsidian / Electric Cyan Broadcast HUD (scoped, no clash with app.py)
+# CSS — Obsidian / Electric Cyan Vertical Broadcast HUD
 # ==============================================================================
 MATCHDAY_CSS = f"""
 <style>
@@ -187,185 +207,149 @@ MATCHDAY_CSS = f"""
     box-shadow: 0 10px 30px rgba(0,0,0,0.5), 0 0 22px rgba(0,229,255,0.10);
 }}
 
-/* ---- Smooth Broadcast Engine: analyzing overlay ---- */
-.mds-analyzing-wrap {{
+/* ---- Hook iniziale (primi 2 secondi) ---- */
+.mds-hook-wrap {{
     background: {MATCHDAY_BG};
-    border: 1px solid rgba(0,229,255,0.45);
-    border-radius: 18px;
-    padding: 26px 22px;
+    border: 1px solid rgba(0,229,255,0.55);
+    border-radius: 20px;
+    padding: 34px 22px;
     margin-bottom: 16px;
     text-align: center;
-    box-shadow: 0 10px 34px rgba(0,0,0,0.55), 0 0 30px rgba(0,229,255,0.14);
+    box-shadow: 0 12px 38px rgba(0,0,0,0.6), 0 0 36px rgba(0,229,255,0.18);
 }}
-.mds-analyzing-text {{
+.mds-hook-title {{
     font-family: "Courier New", monospace;
-    font-size: 0.92rem;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    font-weight: 800;
+    font-size: 1.5rem;
+    font-weight: 900;
+    letter-spacing: 0.10em;
     color: {MATCHDAY_ACCENT};
-    text-shadow: 0 0 10px rgba(0,229,255,0.7);
-    margin-bottom: 14px;
-    animation: mdsPulse 1.1s ease-in-out infinite;
+    text-shadow: 0 0 16px rgba(0,229,255,0.85);
+    margin-bottom: 8px;
+    animation: mdsPulse 1s ease-in-out infinite;
 }}
-.mds-analyzing-track {{
+.mds-hook-subtitle {{
+    font-family: "Courier New", monospace;
+    font-size: 0.85rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #d8dadc;
+    margin-bottom: 18px;
+}}
+.mds-hook-track {{
     width: 100%;
     height: 8px;
     border-radius: 999px;
     background: rgba(255,255,255,0.08);
     overflow: hidden;
 }}
-.mds-analyzing-fill {{
+.mds-hook-fill {{
     height: 100%;
     width: 0%;
     border-radius: 999px;
     background: linear-gradient(90deg, {MATCHDAY_ACCENT}, #00ff87);
     box-shadow: 0 0 14px rgba(0,229,255,0.85);
-    animation: mdsFill {MDS_ANALYZING_SECONDS}s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+    animation: mdsFill {MDS_HOOK_SECONDS}s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
 }}
 @keyframes mdsFill {{
     from {{ width: 0%; }}
     to {{ width: 100%; }}
 }}
 @keyframes mdsPulse {{
-    0%, 100% {{ opacity: 0.55; }}
+    0%, 100% {{ opacity: 0.6; }}
     50% {{ opacity: 1; }}
 }}
 
-/* ---- Matchday summary badge ---- */
-.mds-summary-row {{
-    display: flex;
-    gap: 10px;
-    flex-wrap: wrap;
-    justify-content: center;
-    margin-bottom: 16px;
-}}
-.mds-summary-badge {{
-    flex: 1;
-    min-width: 130px;
-    background: linear-gradient(165deg, #101010 0%, #050505 100%);
-    border: 1px solid rgba(0,229,255,0.5);
-    border-radius: 14px;
-    padding: 10px 12px;
-    text-align: center;
-    box-shadow: 0 0 16px rgba(0,229,255,0.14), 0 6px 16px rgba(0,0,0,0.5);
-}}
-.mds-summary-value {{
-    font-family: "Courier New", monospace;
-    font-size: 1.4rem;
-    font-weight: 900;
-    color: {MATCHDAY_ACCENT};
-    text-shadow: 0 0 10px rgba(0,229,255,0.6);
-    line-height: 1.1;
-}}
-.mds-summary-label {{
-    font-size: 0.66rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: #9aa0a6;
-    margin-top: 2px;
-}}
-
-/* ---- Match card, with cascade fade-in ---- */
+/* ---- Match card: Obsidian HUD, vertical-impact ---- */
 .mds-card {{
     position: relative;
-    background: linear-gradient(165deg, #101010 0%, #050505 100%);
+    background: {MATCHDAY_BG};
     border: 1px solid {MATCHDAY_ACCENT};
     border-radius: 18px;
-    padding: 18px 14px 16px 14px;
+    padding: 20px 16px 34px 16px;
     margin-bottom: 14px;
-    box-shadow: 0 0 20px rgba(0,229,255,0.15), 0 8px 22px rgba(0,0,0,0.5);
+    box-shadow: 0 0 22px rgba(0,229,255,0.16), 0 8px 22px rgba(0,0,0,0.55);
     text-align: center;
     opacity: 0;
-    animation: mdsCardIn 0.55s ease forwards;
-    animation-delay: var(--mds-delay, 0s);
+    animation: mdsCardIn 0.45s ease forwards;
 }}
 @keyframes mdsCardIn {{
-    from {{ opacity: 0; transform: translateY(16px) scale(0.985); }}
+    from {{ opacity: 0; transform: translateY(14px) scale(0.985); }}
     to {{ opacity: 1; transform: translateY(0) scale(1); }}
 }}
 .mds-calib-tag {{
     position: absolute;
     top: 10px;
-    right: 12px;
+    left: 14px;
     font-family: "Courier New", monospace;
-    font-size: 0.6rem;
+    font-size: 0.58rem;
     letter-spacing: 0.03em;
     color: {MATCHDAY_ACCENT};
-    opacity: 0.75;
+    opacity: 0.7;
 }}
 .mds-card-teams {{
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 14px;
+    gap: 16px;
 }}
 .mds-team {{
     flex: 1;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     min-width: 0;
 }}
 .mds-crest {{
-    width: 46px;
-    height: 46px;
+    width: 50px;
+    height: 50px;
     object-fit: contain;
 }}
 .mds-crest-placeholder {{
-    width: 46px;
-    height: 46px;
+    width: 50px;
+    height: 50px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 1.6rem;
+    font-size: 1.7rem;
     opacity: 0.6;
 }}
 .mds-team-name {{
     font-weight: 800;
-    font-size: 0.82rem;
+    font-size: 0.85rem;
     text-transform: uppercase;
     letter-spacing: 0.02em;
-    color: #e0e0e0;
+    color: #f2f2f2;
     text-align: center;
     overflow-wrap: break-word;
     line-height: 1.2;
     min-height: 2.1em;
 }}
-.mds-vs {{
-    font-weight: 900;
-    font-size: 0.8rem;
-    color: {MATCHDAY_ACCENT};
-    text-shadow: 0 0 8px rgba(0,229,255,0.6);
-}}
 .mds-score {{
-    font-size: 2.6rem;
+    font-size: 2.9rem;
     font-weight: 900;
     letter-spacing: 0.05em;
     font-variant-numeric: tabular-nums;
-    background: linear-gradient(135deg, {MATCHDAY_ACCENT}, #e0e0e0);
+    background: linear-gradient(135deg, {MATCHDAY_ACCENT}, #ffffff);
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
-    margin: 12px 0 8px 0;
+    margin: 0 4px;
     line-height: 1;
+    white-space: nowrap;
 }}
-.mds-outcome-row {{
-    display: flex;
-    justify-content: center;
-    gap: 8px;
-    flex-wrap: wrap;
-}}
-.mds-outcome-badge {{
+.mds-pill {{
+    position: absolute;
+    bottom: 12px;
+    right: 14px;
     font-family: "Courier New", monospace;
-    font-size: 0.7rem;
+    font-size: 0.72rem;
     font-weight: 800;
     letter-spacing: 0.04em;
-    padding: 4px 10px;
+    padding: 4px 11px;
     border-radius: 999px;
-    border: 1px solid rgba(0,229,255,0.4);
-    background: rgba(0,229,255,0.08);
+    border: 1px solid rgba(0,229,255,0.55);
+    background: rgba(0,229,255,0.10);
     color: {MATCHDAY_ACCENT};
     white-space: nowrap;
 }}
@@ -388,6 +372,84 @@ MATCHDAY_CSS = f"""
     border-left: 3px solid {MATCHDAY_ACCENT};
     background: rgba(0,229,255,0.05);
     border-radius: 6px;
+}}
+
+/* ---- Overlay finale di sintesi giornata ---- */
+.mds-summary-wrap {{
+    background: {MATCHDAY_BG};
+    border: 1px solid {MATCHDAY_ACCENT};
+    border-radius: 18px;
+    padding: 18px 16px;
+    margin-top: 6px;
+    box-shadow: 0 0 24px rgba(0,229,255,0.18), 0 8px 22px rgba(0,0,0,0.55);
+    opacity: 0;
+    animation: mdsCardIn 0.5s ease forwards;
+}}
+.mds-summary-title {{
+    font-family: "Courier New", monospace;
+    font-size: 0.8rem;
+    font-weight: 900;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: {MATCHDAY_ACCENT};
+    text-align: center;
+    margin-bottom: 12px;
+    text-shadow: 0 0 8px rgba(0,229,255,0.5);
+}}
+.mds-summary-row {{
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-bottom: 10px;
+}}
+.mds-summary-badge {{
+    flex: 1;
+    min-width: 120px;
+    background: #0a0a0a;
+    border: 1px solid rgba(0,229,255,0.5);
+    border-radius: 14px;
+    padding: 10px 12px;
+    text-align: center;
+}}
+.mds-summary-value {{
+    font-family: "Courier New", monospace;
+    font-size: 1.35rem;
+    font-weight: 900;
+    color: {MATCHDAY_ACCENT};
+    text-shadow: 0 0 10px rgba(0,229,255,0.6);
+    line-height: 1.1;
+}}
+.mds-summary-label {{
+    font-size: 0.63rem;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: #9aa0a6;
+    margin-top: 2px;
+}}
+.mds-surprise-box {{
+    background: #0a0a0a;
+    border: 1px solid rgba(0,229,255,0.5);
+    border-radius: 14px;
+    padding: 12px 14px;
+    text-align: center;
+}}
+.mds-surprise-label {{
+    font-size: 0.63rem;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: #9aa0a6;
+    margin-bottom: 4px;
+}}
+.mds-surprise-value {{
+    font-family: "Courier New", monospace;
+    font-size: 1.0rem;
+    font-weight: 800;
+    color: #f2f2f2;
+    letter-spacing: 0.02em;
+}}
+.mds-surprise-value span {{
+    color: {MATCHDAY_ACCENT};
 }}
 </style>
 """
@@ -459,7 +521,7 @@ def _simulate_one_fixture(
     correzione statistica sul singolo match.
 
     Le probabilità 1X2 mostrate sono sempre ricalcolate sugli stessi
-    identici array usati per il punteggio rivelato, così badge e risultato
+    identici array usati per il punteggio rivelato, così pill e risultato
     restano coerenti fra loro."""
     model, error = try_build_match_model(league, home, away)
     if model is None:
@@ -501,63 +563,19 @@ def _simulate_one_fixture(
     return outcome
 
 
-def _run_full_matchday(
-    league: str, fixtures: list[tuple[str, str]], calibration_enabled: bool
-) -> list[dict[str, object]]:
-    """Simula tutte le fixture della giornata in sequenza, applicando il
-    MDS_ZERO_ZERO_MATCHDAY_CAP: i primi MDS_ZERO_ZERO_MATCHDAY_CAP punteggi
-    0-0 rivelati sono ammessi normalmente; dal successivo in poi, il match
-    viene ri-simulato con xG boostato per forzare almeno un gol. Nessun
-    time.sleep qui: il calcolo avviene in un unico blocco, la messa in scena
-    (overlay + reveal a cascata) è gestita separatamente in UI."""
-    results: list[dict[str, object]] = []
-    zero_zero_count = 0
-    for home, away in fixtures:
-        enforce_cap = zero_zero_count >= MDS_ZERO_ZERO_MATCHDAY_CAP
-        outcome = _simulate_one_fixture(league, home, away, calibration_enabled, enforce_cap)
-        if outcome is not None and "error" not in outcome and outcome.get("score") == "0-0":
-            zero_zero_count += 1
-        results.append({"home": home, "away": away, **(outcome or {})})
-    return results
-
-
 # ==============================================================================
-# RENDERING — Smooth Broadcast Engine (analyzing overlay + cascade reveal)
+# RENDERING — Vertical Broadcast HUD (hook + one-by-one reveal + summary)
 # ==============================================================================
-def _render_analyzing_overlay(placeholder) -> None:
-    """Overlay unico ad alto impatto visivo mostrato UNA volta per l'intera
-    giornata (non per singolo match): barra che si riempie via CSS in
-    MDS_ANALYZING_SECONDS, nessun refresh Streamlit intermedio."""
+def _render_hook_banner(placeholder) -> None:
+    """Hook da social mostrato nei primi MDS_HOOK_SECONDS secondi, prima
+    della prima card: titolo pulsante + sottotitolo + barra che si riempie
+    via CSS, pensato per essere il primo frame del video."""
     placeholder.markdown(
-        f'<div class="mds-analyzing-wrap">'
-        f'<div class="mds-analyzing-text">⚡ ANALYZING 10,000 MONTE CARLO SCENARIOS...</div>'
-        f'<div class="mds-analyzing-track"><div class="mds-analyzing-fill"></div></div>'
+        f'<div class="mds-hook-wrap">'
+        f'<div class="mds-hook-title">⚡ WAYNELAB AI ENGINE</div>'
+        f'<div class="mds-hook-subtitle">Running 10,000 Monte Carlo Simulations...</div>'
+        f'<div class="mds-hook-track"><div class="mds-hook-fill"></div></div>'
         f"</div>",
-        unsafe_allow_html=True,
-    )
-
-
-def _render_matchday_summary(results: list[dict[str, object]]) -> None:
-    """Badge di sintesi giornata (Total Goals / Avg Goals per Match / Home
-    Win %), calcolato sugli stessi punteggi rivelati nelle card — nessuna
-    nuova fonte dati, solo un'aggregazione di quanto già simulato."""
-    valid = [r for r in results if "error" not in r and "home_goals_total" in r]
-    if not valid:
-        return
-    total_goals = sum(r["home_goals_total"] + r["away_goals_total"] for r in valid)
-    avg_goals = total_goals / len(valid)
-    home_wins = sum(1 for r in valid if r["home_goals_total"] > r["away_goals_total"])
-    home_win_pct = (home_wins / len(valid)) * 100
-
-    st.markdown(
-        '<div class="mds-summary-row">'
-        f'<div class="mds-summary-badge"><div class="mds-summary-value">{total_goals}</div>'
-        f'<div class="mds-summary-label">Total Goals</div></div>'
-        f'<div class="mds-summary-badge"><div class="mds-summary-value">{avg_goals:.2f}</div>'
-        f'<div class="mds-summary-label">Avg Goals / Match</div></div>'
-        f'<div class="mds-summary-badge"><div class="mds-summary-value">{home_win_pct:.0f}%</div>'
-        f'<div class="mds-summary-label">Home Wins</div></div>'
-        "</div>",
         unsafe_allow_html=True,
     )
 
@@ -569,70 +587,76 @@ def _crest_html(name: str, crests: dict[str, str]) -> str:
     return '<div class="mds-crest-placeholder">🛡️</div>'
 
 
-def _outcome_pill_label(home_prob: float, draw_prob: float, away_prob: float) -> tuple[str, float]:
-    """Riduce le 3 probabilità 1X2 a un'unica pill 'esito più probabile'
-    (es. 'HOME WIN · 64%'), per una card più minimal/social-friendly."""
-    best_label, best_prob = max(
-        [("HOME WIN", home_prob), ("DRAW", draw_prob), ("AWAY WIN", away_prob)],
-        key=lambda pair: pair[1],
-    )
-    return best_label, best_prob
-
-
 def _render_match_card(
     home: str,
     away: str,
-    score_label: str,
-    home_prob: float,
-    draw_prob: float,
-    away_prob: float,
+    outcome: dict[str, object],
     crests: dict[str, str],
-    calib_tag: str = "",
-    delay_seconds: float = 0.0,
 ) -> None:
+    """Card minimal 'Obsidian HUD': crest — risultato in bold — crest,
+    nessuna statistica superflua, con un'unica pill 1X2 in basso a destra
+    che riflette l'esito effettivamente rivelato."""
+    calib_tag = outcome.get("calib_tag", "")
     calib_html = f'<div class="mds-calib-tag">{escape(calib_tag)}</div>' if calib_tag else ""
-    best_label, best_prob = _outcome_pill_label(home_prob, draw_prob, away_prob)
+    pill_code, pill_prob = _revealed_outcome_pill(outcome)
     st.markdown(
-        f'<div class="mds-card" style="--mds-delay:{delay_seconds:.2f}s">'
+        f'<div class="mds-card">'
         f"{calib_html}"
         f'<div class="mds-card-teams">'
         f'<div class="mds-team">{_crest_html(home, crests)}'
         f'<div class="mds-team-name">{escape(home)}</div></div>'
-        f'<div class="mds-vs">VS</div>'
+        f'<div class="mds-score">{escape(outcome["score"])}</div>'
         f'<div class="mds-team">{_crest_html(away, crests)}'
         f'<div class="mds-team-name">{escape(away)}</div></div>'
         f"</div>"
-        f'<div class="mds-score">{escape(score_label)}</div>'
-        f'<div class="mds-outcome-row">'
-        f'<span class="mds-outcome-badge">{best_label} · {best_prob:.0%}</span>'
-        f'<span class="mds-outcome-badge">1 · {home_prob:.0%}</span>'
-        f'<span class="mds-outcome-badge">X · {draw_prob:.0%}</span>'
-        f'<span class="mds-outcome-badge">2 · {away_prob:.0%}</span>'
-        f"</div></div>",
+        f'<div class="mds-pill">{pill_code} · {pill_prob:.0%}</div>'
+        f"</div>",
         unsafe_allow_html=True,
     )
 
 
-def _render_cards_cascade(results: list[dict[str, object]], crests: dict[str, str]) -> None:
-    """Rendering in un solo passaggio di tutte le card, ciascuna con un
-    animation-delay CSS crescente: il browser esegue la reveal a cascata
-    (fade-in + slide-up) senza che Streamlit debba ridisegnare la pagina
-    partita per partita."""
-    for index, outcome in enumerate(results):
-        if "error" in outcome:
-            st.warning(f"{outcome['home']} vs {outcome['away']}: {outcome['error']}")
-            continue
-        _render_match_card(
-            outcome["home"],
-            outcome["away"],
-            outcome["score"],
-            outcome["home_prob"],
-            outcome["draw_prob"],
-            outcome["away_prob"],
-            crests,
-            outcome.get("calib_tag", ""),
-            delay_seconds=index * MDS_CARD_STAGGER_SECONDS,
-        )
+def _most_surprising_result(results: list[dict[str, object]]) -> str:
+    """Individua il match il cui esito rivelato aveva, tra i tre 1X2
+    calcolati sugli stessi array Monte Carlo, la probabilità più bassa —
+    cioè il risultato statisticamente meno atteso della giornata."""
+    valid = [r for r in results if "error" not in r and "home_goals_total" in r]
+    if not valid:
+        return "—"
+    surprise_pick = min(valid, key=lambda r: _revealed_outcome_pill(r)[1])
+    _, prob = _revealed_outcome_pill(surprise_pick)
+    return (
+        f'{escape(str(surprise_pick["home"]))} <span>{escape(str(surprise_pick["score"]))}</span> '
+        f'{escape(str(surprise_pick["away"]))} — only {prob:.0%} predicted'
+    )
+
+
+def _render_matchday_summary_overlay(results: list[dict[str, object]]) -> None:
+    """Overlay finale di sintesi giornata: Total Goals, Avg Goals/Match e
+    Most Surprising Result, calcolati sugli stessi punteggi rivelati nelle
+    card — nessuna nuova fonte dati, solo un'aggregazione."""
+    valid = [r for r in results if "error" not in r and "home_goals_total" in r]
+    if not valid:
+        return
+    total_goals = sum(r["home_goals_total"] + r["away_goals_total"] for r in valid)
+    avg_goals = total_goals / len(valid)
+    surprise_html = _most_surprising_result(results)
+
+    st.markdown(
+        '<div class="mds-summary-wrap">'
+        '<div class="mds-summary-title">📊 Matchday Summary</div>'
+        '<div class="mds-summary-row">'
+        f'<div class="mds-summary-badge"><div class="mds-summary-value">{total_goals}</div>'
+        f'<div class="mds-summary-label">Total Goals in Matchday</div></div>'
+        f'<div class="mds-summary-badge"><div class="mds-summary-value">{avg_goals:.2f}</div>'
+        f'<div class="mds-summary-label">Avg Goals / Match</div></div>'
+        "</div>"
+        '<div class="mds-surprise-box">'
+        '<div class="mds-surprise-label">🎲 Most Surprising Result</div>'
+        f'<div class="mds-surprise-value">{surprise_html}</div>'
+        "</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 # ==============================================================================
@@ -645,8 +669,8 @@ def render_matchday_simulator_tab() -> None:
         unsafe_allow_html=True,
     )
     st.caption(
-        "Simulate an entire matchday in one smooth broadcast sequence — built for TikTok/Reels/Shorts "
-        "recordings. Same Poisson + Dixon-Coles Monte Carlo engine used everywhere else in WayneLab."
+        "Vertical Broadcast HUD, built for TikTok/Reels/Shorts recordings — one match revealed "
+        "at a time. Same Poisson + Dixon-Coles Monte Carlo engine used everywhere else in WayneLab."
     )
     st.markdown(
         '<div class="mds-disclaimer">🎬 <b>Entertainment Calibration</b>: this tab applies '
@@ -704,29 +728,52 @@ def render_matchday_simulator_tab() -> None:
         crests = {}
 
     if run_clicked:
-        # 1) Overlay unico ad alto impatto ("Smooth Broadcast Engine"),
-        #    nessun refresh a scatti per singolo match.
-        analyzing_placeholder = st.empty()
-        _render_analyzing_overlay(analyzing_placeholder)
-        time.sleep(MDS_ANALYZING_SECONDS)
-        analyzing_placeholder.empty()
+        # 1) Hook da social: primo frame ad alto impatto, ~2s prima della
+        #    prima card (tempo reale, pensato per la registrazione).
+        hook_placeholder = st.empty()
+        _render_hook_banner(hook_placeholder)
+        time.sleep(MDS_HOOK_SECONDS)
+        hook_placeholder.empty()
 
-        # 2) Calcolo di tutta la giornata in un solo blocco (con hard cap
-        #    anti-0-0 applicato in sequenza sulle fixture).
-        results = _run_full_matchday(league, fixtures, calibration_enabled)
+        # 2) Reveal sequenziale REALE: una card alla volta, con hard cap
+        #    anti-0-0 applicato in ordine sulle fixture della giornata.
+        cards_container = st.container()
+        results: list[dict[str, object]] = []
+        zero_zero_count = 0
+
+        for index, (home, away) in enumerate(fixtures):
+            enforce_cap = zero_zero_count >= MDS_ZERO_ZERO_MATCHDAY_CAP
+            outcome = _simulate_one_fixture(league, home, away, calibration_enabled, enforce_cap)
+            if outcome is not None and "error" not in outcome and outcome.get("score") == "0-0":
+                zero_zero_count += 1
+            results.append({"home": home, "away": away, **(outcome or {})})
+
+            with cards_container:
+                if outcome is None or "error" in outcome:
+                    st.warning(f"{home} vs {away}: {(outcome or {}).get('error', 'simulation unavailable')}")
+                else:
+                    _render_match_card(home, away, outcome, crests)
+
+            if index < len(fixtures) - 1:
+                time.sleep(MDS_CARD_REVEAL_DELAY_SECONDS)
+
         st.session_state["mds_results"] = results
 
-        # 3) Reveal: badge di sintesi + card a cascata, un solo rendering.
-        _render_matchday_summary(results)
-        _render_cards_cascade(results, crests)
-
+        # 3) Overlay finale di sintesi, dopo l'ultima card.
+        _render_matchday_summary_overlay(results)
         st.success(f"✅ Giornata {matchday} fully simulated — {len(fixtures)} matches.")
         return
 
-    # Rendering persistente dei risultati già simulati (senza dover ricliccare)
+    # Rendering persistente dei risultati già simulati (senza dover ricliccare,
+    # senza i ritardi di reveal: qui l'obiettivo è la consultazione, non la
+    # registrazione di un nuovo video).
     if "mds_results" in st.session_state:
         results = st.session_state["mds_results"]
-        _render_matchday_summary(results)
-        _render_cards_cascade(results, crests)
+        for outcome in results:
+            if "error" in outcome:
+                st.warning(f"{outcome['home']} vs {outcome['away']}: {outcome['error']}")
+            else:
+                _render_match_card(outcome["home"], outcome["away"], outcome, crests)
+        _render_matchday_summary_overlay(results)
     else:
         st.info("Press '⚡ SIMULATE FULL MATCHDAY' to start the sequence.")
