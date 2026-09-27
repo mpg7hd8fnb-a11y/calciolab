@@ -18,13 +18,9 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from scipy.stats import poisson
-import sys
-import importlib
+
 import league_simulator
 
-# Forza il ricaricamento del simulatore ad ogni esecuzione
-if "league_simulator" in sys.modules:
-    importlib.reload(league_simulator)
 
 
 
