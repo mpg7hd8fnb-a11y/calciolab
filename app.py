@@ -22,9 +22,10 @@ import sys
 import importlib
 import league_simulator
 
-# Forza la rimozione del modulo dalla memoria di Python
+# Ricarica in sicurezza evitando loop circolari
 if "league_simulator" in sys.modules:
-    importlib.reload(sys.modules["league_simulator"])
+    importlib.reload(league_simulator)
+
 
 
 
