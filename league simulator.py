@@ -92,7 +92,7 @@ def _load_app_dependencies(app_module: Any = None) -> AppDependencies:
     tutto che questo file importi app.py), viene usato quello e non avviene
     alcun import."""
     if app_module is None:
-        import app as app_module  # noqa: PLC0415 — import intenzionalmente locale
+       # import app as app_module  # noqa: PLC0415 — import intenzionalmente locale
 
     return AppDependencies(
         FOOTBALL_DATA_COMPETITIONS=app_module.FOOTBALL_DATA_COMPETITIONS,
