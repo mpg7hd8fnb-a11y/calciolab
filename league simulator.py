@@ -17,21 +17,20 @@ sotto sono valori di calibrazione discrezionali (non derivati da un feed
 statistico verificato in tempo reale) — un utente può disattivarli con il
 toggle in UI per vedere l'output non calibrato.
 
-NOVITÀ DI QUESTA VERSIONE (Vertical Broadcast HUD):
-  • Hook iniziale da social: banner "⚡ WAYNELAB AI ENGINE" con progress bar
-    Electric Cyan (~2s) prima di rivelare la prima partita.
-  • Card match minimal "Obsidian HUD": crest-risultato-crest centrati, nomi
-    squadre in uppercase, UNA sola pill in basso a destra con l'esito e la
-    relativa probabilità (es. "1 · 68%"). Nessuna statistica superflua.
-  • Reveal sequenziale REALE (non solo CSS): le partite compaiono una alla
-    volta con un ritardo effettivo di ~0.8s, pensato per la registrazione
-    schermo (suspense "live" durante il video).
-  • Overlay finale di sintesi giornata con Total Goals, Avg Goals/Match e
-    Most Surprising Result (il match il cui esito rivelato aveva la
-    probabilità più bassa tra i tre 1X2 calcolati sugli stessi array Monte
-    Carlo mostrati in card).
-  • Hard Cap Anti-Zero-Zero di giornata invariato: max 2×0-0 su 10 match,
-    con re-roll a xG boostato dal terzo 0-0 in poi.
+NOVITÀ DI QUESTA VERSIONE:
+  • RESET RIGIDO DELLO STATO: al click su "SIMULATE FULL MATCHDAY", ogni
+    chiave di st.session_state riconducibile a questo modulo (contenente
+    "matchday", "mds" o "results") viene esplicitamente cancellata PRIMA di
+    generare la nuova giornata, cosi la UI riparte sempre da zero invece di
+    mostrare card o stati residui di una simulazione precedente.
+  • ANTI-ZERO-ZERO A CICLO WHILE: le 10 fixture vengono simulate una prima
+    volta in un array temporaneo in memoria; se gli 0-0 rivelati sono più di
+    MDS_ZERO_ZERO_MATCHDAY_CAP, un ciclo while applica un boost incrementale
+    di +0.50 xG e ri-simula SOLO i match ancora 0-0, finché il totale della
+    giornata non scende a <= cap (con un tetto di iterazioni di sicurezza).
+  • MOTORE VISIVO "HUD BROADCAST" 9:16: hook iniziale animato (~2s), reveal
+    delle card una alla volta con time.sleep(0.6) tra una e l'altra, e
+    banner di riepilogo finale (Total Goals / Avg Goals / Home Wins %).
 """
 
 from __future__ import annotations
@@ -83,33 +82,37 @@ MDS_MAX_GOALS_PER_TEAM = 4
 # troncati a questo tetto invece di essere mostrati as-is.
 
 MDS_LAMBDA_CEILING = 3.0
-# Tetto di sicurezza sugli xG DOPO l'applicazione del moltiplicatore di lega,
-# per evitare che un cumulo di fattori (slider manuali + moltiplicatore lega)
-# produca lambda irrealistici in ingresso alla simulazione.
+# Tetto di sicurezza sugli xG (dopo moltiplicatore di lega e/o boost
+# anti-0-0), per evitare che un cumulo di fattori produca lambda
+# irrealistici in ingresso alla simulazione.
 
 MDS_ZERO_ZERO_RESAMPLE_ATTEMPTS = 25
 # Tentativi massimi di resampling per singola partita simulata quando si
-# deve escludere lo 0-0: evita loop infiniti in casi limite (xG quasi a 0).
+# deve escludere lo 0-0 a livello di singola lega: evita loop infiniti in
+# casi limite (xG quasi a 0).
 
 MDS_ZERO_ZERO_MATCHDAY_CAP = 2
 # HARD CAP GIORNATA: al massimo questo numero di 0-0 può comparire come
 # punteggio rivelato nell'intera giornata simulata (tipicamente 10 match).
-# Dal (CAP + 1)-esimo 0-0 in poi, il match viene ri-simulato forzando almeno
-# un gol (vedi MDS_ZERO_ZERO_CAP_BOOST_MULTIPLIER). Attivo solo quando la
-# calibrazione è abilitata: è un vincolo di pacing per i video, non una
-# correzione statistica.
-MDS_ZERO_ZERO_CAP_BOOST_MULTIPLIER = 1.6
-# Boost temporaneo di xG usato SOLO per il re-roll anti-cap (non altera il
-# punteggio delle partite già assegnate né i lambda del modello originale).
+
+MDS_ZERO_ZERO_BOOST_STEP = 0.50
+# Incremento di xG (additivo, non moltiplicativo) applicato ad ogni giro del
+# ciclo while anti-0-0 di giornata, SOLO ai match ancora 0-0 dopo il giro
+# precedente. Cumulativo: al 2° giro un match ancora bloccato riceve +1.00
+# totale, al 3° +1.50, ecc.
+
+MDS_ZERO_ZERO_MAX_BOOST_ROUNDS = 15
+# Tetto di sicurezza sul numero di giri del ciclo while, per evitare loop
+# infiniti in casi limite (xG di partenza estremamente bassi su più match
+# contemporaneamente).
 
 MDS_HOOK_SECONDS = 2.0
 # Durata del banner hook iniziale "⚡ WAYNELAB AI ENGINE" — i primi 2 secondi
-# di video, pensati per catturare l'attenzione prima della prima card.
+# di video, prima che compaia la prima card.
 
-MDS_CARD_REVEAL_DELAY_SECONDS = 0.8
+MDS_CARD_REVEAL_DELAY_SECONDS = 0.6
 # Ritardo REALE (time.sleep) tra la comparsa di una card e la successiva:
-# è il ritmo di registrazione, non un'animazione CSS — ogni partita resta
-# visibile sullo schermo mentre la successiva viene svelata.
+# è il ritmo di registrazione per i video social, non un'animazione CSS.
 
 
 def _apply_league_calibration(league: str, home_lambda: float, away_lambda: float) -> tuple[float, float, float]:
@@ -132,12 +135,12 @@ def _cap_extreme_scores(home_goals: np.ndarray, away_goals: np.ndarray) -> None:
 def _suppress_zero_zero(
     rng: np.random.Generator, home_goals: np.ndarray, away_goals: np.ndarray, home_lambda: float, away_lambda: float
 ) -> None:
-    """Anti-Zero-Zero: per ogni partita simulata che risulta 0-0, ri-esegue
-    l'estrazione Poisson (xG passati in argomento) fino a ottenere almeno 1
-    gol complessivo, con un numero massimo di tentativi per evitare loop
-    infiniti su xG estremamente bassi. Statisticamente equivale a
-    condizionare la Poisson bivariata all'evento 'almeno un gol', non a una
-    riscrittura arbitraria del risultato."""
+    """Anti-Zero-Zero per singola lega: per ogni partita simulata che
+    risulta 0-0, ri-esegue l'estrazione Poisson (xG passati in argomento)
+    fino a ottenere almeno 1 gol complessivo, con un numero massimo di
+    tentativi per evitare loop infiniti su xG estremamente bassi.
+    Statisticamente equivale a condizionare la Poisson bivariata all'evento
+    'almeno un gol', non a una riscrittura arbitraria del risultato."""
     zero_zero_mask = (home_goals == 0) & (away_goals == 0)
     indices = np.flatnonzero(zero_zero_mask)
     if indices.size == 0:
@@ -151,7 +154,7 @@ def _suppress_zero_zero(
                 away_goals[index] = new_away
                 break
         else:
-            # Xg troppo basso per escludere lo 0-0 in modo credibile entro i
+            # xG troppo basso per escludere lo 0-0 in modo credibile entro i
             # tentativi previsti: forza il minimo risultato non-0-0 realistico.
             home_goals[index] = 1
             away_goals[index] = 0
@@ -194,7 +197,7 @@ def _revealed_outcome_pill(outcome: dict[str, object]) -> tuple[str, float]:
 
 
 # ==============================================================================
-# CSS — Obsidian / Electric Cyan Vertical Broadcast HUD
+# CSS — Obsidian / Electric Cyan Broadcast HUD (9:16)
 # ==============================================================================
 MATCHDAY_CSS = f"""
 <style>
@@ -230,7 +233,7 @@ MATCHDAY_CSS = f"""
 .mds-hook-subtitle {{
     font-family: "Courier New", monospace;
     font-size: 0.85rem;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
     color: #d8dadc;
     margin-bottom: 18px;
@@ -259,18 +262,18 @@ MATCHDAY_CSS = f"""
     50% {{ opacity: 1; }}
 }}
 
-/* ---- Match card: Obsidian HUD, vertical-impact ---- */
+/* ---- Match card: Obsidian HUD ---- */
 .mds-card {{
     position: relative;
     background: {MATCHDAY_BG};
     border: 1px solid {MATCHDAY_ACCENT};
     border-radius: 18px;
-    padding: 20px 16px 34px 16px;
+    padding: 22px 16px 36px 16px;
     margin-bottom: 14px;
     box-shadow: 0 0 22px rgba(0,229,255,0.16), 0 8px 22px rgba(0,0,0,0.55);
     text-align: center;
     opacity: 0;
-    animation: mdsCardIn 0.45s ease forwards;
+    animation: mdsCardIn 0.4s ease forwards;
 }}
 @keyframes mdsCardIn {{
     from {{ opacity: 0; transform: translateY(14px) scale(0.985); }}
@@ -290,7 +293,7 @@ MATCHDAY_CSS = f"""
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 16px;
+    gap: 18px;
 }}
 .mds-team {{
     flex: 1;
@@ -301,32 +304,32 @@ MATCHDAY_CSS = f"""
     min-width: 0;
 }}
 .mds-crest {{
-    width: 50px;
-    height: 50px;
+    width: 58px;
+    height: 58px;
     object-fit: contain;
 }}
 .mds-crest-placeholder {{
-    width: 50px;
-    height: 50px;
+    width: 58px;
+    height: 58px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 1.7rem;
+    font-size: 1.9rem;
     opacity: 0.6;
 }}
 .mds-team-name {{
     font-weight: 800;
-    font-size: 0.85rem;
+    font-size: 0.86rem;
     text-transform: uppercase;
     letter-spacing: 0.02em;
-    color: #f2f2f2;
+    color: #f5f5f5;
     text-align: center;
     overflow-wrap: break-word;
     line-height: 1.2;
     min-height: 2.1em;
 }}
 .mds-score {{
-    font-size: 2.9rem;
+    font-size: 3.1rem;
     font-weight: 900;
     letter-spacing: 0.05em;
     font-variant-numeric: tabular-nums;
@@ -341,12 +344,13 @@ MATCHDAY_CSS = f"""
 .mds-pill {{
     position: absolute;
     bottom: 12px;
-    right: 14px;
+    left: 50%;
+    transform: translateX(-50%);
     font-family: "Courier New", monospace;
-    font-size: 0.72rem;
+    font-size: 0.74rem;
     font-weight: 800;
     letter-spacing: 0.04em;
-    padding: 4px 11px;
+    padding: 4px 14px;
     border-radius: 999px;
     border: 1px solid rgba(0,229,255,0.55);
     background: rgba(0,229,255,0.10);
@@ -374,7 +378,7 @@ MATCHDAY_CSS = f"""
     border-radius: 6px;
 }}
 
-/* ---- Overlay finale di sintesi giornata ---- */
+/* ---- Banner di riepilogo finale ---- */
 .mds-summary-wrap {{
     background: {MATCHDAY_BG};
     border: 1px solid {MATCHDAY_ACCENT};
@@ -401,11 +405,10 @@ MATCHDAY_CSS = f"""
     gap: 10px;
     flex-wrap: wrap;
     justify-content: center;
-    margin-bottom: 10px;
 }}
 .mds-summary-badge {{
     flex: 1;
-    min-width: 120px;
+    min-width: 110px;
     background: #0a0a0a;
     border: 1px solid rgba(0,229,255,0.5);
     border-radius: 14px;
@@ -426,30 +429,6 @@ MATCHDAY_CSS = f"""
     text-transform: uppercase;
     color: #9aa0a6;
     margin-top: 2px;
-}}
-.mds-surprise-box {{
-    background: #0a0a0a;
-    border: 1px solid rgba(0,229,255,0.5);
-    border-radius: 14px;
-    padding: 12px 14px;
-    text-align: center;
-}}
-.mds-surprise-label {{
-    font-size: 0.63rem;
-    letter-spacing: 0.07em;
-    text-transform: uppercase;
-    color: #9aa0a6;
-    margin-bottom: 4px;
-}}
-.mds-surprise-value {{
-    font-family: "Courier New", monospace;
-    font-size: 1.0rem;
-    font-weight: 800;
-    color: #f2f2f2;
-    letter-spacing: 0.02em;
-}}
-.mds-surprise-value span {{
-    color: {MATCHDAY_ACCENT};
 }}
 </style>
 """
@@ -496,36 +475,21 @@ def _matchday_fixtures(league: str, matchday: int) -> list[tuple[str, str]]:
 
 
 # ==============================================================================
-# SIMULATION — per-fixture Monte Carlo + matchday-wide anti-zero-zero cap
+# SIMULATION — raw fixture pass + matchday-wide anti-zero-zero while-loop
 # ==============================================================================
-def _simulate_one_fixture(
-    league: str,
-    home: str,
-    away: str,
-    calibration_enabled: bool,
-    enforce_zero_zero_cap: bool = False,
-) -> dict[str, object] | None:
-    """Costruisce il MatchModel esistente (try_build_match_model, invariato)
-    e lancia la Monte Carlo a 10.000 iterazioni già presente in app.py
-    (run_simulation). Se `calibration_enabled`, applica PRIMA della
-    simulazione il moltiplicatore di xG di lega (con tetto di sicurezza) e,
-    DOPO la simulazione, il Realistic Score Cap e — per le leghe
-    configurate — l'esclusione dello 0-0 tramite resampling Poisson
-    condizionato.
-
-    Se `enforce_zero_zero_cap` è True (perché il MDS_ZERO_ZERO_MATCHDAY_CAP
-    è già stato raggiunto in questa giornata) e il punteggio rivelato è
-    comunque 0-0, esegue un ulteriore re-roll con xG boostato
-    (MDS_ZERO_ZERO_CAP_BOOST_MULTIPLIER) per forzare almeno un gol — questo
-    è un vincolo di pacing per la giornata nel suo complesso, non una
-    correzione statistica sul singolo match.
-
-    Le probabilità 1X2 mostrate sono sempre ricalcolate sugli stessi
-    identici array usati per il punteggio rivelato, così pill e risultato
-    restano coerenti fra loro."""
+def _simulate_fixture_raw(
+    league: str, home: str, away: str, calibration_enabled: bool
+):
+    """Costruisce il MatchModel esistente (try_build_match_model, invariato),
+    applica (se abilitata) la calibrazione di lega, lancia la Monte Carlo a
+    10.000 iterazioni già presente in app.py (run_simulation) e applica il
+    Realistic Score Cap + la soppressione 0-0 specifica di lega. Ritorna il
+    model calibrato (serve per un eventuale boost anti-0-0 di giornata) e
+    gli array grezzi home/away, così il chiamante può ricalcolare solo i
+    match che restano 0-0 dopo il primo giro."""
     model, error = try_build_match_model(league, home, away)
     if model is None:
-        return {"error": error}
+        return None, error, None, None, []
 
     if calibration_enabled:
         adj_home, adj_away, multiplier = _apply_league_calibration(league, model.home_lambda, model.away_lambda)
@@ -538,33 +502,90 @@ def _simulate_one_fixture(
     away_goals = simulation["raw"]["away_goals"].copy()
 
     calib_notes: list[str] = []
-    rng = np.random.default_rng()
-
     if calibration_enabled:
         if multiplier != 1.0:
             calib_notes.append(f"×{multiplier:.2f} xG")
         if league in LEAGUE_ZERO_ZERO_SUPPRESSED:
+            rng = np.random.default_rng()
             _suppress_zero_zero(rng, home_goals, away_goals, model.home_lambda, model.away_lambda)
             calib_notes.append("No 0-0")
         _cap_extreme_scores(home_goals, away_goals)
         calib_notes.append(f"Cap {MDS_MAX_GOALS_PER_TEAM}")
 
-    outcome = _empirical_score_and_outcomes(home_goals, away_goals)
+    return model, None, home_goals, away_goals, calib_notes
 
-    if calibration_enabled and enforce_zero_zero_cap and outcome["score"] == "0-0":
-        boosted_home = clamp(model.home_lambda * MDS_ZERO_ZERO_CAP_BOOST_MULTIPLIER, 0.1, MDS_LAMBDA_CEILING)
-        boosted_away = clamp(model.away_lambda * MDS_ZERO_ZERO_CAP_BOOST_MULTIPLIER, 0.1, MDS_LAMBDA_CEILING)
-        _suppress_zero_zero(rng, home_goals, away_goals, boosted_home, boosted_away)
-        _cap_extreme_scores(home_goals, away_goals)
+
+def _run_full_matchday(
+    league: str, fixtures: list[tuple[str, str]], calibration_enabled: bool
+) -> list[dict[str, object]]:
+    """1) Simula tutte le fixture in un array temporaneo (`results`).
+    2) Se calibrazione abilitata e gli 0-0 rivelati sono > MDS_ZERO_ZERO_
+       MATCHDAY_CAP, esegue un ciclo while: ad ogni giro incrementa di
+       MDS_ZERO_ZERO_BOOST_STEP l'xG (cumulativo) SOLO dei match ancora 0-0
+       e li ri-simula da zero (nuova Monte Carlo a 10.000 iterazioni sul
+       model boostato), finché il conteggio non scende a <= cap o si
+       raggiunge il tetto di sicurezza MDS_ZERO_ZERO_MAX_BOOST_ROUNDS."""
+    results: list[dict[str, object]] = []
+    fixture_state: list[dict[str, object] | None] = []
+
+    for home, away in fixtures:
+        model, error, home_goals, away_goals, calib_notes = _simulate_fixture_raw(
+            league, home, away, calibration_enabled
+        )
+        if model is None:
+            results.append({"home": home, "away": away, "error": error})
+            fixture_state.append(None)
+            continue
         outcome = _empirical_score_and_outcomes(home_goals, away_goals)
-        calib_notes.append(f"0-0 cap ({MDS_ZERO_ZERO_MATCHDAY_CAP}/giornata)")
+        outcome["home"] = home
+        outcome["away"] = away
+        outcome["calib_tag"] = "⚙️ " + " · ".join(calib_notes) if calib_notes else ""
+        results.append(outcome)
+        fixture_state.append({"model": model, "calib_notes": calib_notes})
 
-    outcome["calib_tag"] = "⚙️ " + " · ".join(calib_notes) if calib_notes else ""
-    return outcome
+    if calibration_enabled:
+        cumulative_boost = 0.0
+        rounds = 0
+        while rounds < MDS_ZERO_ZERO_MAX_BOOST_ROUNDS:
+            zero_zero_indices = [
+                i for i, r in enumerate(results) if "error" not in r and r.get("score") == "0-0"
+            ]
+            if len(zero_zero_indices) <= MDS_ZERO_ZERO_MATCHDAY_CAP:
+                break
+
+            rounds += 1
+            cumulative_boost += MDS_ZERO_ZERO_BOOST_STEP
+            rng = np.random.default_rng()
+
+            for i in zero_zero_indices:
+                state = fixture_state[i]
+                base_model = state["model"]
+                boosted_home = clamp(base_model.home_lambda + cumulative_boost, 0.1, MDS_LAMBDA_CEILING)
+                boosted_away = clamp(base_model.away_lambda + cumulative_boost, 0.1, MDS_LAMBDA_CEILING)
+                boosted_model = dataclasses.replace(base_model, home_lambda=boosted_home, away_lambda=boosted_away)
+
+                simulation = run_simulation(boosted_model, n_simulations=10_000)
+                home_goals = simulation["raw"]["home_goals"].copy()
+                away_goals = simulation["raw"]["away_goals"].copy()
+                _cap_extreme_scores(home_goals, away_goals)
+
+                # Sicurezza aggiuntiva: se anche dopo il boost restasse uno
+                # 0-0 residuo, lo condizioniamo comunque ad almeno un gol.
+                _suppress_zero_zero(rng, home_goals, away_goals, boosted_home, boosted_away)
+                _cap_extreme_scores(home_goals, away_goals)
+
+                outcome = _empirical_score_and_outcomes(home_goals, away_goals)
+                notes = list(state["calib_notes"]) + [f"0-0 cap +{cumulative_boost:.2f} xG"]
+                outcome["home"] = fixtures[i][0]
+                outcome["away"] = fixtures[i][1]
+                outcome["calib_tag"] = "⚙️ " + " · ".join(notes)
+                results[i] = outcome
+
+    return results
 
 
 # ==============================================================================
-# RENDERING — Vertical Broadcast HUD (hook + one-by-one reveal + summary)
+# RENDERING — HUD Broadcast engine (hook + one-by-one reveal + summary)
 # ==============================================================================
 def _render_hook_banner(placeholder) -> None:
     """Hook da social mostrato nei primi MDS_HOOK_SECONDS secondi, prima
@@ -587,15 +608,10 @@ def _crest_html(name: str, crests: dict[str, str]) -> str:
     return '<div class="mds-crest-placeholder">🛡️</div>'
 
 
-def _render_match_card(
-    home: str,
-    away: str,
-    outcome: dict[str, object],
-    crests: dict[str, str],
-) -> None:
-    """Card minimal 'Obsidian HUD': crest — risultato in bold — crest,
-    nessuna statistica superflua, con un'unica pill 1X2 in basso a destra
-    che riflette l'esito effettivamente rivelato."""
+def _render_match_card(home: str, away: str, outcome: dict[str, object], crests: dict[str, str]) -> None:
+    """Card 'Obsidian HUD': loghi grandi, risultato centrale bold ad
+    altissimo contrasto, unica pill 1X2 in basso. Nessuna statistica o
+    testo superfluo."""
     calib_tag = outcome.get("calib_tag", "")
     calib_html = f'<div class="mds-calib-tag">{escape(calib_tag)}</div>' if calib_tag else ""
     pill_code, pill_prob = _revealed_outcome_pill(outcome)
@@ -615,46 +631,29 @@ def _render_match_card(
     )
 
 
-def _most_surprising_result(results: list[dict[str, object]]) -> str:
-    """Individua il match il cui esito rivelato aveva, tra i tre 1X2
-    calcolati sugli stessi array Monte Carlo, la probabilità più bassa —
-    cioè il risultato statisticamente meno atteso della giornata."""
-    valid = [r for r in results if "error" not in r and "home_goals_total" in r]
-    if not valid:
-        return "—"
-    surprise_pick = min(valid, key=lambda r: _revealed_outcome_pill(r)[1])
-    _, prob = _revealed_outcome_pill(surprise_pick)
-    return (
-        f'{escape(str(surprise_pick["home"]))} <span>{escape(str(surprise_pick["score"]))}</span> '
-        f'{escape(str(surprise_pick["away"]))} — only {prob:.0%} predicted'
-    )
-
-
-def _render_matchday_summary_overlay(results: list[dict[str, object]]) -> None:
-    """Overlay finale di sintesi giornata: Total Goals, Avg Goals/Match e
-    Most Surprising Result, calcolati sugli stessi punteggi rivelati nelle
-    card — nessuna nuova fonte dati, solo un'aggregazione."""
+def _render_matchday_summary(results: list[dict[str, object]]) -> None:
+    """Banner di riepilogo finale: Total Goals, Avg Goals/Match e Home
+    Wins %, calcolati sugli stessi punteggi rivelati nelle card — nessuna
+    nuova fonte dati, solo un'aggregazione di quanto già simulato."""
     valid = [r for r in results if "error" not in r and "home_goals_total" in r]
     if not valid:
         return
     total_goals = sum(r["home_goals_total"] + r["away_goals_total"] for r in valid)
     avg_goals = total_goals / len(valid)
-    surprise_html = _most_surprising_result(results)
+    home_wins = sum(1 for r in valid if r["home_goals_total"] > r["away_goals_total"])
+    home_win_pct = (home_wins / len(valid)) * 100
 
     st.markdown(
         '<div class="mds-summary-wrap">'
         '<div class="mds-summary-title">📊 Matchday Summary</div>'
         '<div class="mds-summary-row">'
         f'<div class="mds-summary-badge"><div class="mds-summary-value">{total_goals}</div>'
-        f'<div class="mds-summary-label">Total Goals in Matchday</div></div>'
+        f'<div class="mds-summary-label">Total Goals</div></div>'
         f'<div class="mds-summary-badge"><div class="mds-summary-value">{avg_goals:.2f}</div>'
-        f'<div class="mds-summary-label">Avg Goals / Match</div></div>'
-        "</div>"
-        '<div class="mds-surprise-box">'
-        '<div class="mds-surprise-label">🎲 Most Surprising Result</div>'
-        f'<div class="mds-surprise-value">{surprise_html}</div>'
-        "</div>"
-        "</div>",
+        f'<div class="mds-summary-label">Avg Goals</div></div>'
+        f'<div class="mds-summary-badge"><div class="mds-summary-value">{home_win_pct:.0f}%</div>'
+        f'<div class="mds-summary-label">Home Wins %</div></div>'
+        "</div></div>",
         unsafe_allow_html=True,
     )
 
@@ -669,16 +668,16 @@ def render_matchday_simulator_tab() -> None:
         unsafe_allow_html=True,
     )
     st.caption(
-        "Vertical Broadcast HUD, built for TikTok/Reels/Shorts recordings — one match revealed "
+        "HUD Broadcast engine, built for TikTok/Reels/Shorts recordings (9:16) — one match revealed "
         "at a time. Same Poisson + Dixon-Coles Monte Carlo engine used everywhere else in WayneLab."
     )
     st.markdown(
         '<div class="mds-disclaimer">🎬 <b>Entertainment Calibration</b>: this tab applies '
         "discretionary per-league xG multipliers and score-shaping rules (goal cap, 0-0 exclusion "
-        "for select leagues, max 2×0-0 per matchday) tuned for social-video pacing. These adjustments "
-        "apply ONLY here — the Match Analysis, Value Betting and Monte Carlo Simulator tabs remain "
-        "unaffected and are the app's actual statistical reference. Turn the toggle off below to see "
-        "the unadjusted model.</div>",
+        "for select leagues, max 2×0-0 per matchday via an xG boost loop) tuned for social-video "
+        "pacing. These adjustments apply ONLY here — the Match Analysis, Value Betting and Monte "
+        "Carlo Simulator tabs remain unaffected and are the app's actual statistical reference. Turn "
+        "the toggle off below to see the unadjusted model.</div>",
         unsafe_allow_html=True,
     )
 
@@ -716,10 +715,6 @@ def render_matchday_simulator_tab() -> None:
 
     st.caption(f"📋 {len(fixtures)} fixtures loaded for Giornata {matchday}.")
 
-    if st.session_state.get("_mds_context") != (league, matchday, calibration_enabled):
-        st.session_state["_mds_context"] = (league, matchday, calibration_enabled)
-        st.session_state.pop("mds_results", None)
-
     run_clicked = st.button("⚡ SIMULATE FULL MATCHDAY", type="primary", key="mds_run_button")
 
     try:
@@ -728,6 +723,21 @@ def render_matchday_simulator_tab() -> None:
         crests = {}
 
     if run_clicked:
+        # --------------------------------------------------------------------
+        # RESET RIGIDO DELLO STATO (passaggio critico): cancella ESPLICITAMENTE
+        # qualunque chiave di session_state riconducibile a questo modulo,
+        # cosi la UI non mostra mai card o dati residui di una simulazione
+        # precedente. NB: essendo il filtro basato su substring molto ampio
+        # ("matchday" / "mds" / "results"), questo cancella anche le chiavi
+        # dei widget di questa tab (toggle/selectbox) — è voluto: garantisce
+        # che l'intera sezione riparta da uno stato pulito ad ogni simulazione.
+        # I valori già letti in questa run (calibration_enabled, league,
+        # matchday) restano validi per l'esecuzione corrente.
+        # --------------------------------------------------------------------
+        for key in list(st.session_state.keys()):
+            if "matchday" in key or "mds" in key or "results" in key:
+                del st.session_state[key]
+
         # 1) Hook da social: primo frame ad alto impatto, ~2s prima della
         #    prima card (tempo reale, pensato per la registrazione).
         hook_placeholder = st.empty()
@@ -735,45 +745,21 @@ def render_matchday_simulator_tab() -> None:
         time.sleep(MDS_HOOK_SECONDS)
         hook_placeholder.empty()
 
-        # 2) Reveal sequenziale REALE: una card alla volta, con hard cap
-        #    anti-0-0 applicato in ordine sulle fixture della giornata.
+        # 2) Simulazione completa della giornata con hard cap anti-0-0 a
+        #    ciclo while (vedi _run_full_matchday).
+        results = _run_full_matchday(league, fixtures, calibration_enabled)
+
+        # 3) Reveal sequenziale REALE: una card alla volta.
         cards_container = st.container()
-        results: list[dict[str, object]] = []
-        zero_zero_count = 0
-
-        for index, (home, away) in enumerate(fixtures):
-            enforce_cap = zero_zero_count >= MDS_ZERO_ZERO_MATCHDAY_CAP
-            outcome = _simulate_one_fixture(league, home, away, calibration_enabled, enforce_cap)
-            if outcome is not None and "error" not in outcome and outcome.get("score") == "0-0":
-                zero_zero_count += 1
-            results.append({"home": home, "away": away, **(outcome or {})})
-
+        for index, outcome in enumerate(results):
             with cards_container:
-                if outcome is None or "error" in outcome:
-                    st.warning(f"{home} vs {away}: {(outcome or {}).get('error', 'simulation unavailable')}")
+                if "error" in outcome:
+                    st.warning(f"{outcome['home']} vs {outcome['away']}: {outcome['error']}")
                 else:
-                    _render_match_card(home, away, outcome, crests)
-
-            if index < len(fixtures) - 1:
+                    _render_match_card(outcome["home"], outcome["away"], outcome, crests)
+            if index < len(results) - 1:
                 time.sleep(MDS_CARD_REVEAL_DELAY_SECONDS)
 
-        st.session_state["mds_results"] = results
-
-        # 3) Overlay finale di sintesi, dopo l'ultima card.
-        _render_matchday_summary_overlay(results)
+        # 4) Banner di riepilogo finale.
+        _render_matchday_summary(results)
         st.success(f"✅ Giornata {matchday} fully simulated — {len(fixtures)} matches.")
-        return
-
-    # Rendering persistente dei risultati già simulati (senza dover ricliccare,
-    # senza i ritardi di reveal: qui l'obiettivo è la consultazione, non la
-    # registrazione di un nuovo video).
-    if "mds_results" in st.session_state:
-        results = st.session_state["mds_results"]
-        for outcome in results:
-            if "error" in outcome:
-                st.warning(f"{outcome['home']} vs {outcome['away']}: {outcome['error']}")
-            else:
-                _render_match_card(outcome["home"], outcome["away"], outcome, crests)
-        _render_matchday_summary_overlay(results)
-    else:
-        st.info("Press '⚡ SIMULATE FULL MATCHDAY' to start the sequence.")
