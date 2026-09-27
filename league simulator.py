@@ -1,4 +1,4 @@
-""""
+"""
 league_simulator.py — WayneLab · 🏆 Matchday Live Simulator
 Modulo indipendente e puramente additivo: riusa esclusivamente le funzioni
 e i modelli già presenti in app.py (build_match_model, run_simulation,
@@ -17,14 +17,32 @@ sotto sono valori di calibrazione discrezionali (non derivati da un feed
 statistico verificato in tempo reale) — un utente può disattivarli con il
 toggle in UI per vedere l'output non calibrato.
 
-NOVITÀ DI QUESTA VERSIONE:
+FIX CIRCULAR IMPORT
+--------------------
+Questo file NON contiene più, a livello di modulo, la riga
+'from app import ...'. Se app.py importa league_simulator in testa al
+proprio file (es. 'import league_simulator') per registrare la tab, e
+league_simulator a sua volta importasse app allo stesso modo, si crea un
+ciclo di import che Python non può risolvere (circular import). La
+soluzione adottata è un IMPORT DIFFERITO ("lazy import"): le funzioni e le
+variabili di app.py (FOOTBALL_DATA_COMPETITIONS, FootballDataError, clamp,
+fetch_league_matches, fetch_team_crests, run_simulation,
+try_build_match_model) vengono importate solo QUANDO
+render_matchday_simulator_tab() viene effettivamente chiamata — non quando
+questo modulo viene caricato — tramite _load_app_dependencies(). A quel
+punto app.py è già stato completamente inizializzato, quindi il ciclo non
+si verifica mai. In alternativa, per test o architetture più esplicite, le
+stesse dipendenze possono essere passate a mano come argomento
+`app_module` di render_matchday_simulator_tab(): in tal caso non avviene
+alcun import di app.py da parte di questo file.
+
+NOVITÀ FUNZIONALI (invariate rispetto alla versione precedente):
   • RESET RIGIDO DELLO STATO: al click su "SIMULATE FULL MATCHDAY", ogni
     chiave di st.session_state riconducibile a questo modulo (contenente
     "matchday", "mds" o "results") viene esplicitamente cancellata PRIMA di
-    generare la nuova giornata, cosi la UI riparte sempre da zero invece di
-    mostrare card o stati residui di una simulazione precedente.
-  • ANTI-ZERO-ZERO A CICLO WHILE: le 10 fixture vengono simulate una prima
-    volta in un array temporaneo in memoria; se gli 0-0 rivelati sono più di
+    generare la nuova giornata.
+  • ANTI-ZERO-ZERO A CICLO WHILE: le fixture vengono simulate una prima
+    volta in un array temporaneo; se gli 0-0 rivelati sono più di
     MDS_ZERO_ZERO_MATCHDAY_CAP, un ciclo while applica un boost incrementale
     di +0.50 xG e ri-simula SOLO i match ancora 0-0, finché il totale della
     giornata non scende a <= cap (con un tetto di iterazioni di sicurezza).
@@ -38,22 +56,53 @@ from __future__ import annotations
 import dataclasses
 import time
 from html import escape
+from typing import Any, Callable
 
 import numpy as np
 import streamlit as st
 
-from app import (
-    FOOTBALL_DATA_COMPETITIONS,
-    FootballDataError,
-    clamp,
-    fetch_league_matches,
-    fetch_team_crests,
-    run_simulation,
-    try_build_match_model,
-)
-
 MATCHDAY_ACCENT = "#00E5FF"
 MATCHDAY_BG = "#050505"
+
+
+# ==============================================================================
+# DEPENDENCY INJECTION — nessun 'from app import ...' a livello di modulo
+# ==============================================================================
+@dataclasses.dataclass(frozen=True)
+class AppDependencies:
+    """Contenitore delle sole funzioni/variabili di app.py effettivamente
+    usate da questo modulo. Costruito da _load_app_dependencies(), MAI
+    importato direttamente in testa al file: questo è ciò che rompe il
+    circular import."""
+
+    FOOTBALL_DATA_COMPETITIONS: Any
+    FootballDataError: type
+    clamp: Callable[[float, float, float], float]
+    fetch_league_matches: Callable[[str], list]
+    fetch_team_crests: Callable[[str], dict]
+    run_simulation: Callable[..., dict]
+    try_build_match_model: Callable[[str, str, str], tuple]
+
+
+def _load_app_dependencies(app_module: Any = None) -> AppDependencies:
+    """Import DIFFERITO di app.py: eseguito solo quando la tab viene
+    effettivamente renderizzata (dentro render_matchday_simulator_tab), non
+    al caricamento di questo modulo. Se `app_module` viene passato
+    esplicitamente (es. dai test, o da un chiamante che vuole evitare del
+    tutto che questo file importi app.py), viene usato quello e non avviene
+    alcun import."""
+    if app_module is None:
+        import app as app_module  # noqa: PLC0415 — import intenzionalmente locale
+
+    return AppDependencies(
+        FOOTBALL_DATA_COMPETITIONS=app_module.FOOTBALL_DATA_COMPETITIONS,
+        FootballDataError=app_module.FootballDataError,
+        clamp=app_module.clamp,
+        fetch_league_matches=app_module.fetch_league_matches,
+        fetch_team_crests=app_module.fetch_team_crests,
+        run_simulation=app_module.run_simulation,
+        try_build_match_model=app_module.try_build_match_model,
+    )
 
 
 # ==============================================================================
@@ -115,7 +164,9 @@ MDS_CARD_REVEAL_DELAY_SECONDS = 0.6
 # è il ritmo di registrazione per i video social, non un'animazione CSS.
 
 
-def _apply_league_calibration(league: str, home_lambda: float, away_lambda: float) -> tuple[float, float, float]:
+def _apply_league_calibration(
+    league: str, home_lambda: float, away_lambda: float, clamp: Callable[[float, float, float], float]
+) -> tuple[float, float, float]:
     """Applica il moltiplicatore di lega ai due xG, con un tetto di
     sicurezza (MDS_LAMBDA_CEILING). Ritorna (adj_home, adj_away,
     multiplier_used) per poter mostrare il fattore applicato in UI."""
@@ -437,13 +488,13 @@ MATCHDAY_CSS = f"""
 # ==============================================================================
 # DATA HELPERS — pure grouping/reading, no new statistical logic
 # ==============================================================================
-def _available_matchdays(league: str) -> list[int]:
+def _available_matchdays(league: str, deps: AppDependencies) -> list[int]:
     """Legge il campo 'matchday' già restituito da Football-Data.org per
-    ogni fixture (fetch_league_matches, invariata) e ne estrae l'elenco
+    ogni fixture (deps.fetch_league_matches, invariata) e ne estrae l'elenco
     ordinato dei numeri di giornata disponibili per la competizione."""
     try:
-        matches = fetch_league_matches(league)
-    except FootballDataError:
+        matches = deps.fetch_league_matches(league)
+    except deps.FootballDataError:
         return []
     matchdays = sorted(
         {int(match["matchday"]) for match in matches if isinstance(match.get("matchday"), int)}
@@ -451,13 +502,13 @@ def _available_matchdays(league: str) -> list[int]:
     return matchdays
 
 
-def _matchday_fixtures(league: str, matchday: int) -> list[tuple[str, str]]:
+def _matchday_fixtures(league: str, matchday: int, deps: AppDependencies) -> list[tuple[str, str]]:
     """Elenco (home, away) delle fixture della giornata selezionata,
-    filtrando le partite già recuperate da fetch_league_matches per il
+    filtrando le partite già recuperate da deps.fetch_league_matches per il
     campo 'matchday' — nessuna nuova chiamata API, nessun nuovo modello."""
     try:
-        matches = fetch_league_matches(league)
-    except FootballDataError:
+        matches = deps.fetch_league_matches(league)
+    except deps.FootballDataError:
         return []
     fixtures: list[tuple[str, str]] = []
     for match in matches:
@@ -477,27 +528,28 @@ def _matchday_fixtures(league: str, matchday: int) -> list[tuple[str, str]]:
 # ==============================================================================
 # SIMULATION — raw fixture pass + matchday-wide anti-zero-zero while-loop
 # ==============================================================================
-def _simulate_fixture_raw(
-    league: str, home: str, away: str, calibration_enabled: bool
-):
-    """Costruisce il MatchModel esistente (try_build_match_model, invariato),
-    applica (se abilitata) la calibrazione di lega, lancia la Monte Carlo a
-    10.000 iterazioni già presente in app.py (run_simulation) e applica il
-    Realistic Score Cap + la soppressione 0-0 specifica di lega. Ritorna il
-    model calibrato (serve per un eventuale boost anti-0-0 di giornata) e
-    gli array grezzi home/away, così il chiamante può ricalcolare solo i
-    match che restano 0-0 dopo il primo giro."""
-    model, error = try_build_match_model(league, home, away)
+def _simulate_fixture_raw(league: str, home: str, away: str, calibration_enabled: bool, deps: AppDependencies):
+    """Costruisce il MatchModel esistente (deps.try_build_match_model,
+    invariato), applica (se abilitata) la calibrazione di lega, lancia la
+    Monte Carlo a 10.000 iterazioni già presente in app.py
+    (deps.run_simulation) e applica il Realistic Score Cap + la
+    soppressione 0-0 specifica di lega. Ritorna il model calibrato (serve
+    per un eventuale boost anti-0-0 di giornata) e gli array grezzi
+    home/away, così il chiamante può ricalcolare solo i match che restano
+    0-0 dopo il primo giro."""
+    model, error = deps.try_build_match_model(league, home, away)
     if model is None:
         return None, error, None, None, []
 
     if calibration_enabled:
-        adj_home, adj_away, multiplier = _apply_league_calibration(league, model.home_lambda, model.away_lambda)
+        adj_home, adj_away, multiplier = _apply_league_calibration(
+            league, model.home_lambda, model.away_lambda, deps.clamp
+        )
         model = dataclasses.replace(model, home_lambda=adj_home, away_lambda=adj_away)
     else:
         multiplier = 1.0
 
-    simulation = run_simulation(model, n_simulations=10_000)
+    simulation = deps.run_simulation(model, n_simulations=10_000)
     home_goals = simulation["raw"]["home_goals"].copy()
     away_goals = simulation["raw"]["away_goals"].copy()
 
@@ -516,7 +568,7 @@ def _simulate_fixture_raw(
 
 
 def _run_full_matchday(
-    league: str, fixtures: list[tuple[str, str]], calibration_enabled: bool
+    league: str, fixtures: list[tuple[str, str]], calibration_enabled: bool, deps: AppDependencies
 ) -> list[dict[str, object]]:
     """1) Simula tutte le fixture in un array temporaneo (`results`).
     2) Se calibrazione abilitata e gli 0-0 rivelati sono > MDS_ZERO_ZERO_
@@ -530,7 +582,7 @@ def _run_full_matchday(
 
     for home, away in fixtures:
         model, error, home_goals, away_goals, calib_notes = _simulate_fixture_raw(
-            league, home, away, calibration_enabled
+            league, home, away, calibration_enabled, deps
         )
         if model is None:
             results.append({"home": home, "away": away, "error": error})
@@ -560,11 +612,11 @@ def _run_full_matchday(
             for i in zero_zero_indices:
                 state = fixture_state[i]
                 base_model = state["model"]
-                boosted_home = clamp(base_model.home_lambda + cumulative_boost, 0.1, MDS_LAMBDA_CEILING)
-                boosted_away = clamp(base_model.away_lambda + cumulative_boost, 0.1, MDS_LAMBDA_CEILING)
+                boosted_home = deps.clamp(base_model.home_lambda + cumulative_boost, 0.1, MDS_LAMBDA_CEILING)
+                boosted_away = deps.clamp(base_model.away_lambda + cumulative_boost, 0.1, MDS_LAMBDA_CEILING)
                 boosted_model = dataclasses.replace(base_model, home_lambda=boosted_home, away_lambda=boosted_away)
 
-                simulation = run_simulation(boosted_model, n_simulations=10_000)
+                simulation = deps.run_simulation(boosted_model, n_simulations=10_000)
                 home_goals = simulation["raw"]["home_goals"].copy()
                 away_goals = simulation["raw"]["away_goals"].copy()
                 _cap_extreme_scores(home_goals, away_goals)
@@ -661,7 +713,15 @@ def _render_matchday_summary(results: list[dict[str, object]]) -> None:
 # ==============================================================================
 # MAIN TAB ENTRY POINT
 # ==============================================================================
-def render_matchday_simulator_tab() -> None:
+def render_matchday_simulator_tab(app_module: Any = None) -> None:
+    """Entry point chiamato da app.py (es. 'league_simulator.render_matchday_
+    simulator_tab()' dentro la tab dedicata). Non importa app.py a livello
+    di modulo: la dipendenza viene risolta qui dentro, al momento della
+    chiamata, tramite _load_app_dependencies — questo è ciò che elimina il
+    circular import. `app_module` è opzionale e serve solo per iniezione
+    esplicita (test, o per evitare del tutto l'auto-import di app.py)."""
+    deps = _load_app_dependencies(app_module)
+
     st.markdown(MATCHDAY_CSS, unsafe_allow_html=True)
     st.markdown(
         '<div class="mds-header-title">🏆 MATCHDAY LIVE SIMULATOR</div>',
@@ -691,11 +751,11 @@ def render_matchday_simulator_tab() -> None:
     with col_league:
         league = st.selectbox(
             "Competition",
-            options=list(FOOTBALL_DATA_COMPETITIONS),
+            options=list(deps.FOOTBALL_DATA_COMPETITIONS),
             key="mds_league_select",
         )
 
-    matchdays = _available_matchdays(league)
+    matchdays = _available_matchdays(league, deps)
     with col_matchday:
         if matchdays:
             matchday = st.selectbox(
@@ -708,7 +768,7 @@ def render_matchday_simulator_tab() -> None:
             st.warning("No live matchday data available for this competition.")
             return
 
-    fixtures = _matchday_fixtures(league, matchday)
+    fixtures = _matchday_fixtures(league, matchday, deps)
     if not fixtures:
         st.info(f"No fixtures found for Giornata {matchday} in {league}.")
         return
@@ -718,8 +778,8 @@ def render_matchday_simulator_tab() -> None:
     run_clicked = st.button("⚡ SIMULATE FULL MATCHDAY", type="primary", key="mds_run_button")
 
     try:
-        crests = fetch_team_crests(league)
-    except FootballDataError:
+        crests = deps.fetch_team_crests(league)
+    except deps.FootballDataError:
         crests = {}
 
     if run_clicked:
@@ -727,8 +787,8 @@ def render_matchday_simulator_tab() -> None:
         # RESET RIGIDO DELLO STATO (passaggio critico): cancella ESPLICITAMENTE
         # qualunque chiave di session_state riconducibile a questo modulo,
         # cosi la UI non mostra mai card o dati residui di una simulazione
-        # precedente. NB: essendo il filtro basato su substring molto ampio
-        # ("matchday" / "mds" / "results"), questo cancella anche le chiavi
+        # precedente. NB: il filtro è basato su substring molto ampio
+        # ("matchday" / "mds" / "results") e cancella quindi anche le chiavi
         # dei widget di questa tab (toggle/selectbox) — è voluto: garantisce
         # che l'intera sezione riparta da uno stato pulito ad ogni simulazione.
         # I valori già letti in questa run (calibration_enabled, league,
@@ -747,7 +807,7 @@ def render_matchday_simulator_tab() -> None:
 
         # 2) Simulazione completa della giornata con hard cap anti-0-0 a
         #    ciclo while (vedi _run_full_matchday).
-        results = _run_full_matchday(league, fixtures, calibration_enabled)
+        results = _run_full_matchday(league, fixtures, calibration_enabled, deps)
 
         # 3) Reveal sequenziale REALE: una card alla volta.
         cards_container = st.container()
