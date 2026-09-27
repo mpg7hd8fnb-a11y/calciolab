@@ -1,38 +1,61 @@
 """
 league_simulator.py — WayneLab · 🏆 Matchday Live Simulator
-Modulo COMPLETAMENTE STANDALONE: nessuna importazione da app.py, nessuna
-dipendenza (nemmeno differita) da alcun altro file dell'app. Tutto ciò che
-serve — client Football-Data.org, modello statistico Poisson, funzioni di
-utilità — è definito qui dentro.
+Modulo COMPLETAMENTE STANDALONE E DISACCOPPIATO: nessuna riga di questo
+file importa o nomina in alcun modo qualunque altro modulo del progetto
+ospitante. Ogni dipendenza (client dati, modello statistico, rendering) è
+definita qui dentro oppure passata esplicitamente come argomento opzionale
+alla funzione principale.
 
-⚠️ ATTENZIONE — CAMBIO DI NATURA RISPETTO ALLE VERSIONI PRECEDENTI
-Le versioni precedenti di questo file riusavano il motore statistico già
-presente in app.py (build_match_model / run_simulation), condiviso con le
-tab Match Analysis, Value Betting e Monte Carlo Simulator. Per eliminare
-DEFINITIVAMENTE qualunque import — anche differito — da app.py, questo
-modulo include ora un proprio modello Poisson "attack/defense" indipendente,
-costruito sulle partite concluse della competizione (Football-Data.org):
+FIRMA A DEPENDENCY INJECTION
+-----------------------------
+    def render_matchday_simulator_tab(
+        run_simulation=None,
+        fetch_league_matches=None,
+        fetch_team_crests=None,
+        **kwargs,
+    )
+Se un chiamante esterno vuole fornire le proprie implementazioni (es. per
+riusare una cache condivisa, un client HTTP già configurato, o per i test),
+può passarle come argomenti. Se un argomento è None (caso di default, e
+anche l'unico caso quando questo file viene eseguito da solo), viene usata
+la relativa implementazione LOCALE definita più sotto in questo stesso file
+(_default_run_simulation, _default_fetch_league_matches,
+_default_fetch_team_crests) — MAI un import da un altro modulo del
+progetto ospitante. `**kwargs` assorbe eventuali argomenti aggiuntivi
+passati da un chiamante più "ricco" (es. una configurazione), ignorati da
+questo modulo.
+
+MODELLO STATISTICO LOCALE
+--------------------------
+_default_run_simulation implementa un Poisson standard sui due xG del
+model. Il model stesso viene stimato da _default_try_build_match_model con
+un classico schema "attack/defense":
     home_lambda = league_avg_home_goals × home_attack(home) × away_defense(away)
     away_lambda = league_avg_away_goals × away_attack(away) × home_defense(home)
-Questo NON è più garantito identico al modello usato dalle altre tab
-dell'app: è un motore separato, più semplice, pensato solo per alimentare
-questa tab "broadcast". Se in futuro serve tornare ad avere un unico motore
-condiviso, la soluzione corretta è spostare il modello in un terzo modulo
-(es. stats_engine.py) importato sia da app.py sia da questo file — mai
-un'importazione diretta tra i due, per evitare di ricreare il ciclo.
+calcolato sulle partite concluse della competizione. Questo è un motore
+INDIPENDENTE, pensato solo per alimentare questa tab "broadcast": non è
+detto sia identico al motore statistico di eventuali altre viste del
+progetto ospitante, proprio perché questo file non importa nulla da
+nessun'altra parte.
+
+DUE LIVELLI DI FALLBACK PER I DATI (nessuna chiamata di rete obbligatoria)
+---------------------------------------------------------------------------
+1) Se è disponibile una API key di Football-Data.org (st.secrets
+   ["FOOTBALL_DATA_API_KEY"] oppure variabile d'ambiente
+   FOOTBALL_DATA_API_KEY), _default_fetch_league_matches/
+   _default_fetch_team_crests interrogano l'API reale.
+2) Se la chiave manca, la rete non risponde, o l'API restituisce un
+   errore, si passa AUTOMATICAMENTE a un piccolo dataset dimostrativo
+   generato internamente (_DEMO_LEAGUE_DATA): una giornata di 10 fixture
+   con squadre fittizie e uno storico sintetico di partite concluse, così
+   il modulo resta sempre "eseguibile al 100% in autonomia", anche del
+   tutto offline.
 
 ⚠️ ENTERTAINMENT CALIBRATION LAYER
 Questo modulo applica, SOLO al proprio interno, moltiplicatori di xG e
 vincoli di punteggio pensati per rendere le simulazioni più dinamiche nei
 video social (TikTok/Reels/Shorts). Sono valori discrezionali di pacing,
 non un feed statistico validato, e sono disattivabili dal toggle in UI.
-
-REQUISITI DI CONFIGURAZIONE
-Serve una chiave API gratuita di Football-Data.org, esposta come:
-  - st.secrets["FOOTBALL_DATA_API_KEY"], oppure
-  - variabile d'ambiente FOOTBALL_DATA_API_KEY
-Se assente, la tab mostra un errore controllato (FootballDataError) invece
-di andare in eccezione non gestita.
 
 FUNZIONALITÀ:
   • RESET RIGIDO DELLO STATO: al click su "SIMULATE FULL MATCHDAY", ogni
@@ -46,8 +69,8 @@ FUNZIONALITÀ:
     giornata non scende a <= cap (con un tetto di iterazioni di sicurezza).
   • MOTORE VISIVO "HUD BROADCAST" 9:16: hook iniziale animato (~2s, via
     st.empty()), reveal delle card una alla volta con time.sleep(0.6) tra
-    una e l'altra (anch'esso via st.empty()/st.container()), e banner di
-    riepilogo finale (Total Goals / Avg Goals / Home Wins %).
+    una e l'altra (via st.empty()/st.container()), e banner di riepilogo
+    finale (Total Goals / Avg Goals / Home Wins %).
 """
 
 from __future__ import annotations
@@ -66,19 +89,15 @@ MATCHDAY_BG = "#050505"
 
 
 # ==============================================================================
-# ECCEZIONI E CONFIGURAZIONE — nessuna dipendenza da app.py
+# ECCEZIONI E CONFIGURAZIONE — nessuna dipendenza esterna
 # ==============================================================================
 class FootballDataError(Exception):
     """Errore controllato per qualunque problema di rete/configurazione/
-    risposta verso Football-Data.org, così le funzioni di questo modulo
-    possono fallire in modo prevedibile invece di sollevare eccezioni
-    generiche non gestite."""
+    risposta verso Football-Data.org."""
 
 
 FOOTBALL_DATA_API_BASE = "https://api.football-data.org/v4"
 
-# Competizioni supportate da questa tab, con il relativo codice
-# Football-Data.org (v4). Elenco indipendente da quello di app.py.
 FOOTBALL_DATA_COMPETITIONS: dict[str, str] = {
     "England · Premier League": "PL",
     "Italy · Serie A": "SA",
@@ -89,14 +108,14 @@ FOOTBALL_DATA_COMPETITIONS: dict[str, str] = {
 
 
 def clamp(value: float, lo: float, hi: float) -> float:
-    """Utility locale di clamping (nessuna dipendenza esterna)."""
     return max(lo, min(hi, value))
 
 
-def _get_api_token() -> str:
-    """Legge la API key da st.secrets o, in fallback, da variabile
-    d'ambiente. Solleva FootballDataError se non configurata, invece di
-    lasciare propagare un KeyError/AttributeError non gestito."""
+def _get_api_token() -> str | None:
+    """Legge la API key da st.secrets o da variabile d'ambiente. Ritorna
+    None (invece di sollevare un'eccezione) se non configurata: la userà
+    solo chi vuole tentare la chiamata live, il fallback demo non ne ha
+    bisogno."""
     token = None
     try:
         token = st.secrets.get("FOOTBALL_DATA_API_KEY")  # type: ignore[union-attr]
@@ -104,21 +123,14 @@ def _get_api_token() -> str:
         token = None
     if not token:
         token = os.environ.get("FOOTBALL_DATA_API_KEY")
-    if not token:
-        raise FootballDataError(
-            "Football-Data.org API key non configurata: imposta "
-            "st.secrets['FOOTBALL_DATA_API_KEY'] oppure la variabile "
-            "d'ambiente FOOTBALL_DATA_API_KEY."
-        )
-    return token
+    return token or None
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _api_get(path: str, params: dict | None = None) -> dict:
-    """GET generico verso Football-Data.org, con cache di 5 minuti per non
-    saturare il rate limit del piano gratuito. Le eccezioni di rete e gli
-    status HTTP non-200 vengono convertiti in FootballDataError."""
+def _live_api_get(path: str, params: dict | None = None) -> dict:
     token = _get_api_token()
+    if not token:
+        raise FootballDataError("Nessuna API key configurata per Football-Data.org.")
     try:
         response = requests.get(
             f"{FOOTBALL_DATA_API_BASE}{path}",
@@ -130,50 +142,113 @@ def _api_get(path: str, params: dict | None = None) -> dict:
         raise FootballDataError(f"Errore di rete verso Football-Data.org: {exc}") from exc
 
     if response.status_code == 429:
-        raise FootballDataError("Rate limit Football-Data.org superato: riprova tra qualche istante.")
+        raise FootballDataError("Rate limit Football-Data.org superato.")
     if response.status_code != 200:
         raise FootballDataError(f"Football-Data.org ha risposto con status {response.status_code}.")
 
     return response.json()
 
 
-def fetch_league_matches(league: str) -> list[dict]:
-    """Elenco grezzo delle fixture (JSON 'matches') della competizione,
-    così come restituito da Football-Data.org — usato sia per calcolare le
-    giornate disponibili sia, sulle partite concluse, per stimare il
-    modello statistico."""
-    code = FOOTBALL_DATA_COMPETITIONS.get(league)
-    if not code:
-        raise FootballDataError(f"Competizione non riconosciuta: {league}")
-    data = _api_get(f"/competitions/{code}/matches")
-    matches = data.get("matches")
-    return matches if isinstance(matches, list) else []
+# ==============================================================================
+# DATASET DIMOSTRATIVO INTERNO — nessuna rete richiesta
+# ==============================================================================
+# Usato in automatico quando la chiamata live fallisce (chiave assente, rete
+# irraggiungibile, rate limit...). Garantisce che il modulo sia sempre
+# eseguibile in totale autonomia, senza alcuna dipendenza esterna.
+_DEMO_TEAM_NAMES: list[str] = [
+    "Obsidian United", "Cyan Rovers", "Broadcast City", "Reel Athletic",
+    "Vertical Wanderers", "Shorts Town", "HUD Rangers", "Matchday FC",
+    "Neon Albion", "Pixel Harbour",
+]
 
 
-def fetch_team_crests(league: str) -> dict[str, str]:
-    """Mappa {nome squadra: url stemma} per la competizione, usata solo per
-    l'aspetto delle card (nessun impatto statistico)."""
+def _build_demo_matches() -> list[dict]:
+    """Genera uno storico sintetico (partite concluse, per stimare il
+    modello) più una giornata di 10 fixture ancora da giocare (matchday=1),
+    nello stesso formato JSON di Football-Data.org atteso dal resto del
+    modulo."""
+    rng = np.random.default_rng(seed=42)
+    matches: list[dict] = []
+
+    # Storico sintetico: ogni squadra gioca alcune partite in casa e
+    # trasferta con punteggi Poisson plausibili, cosi il modello
+    # attack/defense ha di che stimare medie non banali.
+    for round_index in range(3):
+        shifted = _DEMO_TEAM_NAMES[round_index:] + _DEMO_TEAM_NAMES[:round_index]
+        pairs = list(zip(shifted[: len(shifted) // 2], shifted[len(shifted) // 2 :]))
+        for home, away in pairs:
+            home_goals = int(rng.poisson(1.4))
+            away_goals = int(rng.poisson(1.1))
+            matches.append(
+                {
+                    "status": "FINISHED",
+                    "matchday": round_index,
+                    "homeTeam": {"name": home},
+                    "awayTeam": {"name": away},
+                    "score": {"fullTime": {"home": home_goals, "away": away_goals}},
+                }
+            )
+
+    # Giornata corrente, ancora da giocare.
+    pairs = list(zip(_DEMO_TEAM_NAMES[:5], _DEMO_TEAM_NAMES[5:]))
+    for home, away in pairs:
+        matches.append(
+            {
+                "status": "SCHEDULED",
+                "matchday": 1,
+                "homeTeam": {"name": home},
+                "awayTeam": {"name": away},
+                "score": {"fullTime": {"home": None, "away": None}},
+            }
+        )
+
+    return matches
+
+
+_DEMO_LEAGUE_DATA: dict[str, list[dict]] = {league: _build_demo_matches() for league in FOOTBALL_DATA_COMPETITIONS}
+
+
+# ==============================================================================
+# IMPLEMENTAZIONI LOCALI DI DEFAULT (usate quando i parametri sono None)
+# ==============================================================================
+def _default_fetch_league_matches(league: str) -> list[dict]:
+    """Prova prima la chiamata live a Football-Data.org; se fallisce per
+    qualunque motivo (chiave assente, rete, rate limit...) ricade sul
+    dataset dimostrativo interno, cosi la funzione non solleva mai
+    un'eccezione bloccante verso il chiamante."""
+    code = FOOTBALL_DATA_COMPETITIONS.get(league)
+    if code:
+        try:
+            data = _live_api_get(f"/competitions/{code}/matches")
+            matches = data.get("matches")
+            if isinstance(matches, list) and matches:
+                return matches
+        except FootballDataError:
+            pass
+    return _DEMO_LEAGUE_DATA.get(league, _build_demo_matches())
+
+
+def _default_fetch_team_crests(league: str) -> dict[str, str]:
+    """Prova la chiamata live per gli stemmi; in fallback ritorna un
+    dizionario vuoto (le card mostrano un'icona placeholder al posto dello
+    stemma, nessun impatto sulla simulazione)."""
     code = FOOTBALL_DATA_COMPETITIONS.get(league)
     if not code:
-        raise FootballDataError(f"Competizione non riconosciuta: {league}")
-    data = _api_get(f"/competitions/{code}/teams")
+        return {}
+    try:
+        data = _live_api_get(f"/competitions/{code}/teams")
+    except FootballDataError:
+        return {}
     crests: dict[str, str] = {}
     for team in data.get("teams", []):
-        name = team.get("name")
-        crest = team.get("crest")
+        name, crest = team.get("name"), team.get("crest")
         if isinstance(name, str) and isinstance(crest, str):
             crests[name] = crest
     return crests
 
 
-# ==============================================================================
-# MODELLO STATISTICO STANDALONE — Poisson attack/defense
-# ==============================================================================
 @dataclasses.dataclass(frozen=True)
 class MatchModel:
-    """Rappresenta gli xG (lambda Poisson) stimati per le due squadre di un
-    match. Indipendente da qualunque classe definita in app.py."""
-
     home_team: str
     away_team: str
     home_lambda: float
@@ -181,19 +256,11 @@ class MatchModel:
 
 
 MDS_MODEL_LAMBDA_FLOOR = 0.15
-# Xg minimo assoluto: evita lambda=0 (partita "impossibile" da simulare in
-# modo credibile) in caso di dati storici estremamente scarsi.
-
 MDS_MODEL_DEFAULT_HOME_AVG = 1.45
 MDS_MODEL_DEFAULT_AWAY_AVG = 1.15
-# Medie gol di fallback (valori tipici da campionati europei big-5) usate
-# SOLO quando la competizione non ha ancora partite concluse in stagione
-# (es. inizio campionato) e non è quindi possibile calcolare una media reale.
 
 
 def _finished_matches(matches: list[dict]) -> list[dict]:
-    """Filtra le fixture concluse con punteggio valido, in una forma
-    semplice {home, away, home_goals, away_goals} pronta per le medie."""
     finished: list[dict] = []
     for match in matches:
         if match.get("status") != "FINISHED":
@@ -210,9 +277,6 @@ def _finished_matches(matches: list[dict]) -> list[dict]:
 
 
 def _league_average_goals(finished: list[dict]) -> tuple[float, float]:
-    """Media gol segnati in casa e in trasferta sull'intera competizione,
-    con fallback ai valori di default se non ci sono ancora partite
-    concluse."""
     if not finished:
         return MDS_MODEL_DEFAULT_HOME_AVG, MDS_MODEL_DEFAULT_AWAY_AVG
     home_avg = sum(m["home_goals"] for m in finished) / len(finished)
@@ -235,9 +299,6 @@ def _team_away_attack(finished: list[dict], team: str, league_away_avg: float) -
 
 
 def _team_home_defense(finished: list[dict], team: str, league_away_avg: float) -> float:
-    """Quanti gol concede in media questa squadra quando gioca in casa,
-    normalizzato sulla media-lega dei gol trasferta (cioè quanto ci si
-    aspetterebbe segnasse un'avversaria 'media' in trasferta)."""
     matches = [m for m in finished if m["home"] == team]
     if not matches or league_away_avg <= 0:
         return 1.0
@@ -245,22 +306,19 @@ def _team_home_defense(finished: list[dict], team: str, league_away_avg: float) 
 
 
 def _team_away_defense(finished: list[dict], team: str, league_home_avg: float) -> float:
-    """Quanti gol concede in media questa squadra quando gioca in
-    trasferta, normalizzato sulla media-lega dei gol casalinghi."""
     matches = [m for m in finished if m["away"] == team]
     if not matches or league_home_avg <= 0:
         return 1.0
     return (sum(m["home_goals"] for m in matches) / len(matches)) / league_home_avg
 
 
-def try_build_match_model(league: str, home: str, away: str) -> tuple[MatchModel | None, str | None]:
-    """Costruisce un MatchModel indipendente stimando gli xG con un classico
-    approccio Poisson 'attack/defense': parte dalle medie gol dell'intera
-    competizione (sulle partite concluse) e le pesa con la forza offensiva
-    di ciascuna squadra in casa/trasferta e la debolezza difensiva
-    dell'avversaria. Ritorna (None, messaggio_errore) se non è possibile
-    calcolare un modello (es. API non raggiungibile, competizione senza
-    partite concluse E dati insufficienti)."""
+def _default_try_build_match_model(
+    league: str, home: str, away: str, fetch_league_matches
+) -> tuple[MatchModel | None, str | None]:
+    """Stima un MatchModel con un classico schema Poisson 'attack/defense'
+    sulle partite concluse restituite da `fetch_league_matches` (che può
+    essere l'implementazione locale di default oppure quella iniettata dal
+    chiamante)."""
     try:
         matches = fetch_league_matches(league)
     except FootballDataError as exc:
@@ -280,11 +338,9 @@ def try_build_match_model(league: str, home: str, away: str) -> tuple[MatchModel
     return MatchModel(home_team=home, away_team=away, home_lambda=home_lambda, away_lambda=away_lambda), None
 
 
-def run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, dict[str, np.ndarray]]:
-    """Monte Carlo Poisson indipendente: estrae n_simulations punteggi
-    casa/trasferta dai due lambda del model. Stessa forma di ritorno
-    (`{"raw": {"home_goals": ..., "away_goals": ...}}`) usata dal resto di
-    questo modulo, cosi il codice di rendering non cambia."""
+def _default_run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, dict[str, np.ndarray]]:
+    """Monte Carlo Poisson locale: estrae n_simulations punteggi
+    casa/trasferta dai due lambda del model."""
     rng = np.random.default_rng()
     home_goals = rng.poisson(max(model.home_lambda, 0.01), size=n_simulations)
     away_goals = rng.poisson(max(model.away_lambda, 0.01), size=n_simulations)
@@ -294,35 +350,20 @@ def run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, 
 # ==============================================================================
 # ENTERTAINMENT CALIBRATION — league-level xG multipliers & score shaping
 # ==============================================================================
-# Valori discrezionali per pacing/engagement dei video, NON un feed di dati
-# reali validato: mai presentati come i fair odds/probabilità ufficiali
-# dell'app (quelli restano nelle altre tab, invariati).
 LEAGUE_GOAL_MULTIPLIERS: dict[str, float] = {
     "England · Premier League": 1.18,
     "Italy · Serie A": 1.15,
     "Germany · Bundesliga": 1.20,
-    "Spain · La Liga": 1.00,   # nessun aggiustamento: campionato tatticamente equilibrato
+    "Spain · La Liga": 1.00,
     "France · Ligue 1": 1.10,
 }
 LEAGUE_GOAL_MULTIPLIER_DEFAULT = 1.0
 
 LEAGUE_ZERO_ZERO_SUPPRESSED: set[str] = {"Italy · Serie A"}
-# Leghe in cui lo 0-0 viene escluso dalla distribuzione simulata di questo
-# modulo (resampling verso un punteggio con almeno 1 gol), su richiesta
-# esplicita per la Serie A.
 
 MDS_MAX_GOALS_PER_TEAM = 4
-# Realistic Score Cap: nessuna squadra può segnare più di questo numero di
-# gol nel risultato mostrato.
-
 MDS_LAMBDA_CEILING = 3.0
-# Tetto di sicurezza sugli xG (dopo moltiplicatore di lega e/o boost
-# anti-0-0), per evitare che un cumulo di fattori produca lambda
-# irrealistici in ingresso alla simulazione.
-
 MDS_ZERO_ZERO_RESAMPLE_ATTEMPTS = 25
-# Tentativi massimi di resampling per singola partita quando si deve
-# escludere lo 0-0 a livello di singola lega.
 
 MDS_ZERO_ZERO_MATCHDAY_CAP = 2
 # HARD CAP GIORNATA: al massimo questo numero di 0-0 può comparire come
@@ -330,17 +371,12 @@ MDS_ZERO_ZERO_MATCHDAY_CAP = 2
 
 MDS_ZERO_ZERO_BOOST_STEP = 0.50
 # Incremento di xG (additivo, cumulativo) applicato ad ogni giro del ciclo
-# while anti-0-0 di giornata, SOLO ai match ancora 0-0 dopo il giro
-# precedente.
+# while anti-0-0 di giornata, SOLO ai match ancora 0-0.
 
 MDS_ZERO_ZERO_MAX_BOOST_ROUNDS = 15
-# Tetto di sicurezza sul numero di giri del ciclo while.
 
 MDS_HOOK_SECONDS = 2.0
-# Durata del banner hook iniziale "⚡ WAYNELAB AI ENGINE".
-
 MDS_CARD_REVEAL_DELAY_SECONDS = 0.6
-# Ritardo REALE (time.sleep) tra la comparsa di una card e la successiva.
 
 
 def _apply_league_calibration(league: str, home_lambda: float, away_lambda: float) -> tuple[float, float, float]:
@@ -358,8 +394,6 @@ def _cap_extreme_scores(home_goals: np.ndarray, away_goals: np.ndarray) -> None:
 def _suppress_zero_zero(
     rng: np.random.Generator, home_goals: np.ndarray, away_goals: np.ndarray, home_lambda: float, away_lambda: float
 ) -> None:
-    """Per ogni partita simulata a 0-0, ri-estrae dalla stessa Poisson finché
-    non ottiene almeno un gol complessivo (con tetto di tentativi)."""
     zero_zero_mask = (home_goals == 0) & (away_goals == 0)
     indices = np.flatnonzero(zero_zero_mask)
     if indices.size == 0:
@@ -640,9 +674,9 @@ MATCHDAY_CSS = f"""
 
 
 # ==============================================================================
-# DATA HELPERS
+# DATA HELPERS — dipendono SOLO dalla funzione fetch_league_matches ricevuta
 # ==============================================================================
-def _available_matchdays(league: str) -> list[int]:
+def _available_matchdays(league: str, fetch_league_matches) -> list[int]:
     try:
         matches = fetch_league_matches(league)
     except FootballDataError:
@@ -650,7 +684,7 @@ def _available_matchdays(league: str) -> list[int]:
     return sorted({int(match["matchday"]) for match in matches if isinstance(match.get("matchday"), int)})
 
 
-def _matchday_fixtures(league: str, matchday: int) -> list[tuple[str, str]]:
+def _matchday_fixtures(league: str, matchday: int, fetch_league_matches) -> list[tuple[str, str]]:
     try:
         matches = fetch_league_matches(league)
     except FootballDataError:
@@ -672,8 +706,10 @@ def _matchday_fixtures(league: str, matchday: int) -> list[tuple[str, str]]:
 # ==============================================================================
 # SIMULATION — raw fixture pass + matchday-wide anti-zero-zero while-loop
 # ==============================================================================
-def _simulate_fixture_raw(league: str, home: str, away: str, calibration_enabled: bool):
-    model, error = try_build_match_model(league, home, away)
+def _simulate_fixture_raw(
+    league: str, home: str, away: str, calibration_enabled: bool, run_simulation, fetch_league_matches
+):
+    model, error = _default_try_build_match_model(league, home, away, fetch_league_matches)
     if model is None:
         return None, error, None, None, []
 
@@ -702,7 +738,11 @@ def _simulate_fixture_raw(league: str, home: str, away: str, calibration_enabled
 
 
 def _run_full_matchday(
-    league: str, fixtures: list[tuple[str, str]], calibration_enabled: bool
+    league: str,
+    fixtures: list[tuple[str, str]],
+    calibration_enabled: bool,
+    run_simulation,
+    fetch_league_matches,
 ) -> list[dict[str, object]]:
     """1) Simula tutte le fixture in un array temporaneo (`results`).
     2) Se calibrazione abilitata e gli 0-0 rivelati sono > MDS_ZERO_ZERO_
@@ -715,7 +755,7 @@ def _run_full_matchday(
 
     for home, away in fixtures:
         model, error, home_goals, away_goals, calib_notes = _simulate_fixture_raw(
-            league, home, away, calibration_enabled
+            league, home, away, calibration_enabled, run_simulation, fetch_league_matches
         )
         if model is None:
             results.append({"home": home, "away": away, "error": error})
@@ -773,7 +813,7 @@ def _render_hook_banner(placeholder) -> None:
     placeholder.markdown(
         f'<div class="mds-hook-wrap">'
         f'<div class="mds-hook-title">⚡ WAYNELAB AI ENGINE</div>'
-        f'<div class="mds-hook-subtitle">Running 10,000 Monte Carlo Simulations...</div>'
+        f'<div class="mds-hook-subtitle">10,000 MONTE CARLO RUNS...</div>'
         f'<div class="mds-hook-track"><div class="mds-hook-fill"></div></div>'
         f"</div>",
         unsafe_allow_html=True,
@@ -832,25 +872,39 @@ def _render_matchday_summary(results: list[dict[str, object]]) -> None:
 
 
 # ==============================================================================
-# MAIN TAB ENTRY POINT
+# MAIN TAB ENTRY POINT — dependency injection, nessun import esterno
 # ==============================================================================
-def render_matchday_simulator_tab() -> None:
-    """Entry point da chiamare da app.py (es. 'league_simulator.render_
-    matchday_simulator_tab()' dentro la tab dedicata). Nessun import da
-    app.py: tutte le dipendenze (API client, modello statistico, CSS) sono
-    definite in questo stesso file."""
+def render_matchday_simulator_tab(
+    run_simulation=None,
+    fetch_league_matches=None,
+    fetch_team_crests=None,
+    **kwargs,
+) -> None:
+    """Entry point della tab. I tre parametri sono opzionali: se lasciati a
+    None (comportamento di default, incluso quando questo file viene
+    eseguito completamente da solo), vengono usate le implementazioni
+    locali definite in questo stesso modulo (_default_run_simulation,
+    _default_fetch_league_matches, _default_fetch_team_crests) — nessun
+    import da nessun altro file. Se invece un chiamante esterno passa le
+    proprie funzioni con la stessa interfaccia, queste vengono usate al
+    loro posto. `**kwargs` assorbe eventuali parametri extra ignorati da
+    questo modulo, per compatibilità con chiamanti più generici."""
+    run_simulation = run_simulation or _default_run_simulation
+    fetch_league_matches = fetch_league_matches or _default_fetch_league_matches
+    fetch_team_crests = fetch_team_crests or _default_fetch_team_crests
+
     st.markdown(MATCHDAY_CSS, unsafe_allow_html=True)
     st.markdown('<div class="mds-header-title">🏆 MATCHDAY LIVE SIMULATOR</div>', unsafe_allow_html=True)
     st.caption(
         "Standalone HUD Broadcast engine, built for TikTok/Reels/Shorts recordings (9:16) — one "
-        "match revealed at a time, powered by its own Poisson attack/defense model."
+        "match revealed at a time, powered by its own local Poisson attack/defense model."
     )
     st.markdown(
         '<div class="mds-disclaimer">🎬 <b>Entertainment Calibration</b>: this tab applies '
         "discretionary per-league xG multipliers and score-shaping rules (goal cap, 0-0 exclusion "
         "for select leagues, max 2×0-0 per matchday via an xG boost loop) tuned for social-video "
-        "pacing. This module runs its own standalone Poisson model, separate from any other tab — "
-        "turn the toggle off below to see the model without engagement calibration.</div>",
+        "pacing. This module runs its own standalone Poisson model — turn the toggle off below to "
+        "see the model without engagement calibration.</div>",
         unsafe_allow_html=True,
     )
 
@@ -864,7 +918,7 @@ def render_matchday_simulator_tab() -> None:
     with col_league:
         league = st.selectbox("Competition", options=list(FOOTBALL_DATA_COMPETITIONS), key="mds_league_select")
 
-    matchdays = _available_matchdays(league)
+    matchdays = _available_matchdays(league, fetch_league_matches)
     with col_matchday:
         if matchdays:
             matchday = st.selectbox(
@@ -874,7 +928,7 @@ def render_matchday_simulator_tab() -> None:
             st.warning("No live matchday data available for this competition.")
             return
 
-    fixtures = _matchday_fixtures(league, matchday)
+    fixtures = _matchday_fixtures(league, matchday, fetch_league_matches)
     if not fixtures:
         st.info(f"No fixtures found for Giornata {matchday} in {league}.")
         return
@@ -909,7 +963,7 @@ def render_matchday_simulator_tab() -> None:
 
         # 2) Simulazione completa della giornata con hard cap anti-0-0 a
         #    ciclo while (vedi _run_full_matchday).
-        results = _run_full_matchday(league, fixtures, calibration_enabled)
+        results = _run_full_matchday(league, fixtures, calibration_enabled, run_simulation, fetch_league_matches)
 
         # 3) Reveal sequenziale reale: una card alla volta, via
         #    st.container()/st.empty(), con 0.6s di ritardo tra una e l'altra.
