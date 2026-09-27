@@ -593,3 +593,4 @@ def render_matchday_simulator_tab() -> None:
         main_container.markdown(summary_html + "".join(cards_html), unsafe_allow_html=True)
     else:
         main_container.info("Press '⚡ SIMULATE FULL MATCHDAY' to start the sequence.")
+ 
