@@ -22,8 +22,10 @@ import sys
 import importlib
 import league_simulator
 
-# Ricarica il modulo senza re-importare app
-importlib.reload(league_simulator)
+# Forza il ricaricamento del simulatore ad ogni esecuzione
+if "league_simulator" in sys.modules:
+    importlib.reload(league_simulator)
+
 
 
 
