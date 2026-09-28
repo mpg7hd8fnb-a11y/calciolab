@@ -30,7 +30,6 @@ import league_simulator
 
 
 
-
 APP_PASSWORD = "wayne2026"
 
 
