@@ -236,9 +236,130 @@ class MatchModel:
     away_lambda: float
 
 
+# ==============================================================================
+# MODELLO STATISTICO — Poisson attack/defense + prior di forza per club
+# ==============================================================================
+@dataclasses.dataclass(frozen=True)
+class MatchModel:
+    home_team: str
+    away_team: str
+    home_lambda: float
+    away_lambda: float
+
+
 MDS_MODEL_LAMBDA_FLOOR = 0.15
 MDS_MODEL_DEFAULT_HOME_AVG = 1.45
 MDS_MODEL_DEFAULT_AWAY_AVG = 1.15
+
+# ------------------------------------------------------------------------------
+# PRIOR DI FORZA PER CLUB (locale, editabile, NON un feed di rating live)
+# ------------------------------------------------------------------------------
+# Il problema segnalato ("Frosinone batte Napoli") nasce dal fatto che, con
+# uno storico di partite concluse ancora scarso (inizio stagione, o il
+# dataset demo), gli attack/defense ratio osservati per ogni squadra
+# convergono verso 1.0 (la media di lega) per mancanza di campione — quindi
+# il modello tratta big e piccole quasi allo stesso modo. Questo dizionario
+# fornisce un PRIOR di forza per un elenco di club noti dei 5 campionati
+# supportati, su una scala 1 (più forte) – 5 (più debole): il prior viene
+# fuso con i dati osservati tramite uno shrinkage bayesiano (vedi
+# _blended_strength) che dà sempre più peso ai risultati reali man mano che
+# se ne accumulano. Sono valori manuali indicativi pensati per separare in
+# modo credibile big/medie/piccole quando i dati storici non bastano ancora
+# a farlo da soli — vanno aggiornati a mano se la realtà cambia (promozioni,
+# retrocessioni, mercato), non sono derivati da un servizio di rating.
+CLUB_STRENGTH_TIER: dict[str, dict[str, int]] = {
+    "Italy · Serie A": {
+        "Napoli": 1, "SSC Napoli": 1, "Inter Milan": 1, "FC Internazionale Milano": 1,
+        "Juventus FC": 1, "AC Milan": 1,
+        "AS Roma": 2, "Atalanta BC": 2, "SS Lazio": 2, "ACF Fiorentina": 2, "Bologna FC 1909": 2,
+        "Torino FC": 3, "Udinese Calcio": 3, "Genoa CFC": 3, "Hellas Verona FC": 3, "US Lecce": 3,
+        "Cagliari Calcio": 4, "Empoli FC": 4, "Parma Calcio 1913": 4, "Como 1907": 4,
+        "US Sassuolo Calcio": 4,
+        "Frosinone Calcio": 5, "US Salernitana 1919": 5, "Venezia FC": 5, "Pisa Sporting Club": 5,
+    },
+    "England · Premier League": {
+        "Manchester City FC": 1, "Arsenal FC": 1, "Liverpool FC": 1,
+        "Chelsea FC": 2, "Manchester United FC": 2, "Tottenham Hotspur FC": 2, "Newcastle United FC": 2,
+        "Aston Villa FC": 2,
+        "Brighton & Hove Albion FC": 3, "West Ham United FC": 3, "Crystal Palace FC": 3,
+        "Fulham FC": 3, "Brentford FC": 3, "Everton FC": 3, "Wolverhampton Wanderers FC": 3,
+        "Bournemouth AFC": 4, "AFC Bournemouth": 4, "Nottingham Forest FC": 4, "Leicester City FC": 4,
+        "Ipswich Town FC": 5, "Southampton FC": 5, "Burnley FC": 5, "Luton Town FC": 5,
+    },
+    "Germany · Bundesliga": {
+        "FC Bayern München": 1, "Bayer 04 Leverkusen": 1,
+        "Borussia Dortmund": 2, "RB Leipzig": 2, "VfB Stuttgart": 2, "Eintracht Frankfurt": 2,
+        "SC Freiburg": 3, "VfL Wolfsburg": 3, "Borussia Mönchengladbach": 3, "1. FSV Mainz 05": 3,
+        "TSG 1899 Hoffenheim": 3, "SV Werder Bremen": 3, "1. FC Union Berlin": 3,
+        "FC Augsburg": 4, "1. FC Heidenheim 1846": 4, "VfL Bochum 1848": 4,
+        "Holstein Kiel": 5, "1. FC Köln": 5, "SV Darmstadt 98": 5,
+    },
+    "Spain · La Liga": {
+        "Real Madrid CF": 1, "FC Barcelona": 1,
+        "Club Atlético de Madrid": 2, "Athletic Club": 2, "Real Sociedad de Fútbol": 2, "Real Betis Balompié": 2,
+        "Villarreal CF": 3, "Valencia CF": 3, "CA Osasuna": 3, "RC Celta de Vigo": 3,
+        "Sevilla FC": 3, "RCD Mallorca": 3, "Girona FC": 3,
+        "Getafe CF": 4, "Deportivo Alavés": 4, "Rayo Vallecano de Madrid": 4, "UD Las Palmas": 4,
+        "CD Leganés": 5, "RCD Espanyol de Barcelona": 5, "Real Valladolid CF": 5,
+    },
+    "France · Ligue 1": {
+        "Paris Saint-Germain FC": 1,
+        "AS Monaco FC": 2, "Olympique de Marseille": 2, "LOSC Lille": 2, "Stade Brestois 29": 2,
+        "OGC Nice": 3, "Olympique Lyonnais": 3, "RC Lens": 3, "Stade Rennais FC 1901": 3,
+        "Racing Club de Strasbourg Alsace": 3, "Toulouse FC": 3,
+        "Nantes": 4, "FC Nantes": 4, "AJ Auxerre": 4, "Angers SCO": 4,
+        "AS Saint-Étienne": 5, "Le Havre AC": 5, "Montpellier HSC": 5,
+    },
+}
+
+# Moltiplicatori di attacco/difesa associati a ciascun tier (1 = più forte).
+# Attacco > 1 = segna più della media; difesa > 1 = concede più della media
+# (quindi è "leaky", non forte in difesa) — per questo alle squadre forti
+# (tier 1) corrisponde un valore di difesa BASSO.
+_TIER_ATTACK_PRIOR: dict[int, float] = {1: 1.55, 2: 1.25, 3: 1.00, 4: 0.80, 5: 0.62}
+_TIER_DEFENSE_PRIOR: dict[int, float] = {1: 0.68, 2: 0.85, 3: 1.00, 4: 1.20, 5: 1.42}
+_DEFAULT_TIER = 3
+
+MDS_RATING_SHRINKAGE_MATCHES = 6
+# Numero di partite (in un dato contesto casa/trasferta) oltre il quale il
+# modello si fida ORMAI QUASI SOLO dei dati osservati e sempre meno del
+# prior di tier. Con meno partite, il prior pesa di più: proprio la
+# situazione (inizio stagione, dataset demo) in cui nascevano gli upset
+# implausibili.
+MDS_STRENGTH_GAIN = 1.15
+# Esponente applicato al rapporto di forza fuso (prior+osservato) per
+# accentuare leggermente il gap tra big e underdog invece di appiattirlo.
+
+
+def _team_prior_strength(league: str, team: str) -> tuple[float, float]:
+    """Prior (attack, defense) per una squadra: lookup esatto nel tier
+    della competizione, con fallback a un confronto case-insensitive per
+    substring (i nomi restituiti dalle fonti dati possono variare
+    leggermente), e infine al tier di default (3, forza media) se la
+    squadra non è nell'elenco."""
+    tiers = CLUB_STRENGTH_TIER.get(league, {})
+    tier = tiers.get(team)
+    if tier is None:
+        team_lower = team.lower()
+        for known_name, known_tier in tiers.items():
+            known_lower = known_name.lower()
+            if known_lower in team_lower or team_lower in known_lower:
+                tier = known_tier
+                break
+    if tier is None:
+        tier = _DEFAULT_TIER
+    return _TIER_ATTACK_PRIOR[tier], _TIER_DEFENSE_PRIOR[tier]
+
+
+def _blended_strength(n_matches: int, observed_ratio: float, prior_ratio: float) -> float:
+    """Shrinkage bayesiano semplice: con pochi precedenti (n_matches basso)
+    il prior di tier pesa di più; con uno storico consistente, il modello
+    converge verso il rapporto osservato. Il risultato finale viene poi
+    leggermente accentuato da MDS_STRENGTH_GAIN per mantenere una
+    separazione realistica tra squadre di livello diverso."""
+    weight = min(1.0, n_matches / MDS_RATING_SHRINKAGE_MATCHES)
+    blended = weight * observed_ratio + (1 - weight) * prior_ratio
+    return blended ** MDS_STRENGTH_GAIN
 
 
 def _finished_matches(matches: list[dict]) -> list[dict]:
@@ -265,32 +386,40 @@ def _league_average_goals(finished: list[dict]) -> tuple[float, float]:
     return max(home_avg, 0.1), max(away_avg, 0.1)
 
 
-def _team_home_attack(finished: list[dict], team: str, league_home_avg: float) -> float:
+def _team_home_attack(finished: list[dict], team: str, league_home_avg: float, league: str) -> float:
     matches = [m for m in finished if m["home"] == team]
+    attack_prior, _ = _team_prior_strength(league, team)
     if not matches or league_home_avg <= 0:
-        return 1.0
-    return (sum(m["home_goals"] for m in matches) / len(matches)) / league_home_avg
+        return attack_prior
+    observed = (sum(m["home_goals"] for m in matches) / len(matches)) / league_home_avg
+    return _blended_strength(len(matches), observed, attack_prior)
 
 
-def _team_away_attack(finished: list[dict], team: str, league_away_avg: float) -> float:
+def _team_away_attack(finished: list[dict], team: str, league_away_avg: float, league: str) -> float:
     matches = [m for m in finished if m["away"] == team]
+    attack_prior, _ = _team_prior_strength(league, team)
     if not matches or league_away_avg <= 0:
-        return 1.0
-    return (sum(m["away_goals"] for m in matches) / len(matches)) / league_away_avg
+        return attack_prior
+    observed = (sum(m["away_goals"] for m in matches) / len(matches)) / league_away_avg
+    return _blended_strength(len(matches), observed, attack_prior)
 
 
-def _team_home_defense(finished: list[dict], team: str, league_away_avg: float) -> float:
+def _team_home_defense(finished: list[dict], team: str, league_away_avg: float, league: str) -> float:
     matches = [m for m in finished if m["home"] == team]
+    _, defense_prior = _team_prior_strength(league, team)
     if not matches or league_away_avg <= 0:
-        return 1.0
-    return (sum(m["away_goals"] for m in matches) / len(matches)) / league_away_avg
+        return defense_prior
+    observed = (sum(m["away_goals"] for m in matches) / len(matches)) / league_away_avg
+    return _blended_strength(len(matches), observed, defense_prior)
 
 
-def _team_away_defense(finished: list[dict], team: str, league_home_avg: float) -> float:
+def _team_away_defense(finished: list[dict], team: str, league_home_avg: float, league: str) -> float:
     matches = [m for m in finished if m["away"] == team]
+    _, defense_prior = _team_prior_strength(league, team)
     if not matches or league_home_avg <= 0:
-        return 1.0
-    return (sum(m["home_goals"] for m in matches) / len(matches)) / league_home_avg
+        return defense_prior
+    observed = (sum(m["home_goals"] for m in matches) / len(matches)) / league_home_avg
+    return _blended_strength(len(matches), observed, defense_prior)
 
 
 def try_build_match_model(league: str, home: str, away: str) -> tuple[MatchModel | None, str | None]:
@@ -302,10 +431,10 @@ def try_build_match_model(league: str, home: str, away: str) -> tuple[MatchModel
     finished = _finished_matches(matches)
     league_home_avg, league_away_avg = _league_average_goals(finished)
 
-    home_attack = _team_home_attack(finished, home, league_home_avg)
-    away_defense = _team_away_defense(finished, away, league_home_avg)
-    away_attack = _team_away_attack(finished, away, league_away_avg)
-    home_defense = _team_home_defense(finished, home, league_away_avg)
+    home_attack = _team_home_attack(finished, home, league_home_avg, league)
+    away_defense = _team_away_defense(finished, away, league_home_avg, league)
+    away_attack = _team_away_attack(finished, away, league_away_avg, league)
+    home_defense = _team_home_defense(finished, home, league_away_avg, league)
 
     home_lambda = max(league_home_avg * home_attack * away_defense, MDS_MODEL_LAMBDA_FLOOR)
     away_lambda = max(league_away_avg * away_attack * home_defense, MDS_MODEL_LAMBDA_FLOOR)
@@ -677,31 +806,6 @@ MATCHDAY_CSS = f"""
     color: #9aa0a6;
     margin-top: 1px;
 }}
-.mds-surprise-box {{
-    margin-top: 6px;
-    background: #0a0a0a;
-    border: 1px solid rgba(0,229,255,0.5);
-    border-radius: 10px;
-    padding: 6px 8px;
-    text-align: center;
-}}
-.mds-surprise-label {{
-    font-size: 0.50rem;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    color: #9aa0a6;
-    margin-bottom: 2px;
-}}
-.mds-surprise-value {{
-    font-family: "Courier New", monospace;
-    font-size: 0.72rem;
-    font-weight: 800;
-    color: #f5f5f5;
-    letter-spacing: 0.01em;
-}}
-.mds-surprise-value span {{
-    color: {MATCHDAY_ACCENT};
-}}
 </style>
 """
 
@@ -886,28 +990,12 @@ def _error_card_html(home: str, away: str, error: str | None, delay_seconds: flo
     )
 
 
-def _most_surprising_result(results: list[dict[str, object]]) -> str:
-    """Individua il match il cui esito rivelato aveva, tra i tre 1X2
-    calcolati sugli stessi array Monte Carlo, la probabilità più bassa —
-    cioè il risultato statisticamente meno atteso della giornata."""
-    valid = [r for r in results if "error" not in r and "home_goals_total" in r]
-    if not valid:
-        return "—"
-    surprise_pick = min(valid, key=lambda r: _revealed_outcome_pill(r)[1])
-    _, prob = _revealed_outcome_pill(surprise_pick)
-    return (
-        f'{escape(str(surprise_pick["home"]))} <span>{escape(str(surprise_pick["score"]))}</span> '
-        f'{escape(str(surprise_pick["away"]))} — only {prob:.0%} predicted'
-    )
-
-
 def _summary_html(results: list[dict[str, object]], delay_seconds: float) -> str:
     valid = [r for r in results if "error" not in r and "home_goals_total" in r]
     if not valid:
         return ""
     total_goals = sum(r["home_goals_total"] + r["away_goals_total"] for r in valid)
     avg_goals = total_goals / len(valid)
-    surprise_html = _most_surprising_result(results)
 
     return (
         f'<div class="mds-summary-wrap" style="--mds-delay:{delay_seconds:.2f}s">'
@@ -917,10 +1005,6 @@ def _summary_html(results: list[dict[str, object]], delay_seconds: float) -> str
         f'<div class="mds-summary-label">Total Goals</div></div>'
         f'<div class="mds-summary-badge"><div class="mds-summary-value">{avg_goals:.2f}</div>'
         f'<div class="mds-summary-label">Avg Goals / Match</div></div>'
-        "</div>"
-        '<div class="mds-surprise-box">'
-        '<div class="mds-surprise-label">🎲 Most Surprising Result</div>'
-        f'<div class="mds-surprise-value">{surprise_html}</div>'
         "</div>"
         "</div>"
     )
@@ -961,38 +1045,57 @@ def render_matchday_simulator_tab() -> None:
     """Entry point della tab. Nessun argomento richiesto: tutte le funzioni
     di supporto (dati, modello Poisson/Monte Carlo, CSS, dataset demo di
     fallback, generazione dell'HTML animato) sono definite in questo stesso
-    file."""
+    file.
+
+    LAYOUT COMPATTO (zero-scroll): header + toggle su un'unica riga, info di
+    dettaglio dentro un expander chiuso di default (non occupa spazio finché
+    non lo si apre), selettori campionato/giornata + pulsante SIMULATE su
+    un'unica riga a 3 colonne. Questo riduce il numero di blocchi verticali
+    prima della griglia delle card, per lasciare più altezza di viewport
+    alla simulazione vera e propria durante una ripresa 9:16 da desktop."""
     st.markdown(MATCHDAY_CSS, unsafe_allow_html=True)
-    st.markdown('<div class="mds-header-title">🏆 MATCHDAY LIVE SIMULATOR</div>', unsafe_allow_html=True)
-    st.caption(
-        "Standalone HUD Broadcast engine, built for TikTok/Reels/Shorts recordings (9:16) — reveal a "
-        "cascata gestito interamente via CSS, non da timer lato server. Powered by its own local "
-        "Poisson attack/defense model."
-    )
-    st.markdown(
-        '<div class="mds-disclaimer">🎬 <b>Entertainment Calibration</b>: this tab applies '
-        "discretionary per-league xG multipliers and score-shaping rules (goal cap, 0-0 exclusion "
-        "for select leagues, max 2×0-0 per matchday via an xG boost loop) tuned for social-video "
-        "pacing. This module runs its own standalone Poisson model — turn the toggle off below to "
-        "see the model without engagement calibration.</div>",
-        unsafe_allow_html=True,
-    )
 
-    calibration_enabled = st.toggle(
-        "🎯 Enable Engagement Calibration (league xG multipliers, 0-0 cap, score cap)",
-        value=True,
-        key="mds_calibration_enabled",
-    )
+    header_col, toggle_col = st.columns([2, 1])
+    with header_col:
+        st.markdown('<div class="mds-header-title">🏆 MATCHDAY LIVE SIMULATOR</div>', unsafe_allow_html=True)
+    with toggle_col:
+        calibration_enabled = st.toggle(
+            "🎯 Calibration", value=True, key="mds_calibration_enabled", label_visibility="visible"
+        )
 
-    col_league, col_matchday = st.columns(2)
+    with st.expander("ℹ️ Modello & calibrazione", expanded=False):
+        st.caption(
+            "Standalone HUD Broadcast engine — reveal a cascata gestito interamente via CSS, non da "
+            "timer lato server. Il modello Poisson attack/defense è pesato con un prior di forza per "
+            "club (shrinkage bayesiano): con pochi precedenti stagionali il prior di tier pesa di più, "
+            "così i big non perdono in modo implausibile contro le piccole per pura casualità."
+        )
+        st.markdown(
+            '<div class="mds-disclaimer">🎬 <b>Entertainment Calibration</b>: this tab applies '
+            "discretionary per-league xG multipliers and score-shaping rules (goal cap, 0-0 exclusion "
+            "for select leagues, max 2×0-0 per matchday via an xG boost loop) tuned for social-video "
+            "pacing. Turn the toggle above off to see the model without engagement calibration.</div>",
+            unsafe_allow_html=True,
+        )
+
+    col_league, col_matchday, col_button = st.columns([2, 2, 2])
     with col_league:
-        league = st.selectbox("Competition", options=list(FOOTBALL_DATA_COMPETITIONS), key="mds_league_select")
+        league = st.selectbox(
+            "Competition",
+            options=list(FOOTBALL_DATA_COMPETITIONS),
+            key="mds_league_select",
+            label_visibility="collapsed",
+        )
 
     matchdays = _available_matchdays(league)
     with col_matchday:
         if matchdays:
             matchday = st.selectbox(
-                "Matchday", options=matchdays, format_func=lambda n: f"Giornata {n}", key="mds_matchday_select"
+                "Matchday",
+                options=matchdays,
+                format_func=lambda n: f"Giornata {n}",
+                key="mds_matchday_select",
+                label_visibility="collapsed",
             )
         else:
             st.warning("No live matchday data available for this competition.")
@@ -1003,9 +1106,10 @@ def render_matchday_simulator_tab() -> None:
         st.info(f"No fixtures found for Giornata {matchday} in {league}.")
         return
 
-    st.caption(f"📋 {len(fixtures)} fixtures loaded for Giornata {matchday}.")
-
-    run_clicked = st.button("⚡ SIMULATE FULL MATCHDAY", type="primary", key="mds_run_button")
+    with col_button:
+        run_clicked = st.button(
+            "⚡ SIMULATE", type="primary", key="mds_run_button", use_container_width=True
+        )
 
     try:
         crests = fetch_team_crests(league)
@@ -1032,6 +1136,3 @@ def render_matchday_simulator_tab() -> None:
         #    comportamento di buffering lato server/hosting.
         broadcast_html = _build_broadcast_html(results, crests)
         st.markdown(broadcast_html, unsafe_allow_html=True)
-
-        total_seconds = MDS_HOOK_DURATION_SECONDS + len(results) * MDS_CARD_STAGGER_SECONDS
-        st.caption(f"✅ Giornata {matchday} — {len(fixtures)} matches — animazione ~{total_seconds:.1f}s.")
