@@ -1,3 +1,73 @@
+"""
+league_simulator.py — WayneLab · 🏆 Matchday Live Simulator
+Modulo COMPLETAMENTE STANDALONE: nessun import da altri moduli del
+progetto ospitante, nessuna dipendenza esterna oltre alle librerie di
+terze parti elencate sotto. Client dati, modello statistico e rendering
+sono tutti definiti qui dentro. La funzione principale non richiede alcun
+argomento: def render_matchday_simulator_tab() -> None.
+
+CAMBIO DI ARCHITETTURA IN QUESTA VERSIONE: REVEAL VIA CSS, NON PIÙ time.sleep
+------------------------------------------------------------------------------
+Le versioni precedenti simulavano il "reveal a cascata" delle 10 card con un
+ciclo Python `for ... time.sleep(0.6)`, scrivendo ogni frame su
+st.empty()/st.container(). In produzione questo si è rivelato inaffidabile:
+a seconda di come l'hosting gestisce il flush dei messaggi WebSocket verso
+il browser (buffering lato proxy/CDN, o più in generale il modo in cui
+Streamlit accoda gli aggiornamenti durante un singolo script run), i frame
+intermedi possono non arrivare in tempo reale al client, e tutte le card
+compaiono insieme a run terminato — il time.sleep lato server NON garantisce
+un rendering incrementale lato browser.
+
+La soluzione adottata qui è spostare TUTTA la coreografia temporale dal lato
+server (Python) al lato client (CSS): l'hook e le 10 card vengono generati
+in un SOLO blocco HTML/CSS (una sola chiamata a st.markdown(...,
+unsafe_allow_html=True)), con animazioni CSS keyframe e un
+`animation-delay` progressivo per ciascuna card. È il browser stesso, non
+Streamlit, a scandire i tempi del reveal — quindi il risultato è identico
+indipendentemente da qualunque comportamento di buffering del server.
+Il ciclo Monte Carlo + hard-cap anti-0-0 resta un calcolo Python sincrono
+(avviene prima di generare l'HTML, tutto in memoria); cambia solo COME il
+risultato viene rivelato a schermo.
+
+Timeline dell'animazione (puramente CSS):
+    0.0s                → l'hook "⚡ WAYNELAB AI ENGINE" appare e resta visibile
+    ~1.5s               → l'hook sfuma e collassa (opacity + max-height → 0)
+    MDS_HOOK_DURATION_SECONDS (1.8s) → Card 1 appare (fade-in + slide-up)
+    +0.6s dopo ogni card → Card 2, poi Card 3, ... fino a Card 10
+    +0.6s dopo l'ultima card → banner di riepilogo finale
+
+MODELLO STATISTICO LOCALE
+--------------------------
+try_build_match_model stima gli xG con un classico schema Poisson
+"attack/defense" calcolato sulle partite concluse della competizione:
+    home_lambda = league_avg_home_goals × home_attack(home) × away_defense(away)
+    away_lambda = league_avg_away_goals × away_attack(away) × home_defense(home)
+run_simulation esegue poi una Monte Carlo Poisson standard sui due lambda.
+Motore indipendente, pensato solo per questa tab "broadcast".
+
+DATI: DUE LIVELLI DI FALLBACK (nessuna chiamata di rete obbligatoria)
+-----------------------------------------------------------------------
+1) Se è disponibile una API key di Football-Data.org (st.secrets
+   ["FOOTBALL_DATA_API_KEY"] oppure variabile d'ambiente
+   FOOTBALL_DATA_API_KEY), fetch_league_matches/fetch_team_crests
+   interrogano l'API reale.
+2) Se la chiave manca, la rete non risponde, o l'API restituisce un
+   errore, si passa AUTOMATICAMENTE a un dataset dimostrativo generato
+   internamente (_DEMO_LEAGUE_DATA), così il modulo resta sempre
+   eseguibile al 100% in autonomia, anche del tutto offline.
+
+⚠️ ENTERTAINMENT CALIBRATION LAYER
+Questo modulo applica, SOLO al proprio interno, moltiplicatori di xG e
+vincoli di punteggio pensati per rendere le simulazioni più dinamiche nei
+video social (TikTok/Reels/Shorts). Sono valori discrezionali di pacing,
+non un feed statistico validato, e sono disattivabili dal toggle in UI.
+Include l'ANTI-ZERO-ZERO A CICLO WHILE: le 10 fixture vengono simulate una
+prima volta in un array temporaneo; se gli 0-0 rivelati sono più di 2, un
+ciclo while applica un boost incrementale di +0.50 xG e ri-simula SOLO i
+match ancora 0-0, finché il totale della giornata non scende a <= 2 (con
+un tetto di iterazioni di sicurezza).
+"""
+
 from __future__ import annotations
 
 import dataclasses
@@ -354,52 +424,52 @@ MATCHDAY_CSS = f"""
 .mds-wrap {{
     background: {MATCHDAY_BG};
     border: 1px solid rgba(0,229,255,0.35);
-    border-radius: 18px;
-    padding: 18px 20px;
-    margin-bottom: 16px;
-    box-shadow: 0 10px 30px rgba(0,0,0,0.5), 0 0 22px rgba(0,229,255,0.10);
+    border-radius: 12px;
+    padding: 8px 10px;
+    margin-bottom: 8px;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.5), 0 0 14px rgba(0,229,255,0.10);
 }}
 
 /* ---- Hook iniziale: appare, resta, poi sfuma e collassa via CSS ---- */
 .mds-hook-wrap {{
     background: {MATCHDAY_BG};
     border: 1px solid rgba(0,229,255,0.55);
-    border-radius: 20px;
-    padding: 34px 22px;
-    margin-bottom: 16px;
+    border-radius: 14px;
+    padding: 14px 16px;
+    margin-bottom: 8px;
     text-align: center;
-    box-shadow: 0 12px 38px rgba(0,0,0,0.6), 0 0 36px rgba(0,229,255,0.18);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.6), 0 0 22px rgba(0,229,255,0.18);
     overflow: hidden;
     opacity: 0;
     animation: mdsHookLifecycle {MDS_HOOK_DURATION_SECONDS}s ease forwards;
 }}
 @keyframes mdsHookLifecycle {{
-    0%   {{ opacity: 0; max-height: 300px; }}
-    12%  {{ opacity: 1; max-height: 300px; }}
-    78%  {{ opacity: 1; max-height: 300px; }}
+    0%   {{ opacity: 0; max-height: 140px; }}
+    12%  {{ opacity: 1; max-height: 140px; }}
+    78%  {{ opacity: 1; max-height: 140px; }}
     100% {{ opacity: 0; max-height: 0; margin-bottom: 0; padding-top: 0; padding-bottom: 0; border-width: 0; }}
 }}
 .mds-hook-title {{
     font-family: "Courier New", monospace;
-    font-size: 1.5rem;
+    font-size: 1.05rem;
     font-weight: 900;
-    letter-spacing: 0.10em;
+    letter-spacing: 0.08em;
     color: {MATCHDAY_ACCENT};
-    text-shadow: 0 0 16px rgba(0,229,255,0.85);
-    margin-bottom: 8px;
+    text-shadow: 0 0 12px rgba(0,229,255,0.85);
+    margin-bottom: 4px;
     animation: mdsPulse 1s ease-in-out infinite;
 }}
 .mds-hook-subtitle {{
     font-family: "Courier New", monospace;
-    font-size: 0.85rem;
-    letter-spacing: 0.06em;
+    font-size: 0.62rem;
+    letter-spacing: 0.05em;
     text-transform: uppercase;
     color: #d8dadc;
-    margin-bottom: 18px;
+    margin-bottom: 8px;
 }}
 .mds-hook-track {{
     width: 100%;
-    height: 8px;
+    height: 5px;
     border-radius: 999px;
     background: rgba(255,255,255,0.08);
     overflow: hidden;
@@ -409,7 +479,7 @@ MATCHDAY_CSS = f"""
     width: 0%;
     border-radius: 999px;
     background: linear-gradient(90deg, {MATCHDAY_ACCENT}, #00ff87);
-    box-shadow: 0 0 14px rgba(0,229,255,0.85);
+    box-shadow: 0 0 10px rgba(0,229,255,0.85);
     animation: mdsFill {MDS_HOOK_DURATION_SECONDS}s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
 }}
 @keyframes mdsFill {{
@@ -421,95 +491,112 @@ MATCHDAY_CSS = f"""
     50% {{ opacity: 1; }}
 }}
 
-/* ---- Match card: fade-in + slide-up, con animation-delay progressivo ---- */
+/* ---- Griglia delle 10 card: 2 colonne di default, 3 su schermi larghi ---- */
+.mds-cards-grid {{
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px;
+    margin-bottom: 8px;
+}}
+@media (min-width: 700px) {{
+    .mds-cards-grid {{
+        grid-template-columns: repeat(3, 1fr);
+    }}
+}}
+
+/* ---- Match card: compatta, fade-in + slide-up con animation-delay ---- */
 .mds-card {{
     position: relative;
     background: {MATCHDAY_BG};
     border: 1px solid {MATCHDAY_ACCENT};
-    border-radius: 18px;
-    padding: 22px 16px 36px 16px;
-    margin-bottom: 14px;
-    box-shadow: 0 0 22px rgba(0,229,255,0.16), 0 8px 22px rgba(0,0,0,0.55);
+    border-radius: 10px;
+    padding: 8px 6px 20px 6px;
+    box-shadow: 0 0 12px rgba(0,229,255,0.14), 0 4px 12px rgba(0,0,0,0.5);
     text-align: center;
     opacity: 0;
-    animation: mdsCardIn 0.5s ease forwards;
+    animation: mdsCardIn 0.4s ease forwards;
     animation-delay: var(--mds-delay, 0s);
+    min-width: 0;
 }}
 @keyframes mdsCardIn {{
-    from {{ opacity: 0; transform: translateY(18px) scale(0.98); }}
+    from {{ opacity: 0; transform: translateY(10px) scale(0.98); }}
     to   {{ opacity: 1; transform: translateY(0) scale(1); }}
 }}
 .mds-calib-tag {{
     position: absolute;
-    top: 10px;
-    left: 14px;
+    top: 3px;
+    left: 5px;
     font-family: "Courier New", monospace;
-    font-size: 0.58rem;
-    letter-spacing: 0.03em;
+    font-size: 0.44rem;
+    letter-spacing: 0.02em;
     color: {MATCHDAY_ACCENT};
-    opacity: 0.7;
+    opacity: 0.65;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: calc(100% - 10px);
 }}
 .mds-card-teams {{
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 18px;
+    gap: 4px;
 }}
 .mds-team {{
     flex: 1;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 8px;
+    gap: 3px;
     min-width: 0;
 }}
 .mds-crest {{
-    width: 58px;
-    height: 58px;
+    width: 28px;
+    height: 28px;
     object-fit: contain;
 }}
 .mds-crest-placeholder {{
-    width: 58px;
-    height: 58px;
+    width: 28px;
+    height: 28px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 1.9rem;
+    font-size: 1.1rem;
     opacity: 0.6;
 }}
 .mds-team-name {{
     font-weight: 800;
-    font-size: 0.86rem;
+    font-size: 0.56rem;
     text-transform: uppercase;
-    letter-spacing: 0.02em;
+    letter-spacing: 0.01em;
     color: #f5f5f5;
     text-align: center;
     overflow-wrap: break-word;
-    line-height: 1.2;
-    min-height: 2.1em;
+    line-height: 1.1;
+    min-height: 1.3em;
 }}
 .mds-score {{
-    font-size: 3.1rem;
+    font-size: 1.55rem;
     font-weight: 900;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.03em;
     font-variant-numeric: tabular-nums;
     background: linear-gradient(135deg, {MATCHDAY_ACCENT}, #ffffff);
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
-    margin: 0 4px;
+    margin: 0 2px;
     line-height: 1;
     white-space: nowrap;
 }}
 .mds-pill {{
     position: absolute;
-    bottom: 12px;
-    right: 14px;
+    bottom: 5px;
+    right: 6px;
     font-family: "Courier New", monospace;
-    font-size: 0.74rem;
+    font-size: 0.56rem;
     font-weight: 800;
-    letter-spacing: 0.04em;
-    padding: 4px 14px;
+    letter-spacing: 0.02em;
+    padding: 2px 7px;
     border-radius: 999px;
     border: 1px solid rgba(0,229,255,0.55);
     background: rgba(0,229,255,0.10);
@@ -518,99 +605,99 @@ MATCHDAY_CSS = f"""
 }}
 .mds-header-title {{
     font-family: "Courier New", monospace;
-    font-size: 1.05rem;
+    font-size: 0.85rem;
     font-weight: 900;
-    letter-spacing: 0.1em;
+    letter-spacing: 0.08em;
     color: {MATCHDAY_ACCENT};
     text-transform: uppercase;
-    text-shadow: 0 0 10px rgba(0,229,255,0.5);
-    margin-bottom: 4px;
+    text-shadow: 0 0 8px rgba(0,229,255,0.5);
+    margin-bottom: 2px;
 }}
 .mds-disclaimer {{
-    font-size: 0.72rem;
+    font-size: 0.60rem;
     color: #9aa0a6;
-    line-height: 1.4;
-    margin: 4px 0 14px 0;
-    padding: 8px 12px;
-    border-left: 3px solid {MATCHDAY_ACCENT};
+    line-height: 1.25;
+    margin: 2px 0 8px 0;
+    padding: 5px 8px;
+    border-left: 2px solid {MATCHDAY_ACCENT};
     background: rgba(0,229,255,0.05);
-    border-radius: 6px;
+    border-radius: 5px;
 }}
 
 /* ---- Banner di riepilogo finale: appare per ultimo, via animation-delay ---- */
 .mds-summary-wrap {{
     background: {MATCHDAY_BG};
     border: 1px solid {MATCHDAY_ACCENT};
-    border-radius: 18px;
-    padding: 18px 16px;
-    margin-top: 6px;
-    box-shadow: 0 0 24px rgba(0,229,255,0.18), 0 8px 22px rgba(0,0,0,0.55);
+    border-radius: 12px;
+    padding: 8px 10px;
+    margin-top: 2px;
+    box-shadow: 0 0 16px rgba(0,229,255,0.18), 0 4px 14px rgba(0,0,0,0.55);
     opacity: 0;
-    animation: mdsCardIn 0.5s ease forwards;
+    animation: mdsCardIn 0.4s ease forwards;
     animation-delay: var(--mds-delay, 0s);
 }}
 .mds-summary-title {{
     font-family: "Courier New", monospace;
-    font-size: 0.8rem;
+    font-size: 0.62rem;
     font-weight: 900;
-    letter-spacing: 0.14em;
+    letter-spacing: 0.10em;
     text-transform: uppercase;
     color: {MATCHDAY_ACCENT};
     text-align: center;
-    margin-bottom: 12px;
-    text-shadow: 0 0 8px rgba(0,229,255,0.5);
+    margin-bottom: 6px;
+    text-shadow: 0 0 6px rgba(0,229,255,0.5);
 }}
 .mds-summary-row {{
     display: flex;
-    gap: 10px;
+    gap: 6px;
     flex-wrap: wrap;
     justify-content: center;
 }}
 .mds-summary-badge {{
     flex: 1;
-    min-width: 110px;
+    min-width: 90px;
     background: #0a0a0a;
     border: 1px solid rgba(0,229,255,0.5);
-    border-radius: 14px;
-    padding: 10px 12px;
+    border-radius: 10px;
+    padding: 5px 8px;
     text-align: center;
 }}
 .mds-summary-value {{
     font-family: "Courier New", monospace;
-    font-size: 1.35rem;
+    font-size: 0.95rem;
     font-weight: 900;
     color: {MATCHDAY_ACCENT};
-    text-shadow: 0 0 10px rgba(0,229,255,0.6);
+    text-shadow: 0 0 8px rgba(0,229,255,0.6);
     line-height: 1.1;
 }}
 .mds-summary-label {{
-    font-size: 0.63rem;
-    letter-spacing: 0.07em;
+    font-size: 0.50rem;
+    letter-spacing: 0.05em;
     text-transform: uppercase;
     color: #9aa0a6;
-    margin-top: 2px;
+    margin-top: 1px;
 }}
 .mds-surprise-box {{
-    margin-top: 10px;
+    margin-top: 6px;
     background: #0a0a0a;
     border: 1px solid rgba(0,229,255,0.5);
-    border-radius: 14px;
-    padding: 12px 14px;
+    border-radius: 10px;
+    padding: 6px 8px;
     text-align: center;
 }}
 .mds-surprise-label {{
-    font-size: 0.63rem;
-    letter-spacing: 0.07em;
+    font-size: 0.50rem;
+    letter-spacing: 0.05em;
     text-transform: uppercase;
     color: #9aa0a6;
-    margin-bottom: 4px;
+    margin-bottom: 2px;
 }}
 .mds-surprise-value {{
     font-family: "Courier New", monospace;
-    font-size: 1.0rem;
+    font-size: 0.72rem;
     font-weight: 800;
     color: #f5f5f5;
-    letter-spacing: 0.02em;
+    letter-spacing: 0.01em;
 }}
 .mds-surprise-value span {{
     color: {MATCHDAY_ACCENT};
@@ -841,14 +928,16 @@ def _summary_html(results: list[dict[str, object]], delay_seconds: float) -> str
 
 def _build_broadcast_html(results: list[dict[str, object]], crests: dict[str, str]) -> str:
     """Assembla hook + 10 card + banner di riepilogo in UN SOLO blocco HTML.
-    Ogni elemento porta il proprio `--mds-delay` calcolato qui in Python
-    (aritmetica pura, nessuna attesa reale), ma è il CSS — non Python — a
-    far scorrere il tempo e a rivelare gli elementi uno alla volta nel
-    browser. Card i-esima (0-based): delay = MDS_HOOK_DURATION_SECONDS +
-    i × MDS_CARD_STAGGER_SECONDS, cosi la spaziatura RELATIVA tra una card e
-    la successiva è sempre di 0.6s, a partire da subito dopo la scomparsa
-    dell'hook."""
-    parts: list[str] = [_hook_html()]
+    Le card sono avvolte in un contenitore `.mds-cards-grid` (grid CSS a 2
+    colonne, 3 su schermi larghi) cosi da restare compatte per le riprese
+    9:16 invece di impilarsi una sopra l'altra. Ogni card porta il proprio
+    `--mds-delay` calcolato qui in Python (aritmetica pura, nessuna attesa
+    reale), ma è il CSS — non Python — a far scorrere il tempo e a rivelare
+    gli elementi uno alla volta nel browser. Card i-esima (0-based):
+    delay = MDS_HOOK_DURATION_SECONDS + i × MDS_CARD_STAGGER_SECONDS, cosi
+    la spaziatura RELATIVA tra una card e la successiva è sempre di 0.6s, a
+    partire da subito dopo la scomparsa dell'hook."""
+    parts: list[str] = [_hook_html(), '<div class="mds-cards-grid">']
 
     for index, outcome in enumerate(results):
         delay = MDS_HOOK_DURATION_SECONDS + index * MDS_CARD_STAGGER_SECONDS
@@ -856,6 +945,8 @@ def _build_broadcast_html(results: list[dict[str, object]], crests: dict[str, st
             parts.append(_error_card_html(outcome["home"], outcome["away"], outcome.get("error"), delay))
         else:
             parts.append(_match_card_html(outcome["home"], outcome["away"], outcome, crests, delay))
+
+    parts.append("</div>")
 
     summary_delay = MDS_HOOK_DURATION_SECONDS + len(results) * MDS_CARD_STAGGER_SECONDS
     parts.append(_summary_html(results, summary_delay))
@@ -871,7 +962,6 @@ def render_matchday_simulator_tab() -> None:
     di supporto (dati, modello Poisson/Monte Carlo, CSS, dataset demo di
     fallback, generazione dell'HTML animato) sono definite in questo stesso
     file."""
-    st.error("🚨 TEST COLLEGAMENTO: SE VEDI QUESTO MESSAGGIO IL FILE SI STA AGGIORNANDO!")
     st.markdown(MATCHDAY_CSS, unsafe_allow_html=True)
     st.markdown('<div class="mds-header-title">🏆 MATCHDAY LIVE SIMULATOR</div>', unsafe_allow_html=True)
     st.caption(
