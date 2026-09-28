@@ -8122,7 +8122,10 @@ def main() -> None:
         with main_tab_bankroll:
             render_bankroll_tab()
         with main_tab_matchday:
+            import importlib
+            importlib.reload(league_simulator)
             league_simulator.render_matchday_simulator_tab()
+
 
     else:
         render_login()
