@@ -247,9 +247,11 @@ class MatchModel:
     away_lambda: float
 
 
-MDS_MODEL_LAMBDA_FLOOR = 0.15
 MDS_MODEL_DEFAULT_HOME_AVG = 1.45
 MDS_MODEL_DEFAULT_AWAY_AVG = 1.15
+# NB: il floor/ceiling degli xG finali (dopo prior di forza e calibrazione di
+# lega) sono MDS_LAMBDA_FLOOR / MDS_LAMBDA_CEILING, definiti più sotto nella
+# sezione di calibrazione gol.
 
 # ------------------------------------------------------------------------------
 # PRIOR DI FORZA PER CLUB (locale, editabile, NON un feed di rating live)
@@ -331,12 +333,98 @@ MDS_STRENGTH_GAIN = 1.15
 # accentuare leggermente il gap tra big e underdog invece di appiattirlo.
 
 
-def _team_prior_strength(league: str, team: str) -> tuple[float, float]:
-    """Prior (attack, defense) per una squadra: lookup esatto nel tier
-    della competizione, con fallback a un confronto case-insensitive per
-    substring (i nomi restituiti dalle fonti dati possono variare
-    leggermente), e infine al tier di default (3, forza media) se la
-    squadra non è nell'elenco."""
+def _normalize_external_rating(value: float, lo: float = 0.0, hi: float = 100.0) -> float:
+    """Normalizza un rating esterno (scala lo-hi, tipicamente 0-100) in
+    [0, 1]."""
+    if hi <= lo:
+        return 0.5
+    return clamp((float(value) - lo) / (hi - lo), 0.0, 1.0)
+
+
+def _external_team_prior(entry: dict) -> tuple[float, float]:
+    """CONTRATTO DATI ESTERNI (da app.py via teams_data/ratings_df): per
+    ogni squadra ci si aspetta un record con chiavi (tutte opzionali tranne
+    almeno una tra 'attack'/'overall'):
+        {"attack": 0-100, "defense": 0-100, "overall": 0-100, "form": 0-100}
+    'overall' fa da fallback per attack/defense se mancanti; 'form' è un
+    modificatore opzionale (forma recente) applicato sopra l'attack/defense
+    di base. Non conoscendo lo schema esatto già in uso in app.py, questo è
+    il contratto che questo file si aspetta: se i vostri rating usano nomi o
+    scale diverse, o normalizzali prima di passarli qui, o fatemelo sapere e
+    adatto questa funzione.
+    Ritorna (attack_multiplier, defense_multiplier) nello stesso spazio del
+    prior di tier locale (~0.60 debole .. ~1.60 forte per l'attacco, inverso
+    per la difesa)."""
+    attack_raw = entry.get("attack", entry.get("overall", 50))
+    defense_raw = entry.get("defense", entry.get("overall", 50))
+    form_raw = entry.get("form")
+
+    attack_norm = _normalize_external_rating(attack_raw)
+    defense_norm = _normalize_external_rating(defense_raw)
+
+    attack_prior = 0.60 + attack_norm * 1.00       # 0.60 .. 1.60
+    defense_prior = 1.60 - defense_norm * 1.00     # 1.60 (debole) .. 0.60 (forte)
+
+    if form_raw is not None:
+        form_norm = _normalize_external_rating(form_raw)
+        form_factor = 0.88 + form_norm * 0.24      # 0.88 .. 1.12
+        attack_prior *= form_factor
+        defense_prior /= form_factor
+
+    return attack_prior, defense_prior
+
+
+def _lookup_external_team_entry(teams_data: dict | None, ratings_df, team: str) -> dict | None:
+    """Cerca il record di rating esterno per `team`, prima in `teams_data`
+    (dict {nome_squadra: record}), poi in `ratings_df` (oggetto DataFrame-
+    like con colonne tipo 'team'/'team_name'/'squad'/'club' + rating).
+    Nessun import di pandas: se `ratings_df` è un vero DataFrame, i suoi
+    stessi metodi (.to_dict) sono già disponibili senza bisogno di
+    importare la libreria qui."""
+    if teams_data:
+        entry = teams_data.get(team)
+        if entry is None:
+            team_lower = team.lower()
+            for name, data in teams_data.items():
+                if isinstance(name, str) and name.lower() == team_lower:
+                    entry = data
+                    break
+        if isinstance(entry, dict):
+            return entry
+
+    if ratings_df is not None:
+        try:
+            records = ratings_df.to_dict("records") if hasattr(ratings_df, "to_dict") else list(ratings_df)
+        except Exception:
+            records = []
+        team_lower = team.lower()
+        for row in records:
+            if not isinstance(row, dict):
+                continue
+            name = row.get("team") or row.get("team_name") or row.get("squad") or row.get("club")
+            if isinstance(name, str) and name.lower() == team_lower:
+                return row
+
+    return None
+
+
+def _team_prior_strength(
+    league: str, team: str, teams_data: dict | None = None, ratings_df=None
+) -> tuple[float, float]:
+    """Prior (attack, defense) per una squadra. Priorità:
+    1) dati REALI esterni (teams_data/ratings_df, se passati da app.py e se
+       contengono questa squadra) — vedi _external_team_prior per il
+       contratto atteso;
+    2) altrimenti, il tier di forza locale (CLUB_STRENGTH_TIER), con
+       fallback a un confronto case-insensitive per substring e infine al
+       tier di default (3, forza media) se la squadra non è nota."""
+    external_entry = _lookup_external_team_entry(teams_data, ratings_df, team)
+    if external_entry is not None:
+        try:
+            return _external_team_prior(external_entry)
+        except (TypeError, ValueError):
+            pass  # record esterno malformato: ricadi sul tier locale
+
     tiers = CLUB_STRENGTH_TIER.get(league, {})
     tier = tiers.get(team)
     if tier is None:
@@ -353,10 +441,11 @@ def _team_prior_strength(league: str, team: str) -> tuple[float, float]:
 
 def _blended_strength(n_matches: int, observed_ratio: float, prior_ratio: float) -> float:
     """Shrinkage bayesiano semplice: con pochi precedenti (n_matches basso)
-    il prior di tier pesa di più; con uno storico consistente, il modello
-    converge verso il rapporto osservato. Il risultato finale viene poi
-    leggermente accentuato da MDS_STRENGTH_GAIN per mantenere una
-    separazione realistica tra squadre di livello diverso."""
+    il prior (esterno se disponibile, altrimenti di tier) pesa di più; con
+    uno storico consistente, il modello converge verso il rapporto
+    osservato. Il risultato finale viene poi leggermente accentuato da
+    MDS_STRENGTH_GAIN per mantenere una separazione realistica tra squadre
+    di livello diverso."""
     weight = min(1.0, n_matches / MDS_RATING_SHRINKAGE_MATCHES)
     blended = weight * observed_ratio + (1 - weight) * prior_ratio
     return blended ** MDS_STRENGTH_GAIN
@@ -386,43 +475,58 @@ def _league_average_goals(finished: list[dict]) -> tuple[float, float]:
     return max(home_avg, 0.1), max(away_avg, 0.1)
 
 
-def _team_home_attack(finished: list[dict], team: str, league_home_avg: float, league: str) -> float:
+def _team_home_attack(
+    finished: list[dict], team: str, league_home_avg: float, league: str, teams_data=None, ratings_df=None
+) -> float:
     matches = [m for m in finished if m["home"] == team]
-    attack_prior, _ = _team_prior_strength(league, team)
+    attack_prior, _ = _team_prior_strength(league, team, teams_data, ratings_df)
     if not matches or league_home_avg <= 0:
         return attack_prior
     observed = (sum(m["home_goals"] for m in matches) / len(matches)) / league_home_avg
     return _blended_strength(len(matches), observed, attack_prior)
 
 
-def _team_away_attack(finished: list[dict], team: str, league_away_avg: float, league: str) -> float:
+def _team_away_attack(
+    finished: list[dict], team: str, league_away_avg: float, league: str, teams_data=None, ratings_df=None
+) -> float:
     matches = [m for m in finished if m["away"] == team]
-    attack_prior, _ = _team_prior_strength(league, team)
+    attack_prior, _ = _team_prior_strength(league, team, teams_data, ratings_df)
     if not matches or league_away_avg <= 0:
         return attack_prior
     observed = (sum(m["away_goals"] for m in matches) / len(matches)) / league_away_avg
     return _blended_strength(len(matches), observed, attack_prior)
 
 
-def _team_home_defense(finished: list[dict], team: str, league_away_avg: float, league: str) -> float:
+def _team_home_defense(
+    finished: list[dict], team: str, league_away_avg: float, league: str, teams_data=None, ratings_df=None
+) -> float:
     matches = [m for m in finished if m["home"] == team]
-    _, defense_prior = _team_prior_strength(league, team)
+    _, defense_prior = _team_prior_strength(league, team, teams_data, ratings_df)
     if not matches or league_away_avg <= 0:
         return defense_prior
     observed = (sum(m["away_goals"] for m in matches) / len(matches)) / league_away_avg
     return _blended_strength(len(matches), observed, defense_prior)
 
 
-def _team_away_defense(finished: list[dict], team: str, league_home_avg: float, league: str) -> float:
+def _team_away_defense(
+    finished: list[dict], team: str, league_home_avg: float, league: str, teams_data=None, ratings_df=None
+) -> float:
     matches = [m for m in finished if m["away"] == team]
-    _, defense_prior = _team_prior_strength(league, team)
+    _, defense_prior = _team_prior_strength(league, team, teams_data, ratings_df)
     if not matches or league_home_avg <= 0:
         return defense_prior
     observed = (sum(m["home_goals"] for m in matches) / len(matches)) / league_home_avg
     return _blended_strength(len(matches), observed, defense_prior)
 
 
-def try_build_match_model(league: str, home: str, away: str) -> tuple[MatchModel | None, str | None]:
+def try_build_match_model(
+    league: str, home: str, away: str, teams_data: dict | None = None, ratings_df=None
+) -> tuple[MatchModel | None, str | None]:
+    """`teams_data`/`ratings_df` sono opzionali e vengono passati da chi
+    chiama (in ultima istanza, render_matchday_simulator_tab, a sua volta
+    chiamato da app.py con i dati reali di rating/forma — vedi il contratto
+    in _external_team_prior). Se assenti, si ricade sul prior di tier
+    locale (CLUB_STRENGTH_TIER)."""
     try:
         matches = fetch_league_matches(league)
     except FootballDataError as exc:
@@ -431,13 +535,13 @@ def try_build_match_model(league: str, home: str, away: str) -> tuple[MatchModel
     finished = _finished_matches(matches)
     league_home_avg, league_away_avg = _league_average_goals(finished)
 
-    home_attack = _team_home_attack(finished, home, league_home_avg, league)
-    away_defense = _team_away_defense(finished, away, league_home_avg, league)
-    away_attack = _team_away_attack(finished, away, league_away_avg, league)
-    home_defense = _team_home_defense(finished, home, league_away_avg, league)
+    home_attack = _team_home_attack(finished, home, league_home_avg, league, teams_data, ratings_df)
+    away_defense = _team_away_defense(finished, away, league_home_avg, league, teams_data, ratings_df)
+    away_attack = _team_away_attack(finished, away, league_away_avg, league, teams_data, ratings_df)
+    home_defense = _team_home_defense(finished, home, league_away_avg, league, teams_data, ratings_df)
 
-    home_lambda = max(league_home_avg * home_attack * away_defense, MDS_MODEL_LAMBDA_FLOOR)
-    away_lambda = max(league_away_avg * away_attack * home_defense, MDS_MODEL_LAMBDA_FLOOR)
+    home_lambda = clamp(league_home_avg * home_attack * away_defense, MDS_LAMBDA_FLOOR, MDS_LAMBDA_CEILING)
+    away_lambda = clamp(league_away_avg * away_attack * home_defense, MDS_LAMBDA_FLOOR, MDS_LAMBDA_CEILING)
 
     return MatchModel(home_team=home, away_team=away, home_lambda=home_lambda, away_lambda=away_lambda), None
 
@@ -448,23 +552,43 @@ def run_simulation(model: MatchModel, n_simulations: int = 10_000) -> dict[str, 
     away_goals = rng.poisson(max(model.away_lambda, 0.01), size=n_simulations)
     return {"raw": {"home_goals": home_goals, "away_goals": away_goals}}
 
-
 # ==============================================================================
-# ENTERTAINMENT CALIBRATION — league-level xG multipliers & score shaping
+# CALIBRAZIONE GOL — range xG realistico, no "risultati tennistici"
 # ==============================================================================
+# NOTA IMPORTANTE: i moltiplicatori qui sotto erano originariamente pensati
+# per "eccitare" i video social gonfiando gli xG (fino a ×1.20). Questo va
+# in conflitto diretto con l'obiettivo di realismo richiesto ora (niente
+# 5-3, 6-2, 4-4 "di massa"), quindi li ho ridotti drasticamente: restano
+# solo micro-aggiustamenti di stile di gioco per lega, non più un boost di
+# spettacolarità. Se preferisci lo spettacolo puro alla plausibilità, dimmelo
+# e li rialzo di nuovo — ma le due cose sono in tensione tra loro.
 LEAGUE_GOAL_MULTIPLIERS: dict[str, float] = {
-    "England · Premier League": 1.18,
-    "Italy · Serie A": 1.15,
-    "Germany · Bundesliga": 1.20,
+    "England · Premier League": 1.04,
+    "Italy · Serie A": 1.00,
+    "Germany · Bundesliga": 1.05,
     "Spain · La Liga": 1.00,
-    "France · Ligue 1": 1.10,
+    "France · Ligue 1": 1.02,
 }
 LEAGUE_GOAL_MULTIPLIER_DEFAULT = 1.0
 
 LEAGUE_ZERO_ZERO_SUPPRESSED: set[str] = {"Italy · Serie A"}
 
 MDS_MAX_GOALS_PER_TEAM = 4
-MDS_LAMBDA_CEILING = 3.0
+# HARD CAP per squadra: ogni singola simulazione Monte Carlo viene troncata
+# (np.clip) a questo valore. Questo garantisce 0% di probabilità — non solo
+# "<1%" — che una squadra mostri più di 4 gol nel punteggio rivelato: un
+# vincolo più stringente di quanto richiesto, applicato allo stesso modo a
+# tutti e 10.000 i campioni Monte Carlo di ogni match, PRIMA che venga letto
+# il punteggio più frequente.
+
+MDS_LAMBDA_FLOOR = 0.75
+MDS_LAMBDA_CEILING = 2.30
+# Range di xG (lambda Poisson) per squadra dopo calibrazione di lega: anche
+# il top team più forte non supera 2.30 di xG atteso, anche l'underdog più
+# debole non scende sotto 0.75. Combinato con il cap sui gol qui sopra e col
+# prior di forza per club, questo sposta la distribuzione dei punteggi verso
+# risultati "normali" (2-1, 3-1, 1-2, 2-2, 3-0) invece che verso i blowout.
+
 MDS_ZERO_ZERO_RESAMPLE_ATTEMPTS = 25
 
 MDS_ZERO_ZERO_MATCHDAY_CAP = 2
@@ -488,8 +612,8 @@ MDS_CARD_STAGGER_SECONDS = 0.6
 
 def _apply_league_calibration(league: str, home_lambda: float, away_lambda: float) -> tuple[float, float, float]:
     multiplier = LEAGUE_GOAL_MULTIPLIERS.get(league, LEAGUE_GOAL_MULTIPLIER_DEFAULT)
-    adj_home = clamp(home_lambda * multiplier, 0.1, MDS_LAMBDA_CEILING)
-    adj_away = clamp(away_lambda * multiplier, 0.1, MDS_LAMBDA_CEILING)
+    adj_home = clamp(home_lambda * multiplier, MDS_LAMBDA_FLOOR, MDS_LAMBDA_CEILING)
+    adj_away = clamp(away_lambda * multiplier, MDS_LAMBDA_FLOOR, MDS_LAMBDA_CEILING)
     return adj_home, adj_away, multiplier
 
 
@@ -753,6 +877,41 @@ MATCHDAY_CSS = f"""
     border-radius: 5px;
 }}
 
+/* ---- Standby/preview: occupa lo stesso slot della griglia risultati
+   prima del click, cosi l'interfaccia resta ferma (nessuno scroll) quando
+   viene sostituito dalla griglia ---- */
+.mds-standby-wrap {{
+    background: {MATCHDAY_BG};
+    border: 1px dashed rgba(0,229,255,0.45);
+    border-radius: 12px;
+    padding: 16px 12px;
+    text-align: center;
+}}
+.mds-standby-dot {{
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: {MATCHDAY_ACCENT};
+    margin-right: 6px;
+    animation: mdsPulse 1.4s ease-in-out infinite;
+}}
+.mds-standby-title {{
+    font-family: "Courier New", monospace;
+    font-size: 0.68rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: {MATCHDAY_ACCENT};
+    text-shadow: 0 0 8px rgba(0,229,255,0.4);
+}}
+.mds-standby-subtitle {{
+    font-size: 0.60rem;
+    color: #9aa0a6;
+    margin-top: 4px;
+    letter-spacing: 0.02em;
+}}
+
 /* ---- Banner di riepilogo finale: appare per ultimo, via animation-delay ---- */
 .mds-summary-wrap {{
     background: {MATCHDAY_BG};
@@ -844,8 +1003,10 @@ def _matchday_fixtures(league: str, matchday: int) -> list[tuple[str, str]]:
 # SIMULATION — raw fixture pass + matchday-wide anti-zero-zero while-loop
 # (calcolo Python sincrono, invariato: cambia solo come viene poi mostrato)
 # ==============================================================================
-def _simulate_fixture_raw(league: str, home: str, away: str, calibration_enabled: bool):
-    model, error = try_build_match_model(league, home, away)
+def _simulate_fixture_raw(
+    league: str, home: str, away: str, calibration_enabled: bool, teams_data=None, ratings_df=None
+):
+    model, error = try_build_match_model(league, home, away, teams_data, ratings_df)
     if model is None:
         return None, error, None, None, []
 
@@ -873,8 +1034,16 @@ def _simulate_fixture_raw(league: str, home: str, away: str, calibration_enabled
     return model, None, home_goals, away_goals, calib_notes
 
 
-def _run_full_matchday(league: str, fixtures: list[tuple[str, str]], calibration_enabled: bool) -> list[dict[str, object]]:
-    """1) Simula tutte le fixture in un array temporaneo (`results`).
+def _run_full_matchday(
+    league: str,
+    fixtures: list[tuple[str, str]],
+    calibration_enabled: bool,
+    teams_data: dict | None = None,
+    ratings_df=None,
+) -> list[dict[str, object]]:
+    """1) Simula tutte le fixture in un array temporaneo (`results`), usando
+       i rating reali (teams_data/ratings_df) se passati da app.py, oppure
+       il prior di tier locale come fallback.
     2) Se calibrazione abilitata e gli 0-0 rivelati sono > MDS_ZERO_ZERO_
        MATCHDAY_CAP (2), un ciclo while incrementa di MDS_ZERO_ZERO_BOOST_
        STEP (+0.50) l'xG (cumulativo) SOLO dei match ancora 0-0 e li
@@ -887,7 +1056,9 @@ def _run_full_matchday(league: str, fixtures: list[tuple[str, str]], calibration
     fixture_state: list[dict[str, object] | None] = []
 
     for home, away in fixtures:
-        model, error, home_goals, away_goals, calib_notes = _simulate_fixture_raw(league, home, away, calibration_enabled)
+        model, error, home_goals, away_goals, calib_notes = _simulate_fixture_raw(
+            league, home, away, calibration_enabled, teams_data, ratings_df
+        )
         if model is None:
             results.append({"home": home, "away": away, "error": error})
             fixture_state.append(None)
@@ -914,8 +1085,8 @@ def _run_full_matchday(league: str, fixtures: list[tuple[str, str]], calibration
             for i in zero_zero_indices:
                 state = fixture_state[i]
                 base_model = state["model"]
-                boosted_home = clamp(base_model.home_lambda + cumulative_boost, 0.1, MDS_LAMBDA_CEILING)
-                boosted_away = clamp(base_model.away_lambda + cumulative_boost, 0.1, MDS_LAMBDA_CEILING)
+                boosted_home = clamp(base_model.home_lambda + cumulative_boost, MDS_LAMBDA_FLOOR, MDS_LAMBDA_CEILING)
+                boosted_away = clamp(base_model.away_lambda + cumulative_boost, MDS_LAMBDA_FLOOR, MDS_LAMBDA_CEILING)
                 boosted_model = dataclasses.replace(base_model, home_lambda=boosted_home, away_lambda=boosted_away)
 
                 simulation = run_simulation(boosted_model, n_simulations=10_000)
@@ -954,6 +1125,21 @@ def _hook_html() -> str:
         '<div class="mds-hook-title">⚡ WAYNELAB AI ENGINE</div>'
         '<div class="mds-hook-subtitle">Running 10,000 Monte Carlo Simulations...</div>'
         '<div class="mds-hook-track"><div class="mds-hook-fill"></div></div>'
+        "</div>"
+    )
+
+
+def _standby_html() -> str:
+    """Stato di preview/standby mostrato nello STESSO placeholder (st.empty())
+    che poi conterrà la griglia dei risultati: al click su SIMULATE il
+    placeholder viene sovrascritto in-place con _build_broadcast_html(...),
+    quindi l'interfaccia resta fissa a schermo — nessun elemento nuovo
+    appeso più in basso, nessuno scroll aggiuntivo da fare per la
+    registrazione."""
+    return (
+        '<div class="mds-standby-wrap">'
+        '<div class="mds-standby-title"><span class="mds-standby-dot"></span>SISTEMA PRONTO</div>'
+        '<div class="mds-standby-subtitle">Premi "⚡ SIMULATE" qui sopra per generare la giornata</div>'
         "</div>"
     )
 
@@ -1041,18 +1227,32 @@ def _build_broadcast_html(results: list[dict[str, object]], crests: dict[str, st
 # ==============================================================================
 # MAIN TAB ENTRY POINT — nessun parametro, nessuna dipendenza esterna
 # ==============================================================================
-def render_matchday_simulator_tab() -> None:
-    """Entry point della tab. Nessun argomento richiesto: tutte le funzioni
-    di supporto (dati, modello Poisson/Monte Carlo, CSS, dataset demo di
-    fallback, generazione dell'HTML animato) sono definite in questo stesso
-    file.
+def render_matchday_simulator_tab(teams_data: dict | None = None, ratings_df=None) -> None:
+    """Entry point della tab.
+
+    `teams_data` / `ratings_df` sono OPZIONALI e vengono passati da chi
+    chiama questa funzione (tipicamente app.py) — non da un import: questo
+    file non importa mai nulla da app.py, quindi nessun circular import è
+    possibile. Se app.py li passa, i rating/forma reali vengono usati per
+    calcolare gli xG; se restano None, si ricade sul prior di tier interno
+    (CLUB_STRENGTH_TIER), bilanciato ma non basato su dati live.
+
+    Contratto atteso per `teams_data`: dict {nome_squadra: record}, dove
+    record è un dict con chiavi 'attack', 'defense', 'overall' (0-100) e
+    opzionalmente 'form' (0-100). 'ratings_df' è lo stesso concetto ma come
+    oggetto DataFrame-like con una colonna nome-squadra ('team'/'team_name'/
+    'squad'/'club') e le stesse colonne di rating. Vedi _external_team_prior
+    per i dettagli esatti della conversione. Se lo schema reale di app.py è
+    diverso, adattalo prima di passarlo qui, o comunica i nomi di colonna
+    reali per un adattamento mirato.
 
     LAYOUT COMPATTO (zero-scroll): header + toggle su un'unica riga, info di
-    dettaglio dentro un expander chiuso di default (non occupa spazio finché
-    non lo si apre), selettori campionato/giornata + pulsante SIMULATE su
-    un'unica riga a 3 colonne. Questo riduce il numero di blocchi verticali
-    prima della griglia delle card, per lasciare più altezza di viewport
-    alla simulazione vera e propria durante una ripresa 9:16 da desktop."""
+    dettaglio dentro un expander chiuso di default, selettori campionato/
+    giornata + pulsante SIMULATE su un'unica riga. Lo stato standby e la
+    griglia dei risultati condividono lo STESSO st.empty(): al click,
+    l'interfaccia non cresce di un pixel in più, si limita a sostituire il
+    contenuto del placeholder in-place — nessuno scroll aggiuntivo per la
+    registrazione video."""
     st.markdown(MATCHDAY_CSS, unsafe_allow_html=True)
 
     header_col, toggle_col = st.columns([2, 1])
@@ -1066,15 +1266,18 @@ def render_matchday_simulator_tab() -> None:
     with st.expander("ℹ️ Modello & calibrazione", expanded=False):
         st.caption(
             "Standalone HUD Broadcast engine — reveal a cascata gestito interamente via CSS, non da "
-            "timer lato server. Il modello Poisson attack/defense è pesato con un prior di forza per "
-            "club (shrinkage bayesiano): con pochi precedenti stagionali il prior di tier pesa di più, "
-            "così i big non perdono in modo implausibile contro le piccole per pura casualità."
+            "timer lato server. Il modello Poisson attack/defense usa i rating reali passati da app.py "
+            "(teams_data/ratings_df) quando disponibili, altrimenti un prior di forza per club interno "
+            "con shrinkage bayesiano — così i big non perdono in modo implausibile contro le piccole. "
+            f"xG per squadra vincolato tra {MDS_LAMBDA_FLOOR:.2f} e {MDS_LAMBDA_CEILING:.2f}, "
+            f"nessuna squadra può mostrare più di {MDS_MAX_GOALS_PER_TEAM} gol nel punteggio rivelato."
         )
         st.markdown(
             '<div class="mds-disclaimer">🎬 <b>Entertainment Calibration</b>: this tab applies '
-            "discretionary per-league xG multipliers and score-shaping rules (goal cap, 0-0 exclusion "
-            "for select leagues, max 2×0-0 per matchday via an xG boost loop) tuned for social-video "
-            "pacing. Turn the toggle above off to see the model without engagement calibration.</div>",
+            "light per-league xG multipliers and score-shaping rules (goal cap, 0-0 exclusion for "
+            "select leagues, max 2×0-0 per matchday via an xG boost loop) tuned for realistic, "
+            "social-friendly pacing. Turn the toggle above off to see the model without calibration."
+            "</div>",
             unsafe_allow_html=True,
         )
 
@@ -1116,6 +1319,12 @@ def render_matchday_simulator_tab() -> None:
     except FootballDataError:
         crests = {}
 
+    # PREVIEW / RISULTATI: un solo st.empty() condiviso. Prima del click
+    # mostra lo stato di standby; al click, il contenuto dello STESSO
+    # placeholder viene sostituito con la griglia — l'interfaccia resta
+    # fissa nello stesso punto dello schermo, nessuno scroll aggiuntivo.
+    results_area = st.empty()
+
     if run_clicked:
         # RESET DELLO STATO AL CLICK.
         st.session_state.pop("simulated_results", None)
@@ -1125,14 +1334,18 @@ def render_matchday_simulator_tab() -> None:
                 del st.session_state[key]
 
         # 1) Simulazione completa della giornata, calcolata INTERAMENTE IN
-        #    MEMORIA (hard cap anti-0-0 a ciclo while incluso — vedi
-        #    _run_full_matchday). Nessun output a schermo ancora.
-        results = _run_full_matchday(league, fixtures, calibration_enabled)
+        #    MEMORIA (rating esterni + hard cap anti-0-0 a ciclo while
+        #    inclusi — vedi _run_full_matchday). Nessun output a schermo
+        #    ancora.
+        results = _run_full_matchday(league, fixtures, calibration_enabled, teams_data, ratings_df)
 
         # 2) UN SOLO blocco HTML con hook + 10 card + riepilogo, ciascuno con
         #    il proprio animation-delay calcolato in Python ma ESEGUITO dal
         #    browser via CSS: è questo, e non un ciclo time.sleep, a
         #    produrre il reveal a cascata — quindi è immune a qualunque
-        #    comportamento di buffering lato server/hosting.
+        #    comportamento di buffering lato server/hosting. Sostituisce lo
+        #    stato di standby nello stesso placeholder.
         broadcast_html = _build_broadcast_html(results, crests)
-        st.markdown(broadcast_html, unsafe_allow_html=True)
+        results_area.markdown(broadcast_html, unsafe_allow_html=True)
+    else:
+        results_area.markdown(_standby_html(), unsafe_allow_html=True)
