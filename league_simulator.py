@@ -30,11 +30,28 @@ Il ciclo Monte Carlo + hard-cap anti-0-0 resta un calcolo Python sincrono
 risultato viene rivelato a schermo.
 
 Timeline dell'animazione (puramente CSS):
-    0.0s                → l'hook "⚡ WAYNELAB AI ENGINE" appare e resta visibile
-    ~1.5s               → l'hook sfuma e collassa (opacity + max-height → 0)
-    MDS_HOOK_DURATION_SECONDS (1.8s) → Card 1 appare (fade-in + slide-up)
+    0.0s                → status bar mostra "⚡ WAYNELAB AI ENGINE — 10,000 MONTE CARLO RUNS..."
+    MDS_HOOK_DURATION_SECONDS (1.8s) → il testo della status bar sfuma in
+                          crossfade verso "✅ SIMULATION COMPLETE — N MATCHES"
+                          (la barra stessa NON collassa più: resta ad
+                          altezza fissa — vedi sotto); nello stesso istante
+                          appare Card 1 (fade-in + slide-up)
     +0.6s dopo ogni card → Card 2, poi Card 3, ... fino a Card 10
     +0.6s dopo l'ultima card → banner di riepilogo finale
+
+PREVIEW/STANDBY A GEOMETRIA IDENTICA (zero scroll durante la registrazione)
+-----------------------------------------------------------------------------
+Prima del click su SIMULATE, lo stesso placeholder (st.empty()) che poi
+conterrà i risultati mostra uno stato di anteprima costruito con le
+IDENTICHE classi CSS dello stato risultati: una status bar ad altezza fissa
+(.mds-status-bar, statica invece che in crossfade), una .mds-cards-grid con
+10 "card di anteprima" (stessa classe .mds-card, stesso .mds-score usato
+per mostrare "VS" invece del punteggio, stesso .mds-pill usato per un tag
+"BIG MATCH"/"IN ANALISI" invece dell'esito 1X2) e lo stesso banner
+.mds-summary-wrap con valori segnaposto "—". Riusare pixel-per-pixel le
+stesse classi, invece di un box di anteprima diverso, è ciò che garantisce
+un'altezza identica al millimetro tra "prima" e "dopo" il click: cambia
+solo il testo dentro le celle, mai le dimensioni delle celle stesse.
 
 MODELLO STATISTICO LOCALE
 --------------------------
@@ -683,61 +700,67 @@ MATCHDAY_CSS = f"""
     box-shadow: 0 6px 18px rgba(0,0,0,0.5), 0 0 14px rgba(0,229,255,0.10);
 }}
 
-/* ---- Hook iniziale: appare, resta, poi sfuma e collassa via CSS ---- */
-.mds-hook-wrap {{
+/* ---- Status bar ad ALTEZZA FISSA: usata sia in standby sia nei risultati,
+   cosi il blocco in cima alla griglia occupa sempre lo stesso spazio
+   (requisito "zero scroll" — vedi note nella docstring del modulo). Nei
+   risultati, il messaggio "analyzing" e quello "completato" si alternano
+   con un crossfade (opacity) DENTRO questa altezza fissa, invece che con
+   un collasso dell'intero blocco come nelle versioni precedenti. ---- */
+.mds-status-bar {{
+    position: relative;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     background: {MATCHDAY_BG};
     border: 1px solid rgba(0,229,255,0.55);
-    border-radius: 14px;
-    padding: 14px 16px;
+    border-radius: 10px;
     margin-bottom: 8px;
-    text-align: center;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.6), 0 0 22px rgba(0,229,255,0.18);
     overflow: hidden;
-    opacity: 0;
-    animation: mdsHookLifecycle {MDS_HOOK_DURATION_SECONDS}s ease forwards;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.55), 0 0 16px rgba(0,229,255,0.16);
 }}
-@keyframes mdsHookLifecycle {{
-    0%   {{ opacity: 0; max-height: 140px; }}
-    12%  {{ opacity: 1; max-height: 140px; }}
-    78%  {{ opacity: 1; max-height: 140px; }}
-    100% {{ opacity: 0; max-height: 0; margin-bottom: 0; padding-top: 0; padding-bottom: 0; border-width: 0; }}
-}}
-.mds-hook-title {{
-    font-family: "Courier New", monospace;
-    font-size: 1.05rem;
-    font-weight: 900;
-    letter-spacing: 0.08em;
-    color: {MATCHDAY_ACCENT};
-    text-shadow: 0 0 12px rgba(0,229,255,0.85);
-    margin-bottom: 4px;
-    animation: mdsPulse 1s ease-in-out infinite;
-}}
-.mds-hook-subtitle {{
+.mds-status-text {{
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
     font-family: "Courier New", monospace;
     font-size: 0.62rem;
+    font-weight: 800;
     letter-spacing: 0.05em;
     text-transform: uppercase;
-    color: #d8dadc;
-    margin-bottom: 8px;
+    color: {MATCHDAY_ACCENT};
+    text-shadow: 0 0 8px rgba(0,229,255,0.5);
+    white-space: nowrap;
+    padding: 0 10px;
 }}
-.mds-hook-track {{
-    width: 100%;
-    height: 5px;
-    border-radius: 999px;
-    background: rgba(255,255,255,0.08);
-    overflow: hidden;
+.mds-status-dot {{
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: {MATCHDAY_ACCENT};
+    animation: mdsPulse 1.4s ease-in-out infinite;
 }}
-.mds-hook-fill {{
-    height: 100%;
-    width: 0%;
-    border-radius: 999px;
-    background: linear-gradient(90deg, {MATCHDAY_ACCENT}, #00ff87);
-    box-shadow: 0 0 10px rgba(0,229,255,0.85);
-    animation: mdsFill {MDS_HOOK_DURATION_SECONDS}s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+.mds-status-analyzing {{
+    opacity: 1;
+    animation: mdsStatusOut {MDS_HOOK_DURATION_SECONDS}s ease forwards;
 }}
-@keyframes mdsFill {{
-    from {{ width: 0%; }}
-    to {{ width: 100%; }}
+.mds-status-done {{
+    opacity: 0;
+    animation: mdsStatusIn {MDS_HOOK_DURATION_SECONDS}s ease forwards;
+}}
+@keyframes mdsStatusOut {{
+    0%   {{ opacity: 1; }}
+    75%  {{ opacity: 1; }}
+    100% {{ opacity: 0; }}
+}}
+@keyframes mdsStatusIn {{
+    0%   {{ opacity: 0; }}
+    75%  {{ opacity: 0; }}
+    100% {{ opacity: 1; }}
 }}
 @keyframes mdsPulse {{
     0%, 100% {{ opacity: 0.6; }}
@@ -877,39 +900,11 @@ MATCHDAY_CSS = f"""
     border-radius: 5px;
 }}
 
-/* ---- Standby/preview: occupa lo stesso slot della griglia risultati
-   prima del click, cosi l'interfaccia resta ferma (nessuno scroll) quando
-   viene sostituito dalla griglia ---- */
-.mds-standby-wrap {{
-    background: {MATCHDAY_BG};
-    border: 1px dashed rgba(0,229,255,0.45);
-    border-radius: 12px;
-    padding: 16px 12px;
-    text-align: center;
-}}
-.mds-standby-dot {{
-    display: inline-block;
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: {MATCHDAY_ACCENT};
-    margin-right: 6px;
-    animation: mdsPulse 1.4s ease-in-out infinite;
-}}
-.mds-standby-title {{
-    font-family: "Courier New", monospace;
-    font-size: 0.68rem;
-    font-weight: 800;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: {MATCHDAY_ACCENT};
-    text-shadow: 0 0 8px rgba(0,229,255,0.4);
-}}
-.mds-standby-subtitle {{
-    font-size: 0.60rem;
-    color: #9aa0a6;
-    margin-top: 4px;
-    letter-spacing: 0.02em;
+/* ---- Pill "big match" nelle card di standby: stessa classe .mds-pill,
+   solo leggermente più opaca per distinguerla visivamente da un esito
+   reale già rivelato ---- */
+.mds-pill-preview {{
+    opacity: 0.85;
 }}
 
 /* ---- Banner di riepilogo finale: appare per ultimo, via animation-delay ---- */
@@ -1116,32 +1111,107 @@ def _crest_html(name: str, crests: dict[str, str]) -> str:
     return '<div class="mds-crest-placeholder">🛡️</div>'
 
 
-def _hook_html() -> str:
-    """Markup dell'hook iniziale: la sua intera "vita" (comparsa, permanenza,
-    dissolvenza/collasso) è governata dalla keyframe mdsHookLifecycle in
-    MATCHDAY_CSS, durata MDS_HOOK_DURATION_SECONDS — nessun timer Python."""
+def _status_bar_standby_html() -> str:
+    """Status bar per lo stato di PREVIEW, ad altezza fissa (.mds-status-bar,
+    34px) — la STESSA identica classe/altezza usata nello stato risultati
+    (_status_bar_running_html), così questo blocco non introduce alcuna
+    differenza di altezza tra i due stati."""
     return (
-        '<div class="mds-hook-wrap">'
-        '<div class="mds-hook-title">⚡ WAYNELAB AI ENGINE</div>'
-        '<div class="mds-hook-subtitle">Running 10,000 Monte Carlo Simulations...</div>'
-        '<div class="mds-hook-track"><div class="mds-hook-fill"></div></div>'
+        '<div class="mds-status-bar">'
+        '<div class="mds-status-text"><span class="mds-status-dot"></span>'
+        "SIMULATORE GIORNATA LIVE • PRONTO ALL'AVVIO</div>"
         "</div>"
     )
 
 
-def _standby_html() -> str:
-    """Stato di preview/standby mostrato nello STESSO placeholder (st.empty())
-    che poi conterrà la griglia dei risultati: al click su SIMULATE il
-    placeholder viene sovrascritto in-place con _build_broadcast_html(...),
-    quindi l'interfaccia resta fissa a schermo — nessun elemento nuovo
-    appeso più in basso, nessuno scroll aggiuntivo da fare per la
-    registrazione."""
+def _status_bar_running_html(n_matches: int) -> str:
+    """Status bar per lo stato RISULTATI: stessa altezza fissa di
+    _status_bar_standby_html, ma con due testi sovrapposti che si alternano
+    in crossfade (mdsStatusOut / mdsStatusIn, durata MDS_HOOK_DURATION_
+    SECONDS) invece che con un collasso dell'intero blocco — è questo il
+    meccanismo che garantisce l'altezza identica al millimetro tra standby
+    e risultati richiesta: l'hook non sparisce più, semplicemente il testo
+    al suo interno cambia."""
     return (
-        '<div class="mds-standby-wrap">'
-        '<div class="mds-standby-title"><span class="mds-standby-dot"></span>SISTEMA PRONTO</div>'
-        '<div class="mds-standby-subtitle">Premi "⚡ SIMULATE" qui sopra per generare la giornata</div>'
+        '<div class="mds-status-bar">'
+        '<div class="mds-status-text mds-status-analyzing">⚡ WAYNELAB AI ENGINE — '
+        "10,000 MONTE CARLO RUNS...</div>"
+        f'<div class="mds-status-text mds-status-done">✅ SIMULATION COMPLETE — {n_matches} MATCHES</div>'
         "</div>"
     )
+
+
+def _team_tier_for_display(league: str, team: str) -> int:
+    """Tier grezzo (1-5) di una squadra, solo per etichettare le card di
+    ANTEPRIMA come 'big match' quando coinvolgono un club di tier 1-2 —
+    puramente estetico, non influenza la simulazione."""
+    tiers = CLUB_STRENGTH_TIER.get(league, {})
+    tier = tiers.get(team)
+    if tier is None:
+        team_lower = team.lower()
+        for known_name, known_tier in tiers.items():
+            known_lower = known_name.lower()
+            if known_lower in team_lower or team_lower in known_lower:
+                tier = known_tier
+                break
+    return tier if tier is not None else _DEFAULT_TIER
+
+
+def _preview_card_html(home: str, away: str, league: str, crests: dict[str, str]) -> str:
+    """Card di ANTEPRIMA per lo stato di standby: usa esattamente le stesse
+    classi CSS (.mds-card, .mds-card-teams, .mds-team, .mds-score, .mds-pill)
+    della card di risultato in _match_card_html — non una card diversa. È
+    proprio questo riuso 1:1 delle stesse classi, dentro la stessa
+    .mds-cards-grid, a garantire che standby e risultati abbiano
+    ESATTAMENTE la stessa geometria: cambia solo il contenuto testuale
+    (nomi + 'VS' invece di nomi + punteggio; 'BIG MATCH'/'IN ANALISI'
+    invece dell'esito 1X2), non le dimensioni della cella."""
+    best_tier = min(_team_tier_for_display(league, home), _team_tier_for_display(league, away))
+    tag = "🔥 BIG MATCH" if best_tier <= 2 else "IN ANALISI"
+    return (
+        '<div class="mds-card">'
+        '<div class="mds-card-teams">'
+        f'<div class="mds-team">{_crest_html(home, crests)}'
+        f'<div class="mds-team-name">{escape(home)}</div></div>'
+        '<div class="mds-score">VS</div>'
+        f'<div class="mds-team">{_crest_html(away, crests)}'
+        f'<div class="mds-team-name">{escape(away)}</div></div>'
+        "</div>"
+        f'<div class="mds-pill mds-pill-preview">{tag}</div>'
+        "</div>"
+    )
+
+
+def _standby_summary_html() -> str:
+    """Placeholder del banner di riepilogo per lo stato standby: stessa
+    classe .mds-summary-wrap e stessa struttura a badge di _summary_html,
+    con valori segnaposto ('—') al posto dei numeri reali — di nuovo, per
+    garantire la stessa identica altezza tra i due stati."""
+    return (
+        '<div class="mds-summary-wrap">'
+        '<div class="mds-summary-title">📊 Matchday Summary</div>'
+        '<div class="mds-summary-row">'
+        '<div class="mds-summary-badge"><div class="mds-summary-value">—</div>'
+        '<div class="mds-summary-label">Total Goals</div></div>'
+        '<div class="mds-summary-badge"><div class="mds-summary-value">—</div>'
+        '<div class="mds-summary-label">Avg Goals / Match</div></div>'
+        "</div></div>"
+    )
+
+
+def _build_standby_html(league: str, fixtures: list[tuple[str, str]], crests: dict[str, str]) -> str:
+    """Assembla l'intero stato di PREVIEW/STANDBY: status bar (altezza
+    fissa) + griglia di 10 card di anteprima (stesse classi CSS delle card
+    di risultato) + banner di riepilogo segnaposto (stessa classe del
+    riepilogo reale). Il risultato è, geometricamente, un layout identico a
+    _build_broadcast_html a parità di numero di fixture — cambia solo il
+    contenuto testuale delle celle, mai le loro dimensioni."""
+    parts: list[str] = [_status_bar_standby_html(), '<div class="mds-cards-grid">']
+    for home, away in fixtures:
+        parts.append(_preview_card_html(home, away, league, crests))
+    parts.append("</div>")
+    parts.append(_standby_summary_html())
+    return "".join(parts)
 
 
 def _match_card_html(home: str, away: str, outcome: dict[str, object], crests: dict[str, str], delay_seconds: float) -> str:
@@ -1197,17 +1267,20 @@ def _summary_html(results: list[dict[str, object]], delay_seconds: float) -> str
 
 
 def _build_broadcast_html(results: list[dict[str, object]], crests: dict[str, str]) -> str:
-    """Assembla hook + 10 card + banner di riepilogo in UN SOLO blocco HTML.
-    Le card sono avvolte in un contenitore `.mds-cards-grid` (grid CSS a 2
-    colonne, 3 su schermi larghi) cosi da restare compatte per le riprese
-    9:16 invece di impilarsi una sopra l'altra. Ogni card porta il proprio
-    `--mds-delay` calcolato qui in Python (aritmetica pura, nessuna attesa
-    reale), ma è il CSS — non Python — a far scorrere il tempo e a rivelare
-    gli elementi uno alla volta nel browser. Card i-esima (0-based):
-    delay = MDS_HOOK_DURATION_SECONDS + i × MDS_CARD_STAGGER_SECONDS, cosi
-    la spaziatura RELATIVA tra una card e la successiva è sempre di 0.6s, a
-    partire da subito dopo la scomparsa dell'hook."""
-    parts: list[str] = [_hook_html(), '<div class="mds-cards-grid">']
+    """Assembla status bar + 10 card + banner di riepilogo in UN SOLO
+    blocco HTML. Le card sono avvolte in un contenitore `.mds-cards-grid`
+    (grid CSS a 2 colonne, 3 su schermi larghi) cosi da restare compatte
+    per le riprese 9:16 invece di impilarsi una sopra l'altra. Ogni card
+    porta il proprio `--mds-delay` calcolato qui in Python (aritmetica
+    pura, nessuna attesa reale), ma è il CSS — non Python — a far scorrere
+    il tempo e a rivelare gli elementi uno alla volta nel browser. Card
+    i-esima (0-based): delay = MDS_HOOK_DURATION_SECONDS + i ×
+    MDS_CARD_STAGGER_SECONDS, cosi la spaziatura RELATIVA tra una card e la
+    successiva è sempre di 0.6s. La status bar (_status_bar_running_html)
+    ha ALTEZZA FISSA identica a quella dello stato standby: non collassa
+    più a fine animazione, cambia solo il testo al suo interno — è questo
+    che garantisce l'altezza identica al millimetro tra i due stati."""
+    parts: list[str] = [_status_bar_running_html(len(results)), '<div class="mds-cards-grid">']
 
     for index, outcome in enumerate(results):
         delay = MDS_HOOK_DURATION_SECONDS + index * MDS_CARD_STAGGER_SECONDS
@@ -1348,4 +1421,4 @@ def render_matchday_simulator_tab(teams_data: dict | None = None, ratings_df=Non
         broadcast_html = _build_broadcast_html(results, crests)
         results_area.markdown(broadcast_html, unsafe_allow_html=True)
     else:
-        results_area.markdown(_standby_html(), unsafe_allow_html=True)
+        results_area.markdown(_build_standby_html(league, fixtures, crests), unsafe_allow_html=True)
