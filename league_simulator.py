@@ -620,11 +620,16 @@ MDS_ZERO_ZERO_MAX_BOOST_ROUNDS = 15
 
 # --- Timeline dell'animazione CSS (vedi docstring in testa al file) ---
 MDS_HOOK_DURATION_SECONDS = 1.8
-# Tempo totale per cui l'hook resta a schermo (visibile ~1.5s, poi una
-# breve fase di dissolvenza/collasso): è anche l'istante in cui compare la
-# prima card.
-MDS_CARD_STAGGER_SECONDS = 0.6
-# Intervallo, in secondi, tra la comparsa di una card e la successiva.
+# Tempo per cui la status bar mostra il messaggio "analyzing" prima di
+# passare, in crossfade, al messaggio "completato": è anche l'istante in
+# cui compare la prima card (la barra stessa resta ad altezza fissa, non
+# collassa — vedi _status_bar_running_html).
+MDS_CARD_STAGGER_SECONDS = 0.18
+# Intervallo, in secondi, tra la comparsa di una card e la successiva
+# ("Match Reveal" stile tabellone live): con 10 card, l'ultima parte a
+# 9 × 0.18 = 1.62s dall'inizio della cascata e la sua animazione (0.5s)
+# si esaurisce verso 1.62 + 0.5 ≈ 2.1s — l'intera sequenza di reveal delle
+# 10 card dura quindi complessivamente ~2.0-2.5s, come richiesto.
 
 
 def _apply_league_calibration(league: str, home_lambda: float, away_lambda: float) -> tuple[float, float, float]:
@@ -780,7 +785,12 @@ MATCHDAY_CSS = f"""
     }}
 }}
 
-/* ---- Match card: compatta, fade-in + slide-up con animation-delay ---- */
+/* ---- Match card: "Match Reveal" broadcast — fade-in + slide-up + zoom
+   con un bagliore cyan temporaneo che si attenua nello stato finale. Usa
+   SOLO proprietà che non alterano il flusso del documento (opacity,
+   transform, box-shadow): la cella occupa sempre lo stesso spazio nella
+   griglia dall'inizio alla fine dell'animazione — zero reflow, zero
+   scroll indotto. ---- */
 .mds-card {{
     position: relative;
     background: {MATCHDAY_BG};
@@ -790,10 +800,29 @@ MATCHDAY_CSS = f"""
     box-shadow: 0 0 12px rgba(0,229,255,0.14), 0 4px 12px rgba(0,0,0,0.5);
     text-align: center;
     opacity: 0;
-    animation: mdsCardIn 0.4s ease forwards;
+    animation: mdsMatchReveal 0.5s cubic-bezier(0.22, 1, 0.36, 1) forwards;
     animation-delay: var(--mds-delay, 0s);
     min-width: 0;
+    will-change: transform, opacity, box-shadow;
 }}
+@keyframes mdsMatchReveal {{
+    0%   {{
+        opacity: 0;
+        transform: translateY(22px) scale(0.88);
+        box-shadow: 0 0 0 rgba(0,229,255,0), 0 4px 12px rgba(0,0,0,0.5);
+    }}
+    55%  {{
+        opacity: 1;
+        transform: translateY(-3px) scale(1.045);
+        box-shadow: 0 0 28px rgba(0,229,255,0.65), 0 8px 20px rgba(0,0,0,0.55);
+    }}
+    100% {{
+        opacity: 1;
+        transform: translateY(0) scale(1);
+        box-shadow: 0 0 12px rgba(0,229,255,0.14), 0 4px 12px rgba(0,0,0,0.5);
+    }}
+}}
+/* Fade-in semplice (senza zoom/glow), riusato dal banner di riepilogo */
 @keyframes mdsCardIn {{
     from {{ opacity: 0; transform: translateY(10px) scale(0.98); }}
     to   {{ opacity: 1; transform: translateY(0) scale(1); }}
