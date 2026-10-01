@@ -89,6 +89,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import uuid
 from html import escape
 
 import numpy as np
@@ -624,12 +625,12 @@ MDS_HOOK_DURATION_SECONDS = 1.8
 # passare, in crossfade, al messaggio "completato": è anche l'istante in
 # cui compare la prima card (la barra stessa resta ad altezza fissa, non
 # collassa — vedi _status_bar_running_html).
-MDS_CARD_STAGGER_SECONDS = 0.18
+MDS_CARD_STAGGER_SECONDS = 0.10
 # Intervallo, in secondi, tra la comparsa di una card e la successiva
-# ("Match Reveal" stile tabellone live): con 10 card, l'ultima parte a
-# 9 × 0.18 = 1.62s dall'inizio della cascata e la sua animazione (0.5s)
-# si esaurisce verso 1.62 + 0.5 ≈ 2.1s — l'intera sequenza di reveal delle
-# 10 card dura quindi complessivamente ~2.0-2.5s, come richiesto.
+# ("Match Reveal" stile tabellone live): Card 1 a +0.1s dalla fine
+# dell'hook, Card 2 a +0.2s, ... Card 10 a +1.0s. Con un'animazione di
+# 0.5s per card, l'intera cascata (dall'inizio di Card 1 alla fine
+# dell'animazione di Card 10) dura complessivamente ~1.5s.
 
 
 def _apply_league_calibration(league: str, home_lambda: float, away_lambda: float) -> tuple[float, float, float]:
@@ -804,6 +805,20 @@ MATCHDAY_CSS = f"""
     animation-delay: var(--mds-delay, 0s);
     min-width: 0;
     will-change: transform, opacity, box-shadow;
+}}
+/* ---- Classe DEDICATA applicata SOLO alle card di risultato reale (non
+   alle card di anteprima in standby). Ogni simulazione imposta qui, via
+   stile inline, un `animation-name` univoco generato al momento
+   (mdsMatchReveal_<uuid>, definito in un <style> iniettato insieme
+   all'HTML dei risultati — vedi _build_broadcast_html): così il browser
+   non può MAI considerare l'animazione "già vista" e saltarla, nemmeno
+   nell'eventualità limite in cui il nodo DOM venisse riutilizzato invece
+   che ricreato da zero. `backface-visibility`/`transform: translateZ(0)`
+   forzano inoltre la creazione di un layer GPU dedicato, per una resa
+   fluida del bagliore. ---- */
+.mds-reveal-card {{
+    backface-visibility: hidden;
+    transform: translateZ(0);
 }}
 @keyframes mdsMatchReveal {{
     0%   {{
@@ -1243,15 +1258,29 @@ def _build_standby_html(league: str, fixtures: list[tuple[str, str]], crests: di
     return "".join(parts)
 
 
-def _match_card_html(home: str, away: str, outcome: dict[str, object], crests: dict[str, str], delay_seconds: float) -> str:
-    """Markup di una singola card, con --mds-delay impostato inline: è
-    questo valore (non un time.sleep) a determinare quando la card appare,
-    tramite `animation-delay: var(--mds-delay, 0s)` definito in .mds-card."""
+def _match_card_html(
+    home: str,
+    away: str,
+    outcome: dict[str, object],
+    crests: dict[str, str],
+    delay_seconds: float,
+    reveal_animation_name: str,
+) -> str:
+    """Markup di una singola card di risultato. Oltre alla classe condivisa
+    `.mds-card`, applica `.mds-reveal-card` e imposta via stile inline
+    `animation-name`/`animation-delay` PUNTANDO a una keyframe generata ad
+    hoc per QUESTA esecuzione (`reveal_animation_name`, univoca per ogni
+    click su SIMULATE — vedi _build_broadcast_html). Usare un nome diverso
+    ogni volta è ciò che garantisce che l'animazione venga sempre eseguita
+    da capo: il browser non ha alcuna possibilità di considerarla "già
+    vista" e saltarla, nemmeno nel caso limite in cui il nodo DOM non
+    venisse ricreato da zero."""
     calib_tag = outcome.get("calib_tag", "")
     calib_html = f'<div class="mds-calib-tag">{escape(calib_tag)}</div>' if calib_tag else ""
     pill_code, pill_prob = _revealed_outcome_pill(outcome)
+    style = f"animation-name:{reveal_animation_name}; animation-delay:{delay_seconds:.2f}s;"
     return (
-        f'<div class="mds-card" style="--mds-delay:{delay_seconds:.2f}s">'
+        f'<div class="mds-card mds-reveal-card" style="{style}">'
         f"{calib_html}"
         f'<div class="mds-card-teams">'
         f'<div class="mds-team">{_crest_html(home, crests)}'
@@ -1265,10 +1294,11 @@ def _match_card_html(home: str, away: str, outcome: dict[str, object], crests: d
     )
 
 
-def _error_card_html(home: str, away: str, error: str | None, delay_seconds: float) -> str:
+def _error_card_html(home: str, away: str, error: str | None, delay_seconds: float, reveal_animation_name: str) -> str:
     message = escape(error or "simulazione non disponibile")
+    style = f"animation-name:{reveal_animation_name}; animation-delay:{delay_seconds:.2f}s; text-align:left;"
     return (
-        f'<div class="mds-card" style="--mds-delay:{delay_seconds:.2f}s; text-align:left;">'
+        f'<div class="mds-card mds-reveal-card" style="{style}">'
         f'<div class="mds-team-name" style="color:#ffb020;">⚠️ {escape(home)} vs {escape(away)}</div>'
         f'<div style="color:#d8dadc; font-size:0.85rem; margin-top:6px;">{message}</div>'
         f"</div>"
@@ -1295,32 +1325,64 @@ def _summary_html(results: list[dict[str, object]], delay_seconds: float) -> str
     )
 
 
-def _build_broadcast_html(results: list[dict[str, object]], crests: dict[str, str]) -> str:
+def _reveal_keyframe_css(animation_name: str) -> str:
+    """<style> con la keyframe del Match Reveal RINOMINATA in modo univoco
+    per questa esecuzione (stesso identico contenuto di @keyframes
+    mdsMatchReveal in MATCHDAY_CSS, solo con un nome diverso ogni volta).
+    Viene iniettato DENTRO lo stesso blocco HTML passato a
+    results_area.markdown(...), quindi arriva al browser insieme alle card
+    che lo referenziano, in un solo colpo."""
+    return (
+        f"<style>@keyframes {animation_name} {{"
+        "0%{opacity:0;transform:translateY(22px) scale(0.88);"
+        "box-shadow:0 0 0 rgba(0,229,255,0),0 4px 12px rgba(0,0,0,0.5);}"
+        "55%{opacity:1;transform:translateY(-3px) scale(1.045);"
+        "box-shadow:0 0 28px rgba(0,229,255,0.65),0 8px 20px rgba(0,0,0,0.55);}"
+        "100%{opacity:1;transform:translateY(0) scale(1);"
+        "box-shadow:0 0 12px rgba(0,229,255,0.14),0 4px 12px rgba(0,0,0,0.5);}"
+        "}</style>"
+    )
+
+
+def _build_broadcast_html(results: list[dict[str, object]], crests: dict[str, str], run_id: str) -> str:
     """Assembla status bar + 10 card + banner di riepilogo in UN SOLO
     blocco HTML. Le card sono avvolte in un contenitore `.mds-cards-grid`
     (grid CSS a 2 colonne, 3 su schermi larghi) cosi da restare compatte
-    per le riprese 9:16 invece di impilarsi una sopra l'altra. Ogni card
-    porta il proprio `--mds-delay` calcolato qui in Python (aritmetica
-    pura, nessuna attesa reale), ma è il CSS — non Python — a far scorrere
-    il tempo e a rivelare gli elementi uno alla volta nel browser. Card
-    i-esima (0-based): delay = MDS_HOOK_DURATION_SECONDS + i ×
-    MDS_CARD_STAGGER_SECONDS, cosi la spaziatura RELATIVA tra una card e la
-    successiva è sempre di 0.6s. La status bar (_status_bar_running_html)
-    ha ALTEZZA FISSA identica a quella dello stato standby: non collassa
-    più a fine animazione, cambia solo il testo al suo interno — è questo
-    che garantisce l'altezza identica al millimetro tra i due stati."""
-    parts: list[str] = [_status_bar_running_html(len(results)), '<div class="mds-cards-grid">']
+    per le riprese 9:16 invece di impilarsi una sopra l'altra.
+
+    `run_id` è un identificatore UNIVOCO generato ad ogni click su SIMULATE
+    (uuid4, vedi render_matchday_simulator_tab): da esso deriva il nome
+    della keyframe di reveal usata da TUTTE le card di questa esecuzione
+    (_reveal_keyframe_css + style inline in _match_card_html). Un nome
+    nuovo ad ogni esecuzione è la garanzia che il browser rieseguita sempre
+    l'animazione da capo, qualunque cosa succeda alla riconciliazione del
+    DOM lato Streamlit.
+
+    Card i-esima (0-based): delay = MDS_HOOK_DURATION_SECONDS + (i+1) ×
+    MDS_CARD_STAGGER_SECONDS → 0.1s, 0.2s, ... 1.0s dall'inizio della
+    cascata, come richiesto. La status bar (_status_bar_running_html) ha
+    ALTEZZA FISSA identica a quella dello stato standby: non collassa più a
+    fine animazione, cambia solo il testo al suo interno — è questo che
+    garantisce l'altezza identica al millimetro tra i due stati."""
+    reveal_animation_name = f"mdsMatchReveal_{run_id}"
+    parts: list[str] = [
+        _reveal_keyframe_css(reveal_animation_name),
+        _status_bar_running_html(len(results)),
+        '<div class="mds-cards-grid">',
+    ]
 
     for index, outcome in enumerate(results):
-        delay = MDS_HOOK_DURATION_SECONDS + index * MDS_CARD_STAGGER_SECONDS
+        delay = MDS_HOOK_DURATION_SECONDS + (index + 1) * MDS_CARD_STAGGER_SECONDS
         if "error" in outcome:
-            parts.append(_error_card_html(outcome["home"], outcome["away"], outcome.get("error"), delay))
+            parts.append(
+                _error_card_html(outcome["home"], outcome["away"], outcome.get("error"), delay, reveal_animation_name)
+            )
         else:
-            parts.append(_match_card_html(outcome["home"], outcome["away"], outcome, crests, delay))
+            parts.append(_match_card_html(outcome["home"], outcome["away"], outcome, crests, delay, reveal_animation_name))
 
     parts.append("</div>")
 
-    summary_delay = MDS_HOOK_DURATION_SECONDS + len(results) * MDS_CARD_STAGGER_SECONDS
+    summary_delay = MDS_HOOK_DURATION_SECONDS + (len(results) + 1) * MDS_CARD_STAGGER_SECONDS
     parts.append(_summary_html(results, summary_delay))
 
     return "".join(parts)
@@ -1441,13 +1503,19 @@ def render_matchday_simulator_tab(teams_data: dict | None = None, ratings_df=Non
         #    ancora.
         results = _run_full_matchday(league, fixtures, calibration_enabled, teams_data, ratings_df)
 
-        # 2) UN SOLO blocco HTML con hook + 10 card + riepilogo, ciascuno con
-        #    il proprio animation-delay calcolato in Python ma ESEGUITO dal
-        #    browser via CSS: è questo, e non un ciclo time.sleep, a
-        #    produrre il reveal a cascata — quindi è immune a qualunque
-        #    comportamento di buffering lato server/hosting. Sostituisce lo
-        #    stato di standby nello stesso placeholder.
-        broadcast_html = _build_broadcast_html(results, crests)
+        # 2) UN SOLO blocco HTML con status bar + 10 card + riepilogo,
+        #    ciascuno con il proprio animation-delay calcolato in Python ma
+        #    ESEGUITO dal browser via CSS: è questo, e non un ciclo
+        #    time.sleep, a produrre il reveal a cascata. `run_id` è un
+        #    identificatore univoco (uuid4) generato ad OGNI click: la
+        #    keyframe di reveal usata dalle card prende il suo nome da
+        #    questo id (vedi _build_broadcast_html), cosi il browser non
+        #    può mai "riconoscere" l'animazione come già eseguita e
+        #    saltarla — ogni simulazione ottiene la sua keyframe, mai
+        #    riusata. Sostituisce lo stato di standby nello stesso
+        #    placeholder.
+        run_id = uuid.uuid4().hex
+        broadcast_html = _build_broadcast_html(results, crests, run_id)
         results_area.markdown(broadcast_html, unsafe_allow_html=True)
     else:
         results_area.markdown(_build_standby_html(league, fixtures, crests), unsafe_allow_html=True)
